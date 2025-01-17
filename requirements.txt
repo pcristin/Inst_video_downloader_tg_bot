@@ -1,0 +1,3 @@
+python-telegram-bot==20.3
+yt-dlp==2023.07.06
+python-dotenv==1.0.0 
