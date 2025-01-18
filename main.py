@@ -41,7 +41,7 @@ async def download_instagram_video(url: str, download_path: str) -> str:
 
     # If the cookie file exists, add it to the yt-dlp options
     if IG_COOKIES_FILE.is_file():
-        ydl_opts['cookiefile'] = str(IG_COOKIES_FILE)
+        ydl_opts['cookies'] = str(IG_COOKIES_FILE)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -89,7 +89,7 @@ def main():
     """
     Main entry point. Set up the bot handlers and start polling.
     """
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build() # type: ignore
 
     # With group privacy off, the following will catch all text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
