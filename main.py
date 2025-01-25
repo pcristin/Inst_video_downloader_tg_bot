@@ -2,7 +2,6 @@ import os
 import re
 import tempfile
 import logging
-import pathlib
 
 from telegram import Update
 from telegram.ext import (
@@ -14,7 +13,7 @@ from telegram.ext import (
 
 from yt_dlp import YoutubeDL
 
-from config import BOT_TOKEN, IG_USERNAME, IG_PASSWORD
+from config import BOT_TOKEN
 
 # Enable logging for convenience
 logging.basicConfig(
@@ -32,16 +31,14 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
-    # Provide Instagram login credentials for authentication
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
         'format': 'mp4',
-        'username': IG_USERNAME,
-        'password': IG_PASSWORD
+        'usenetrc': True  # Enable .netrc authentication
     }
 
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        info = ydl.extract_info(url, download=True, process=True)
         return ydl.prepare_filename(info)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
