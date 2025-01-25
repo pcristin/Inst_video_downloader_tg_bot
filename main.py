@@ -34,12 +34,43 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
         'format': 'mp4',
-        'usenetrc': True  # Enable .netrc authentication
+        'usenetrc': True,
+        # Additional options to help with Instagram
+        'extract_flat': False,
+        'no_warnings': False,
+        'verbose': True,
+        # Instagram specific options
+        'add_header': [
+            'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Cookie:',
+        ],
+        # Force IPv4 to avoid IP-based blocks
+        'source_address': '0.0.0.0',
     }
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True, process=True)
-        return ydl.prepare_filename(info)
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            # First, try to extract video info
+            try:
+                info = ydl.extract_info(url, download=False)
+                logging.info(f"Video info extracted successfully: {info.get('title', 'No title')}")
+            except Exception as e:
+                logging.error(f"Error extracting video info: {str(e)}")
+                raise
+
+            # Then download the video
+            info = ydl.extract_info(url, download=True)
+            video_path = ydl.prepare_filename(info)
+            
+            if not os.path.exists(video_path):
+                raise Exception(f"Video file not found at {video_path}")
+            
+            logging.info(f"Video downloaded successfully to {video_path}")
+            return video_path
+
+    except Exception as e:
+        logging.error(f"Error in download_instagram_video: {str(e)}")
+        raise
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -53,6 +84,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if match:
         url = match.group(1)
+        logging.info(f"Processing Instagram URL: {url}")
 
         # Ensure the chat context is available
         if update.effective_chat is None:
@@ -62,19 +94,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Create a temporary directory to hold our download
         with tempfile.TemporaryDirectory() as tmp_dir:
             try:
+                # Inform user that download is in progress
+                status_message = await update.message.reply_text("Downloading video...")
+
                 # Download the video
                 video_file_path = await download_instagram_video(url, tmp_dir)
 
                 # Send the video, replying to the original message
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=open(video_file_path, 'rb'),
-                    reply_to_message_id=update.message.message_id
-                )
+                with open(video_file_path, 'rb') as video_file:
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=video_file,
+                        reply_to_message_id=update.message.message_id
+                    )
+
+                # Delete the status message
+                await status_message.delete()
 
             except Exception as e:
-                logging.error(f"Error while downloading or sending video: {e}")
-                await update.message.reply_text("Sorry, I couldn't download that video.")
+                error_message = f"Sorry, I couldn't download that video. Error: {str(e)}"
+                logging.error(error_message)
+                await update.message.reply_text(error_message)
                 return
 
             # The file will be automatically cleaned when tmp_dir is removed
@@ -83,12 +123,12 @@ def main():
     """
     Main entry point. Set up the bot handlers and start polling.
     """
-    application = ApplicationBuilder().token(BOT_TOKEN).build() # type: ignore
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # With group privacy off, the following will catch all text messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start the bot
+    logging.info("Bot started and ready to process messages")
     application.run_polling()
 
 if __name__ == '__main__':
