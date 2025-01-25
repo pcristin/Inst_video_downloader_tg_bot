@@ -32,27 +32,47 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     """
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-        'format': 'mp4',
+        'format': 'best',
         'username': IG_USERNAME,
         'password': IG_PASSWORD,
-        'extract_flat': False,
-        'no_warnings': False,
         'verbose': True,
+        'no_warnings': False,
         'add_header': [
-            'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language: en-US,en;q=0.5',
+            'Accept-Encoding: gzip, deflate',
+            'DNT: 1',
+            'Connection: keep-alive',
+            'Upgrade-Insecure-Requests: 1',
+            'Pragma: no-cache',
+            'Cache-Control: no-cache',
         ],
-        'source_address': '0.0.0.0',
-        # Add these options for better authentication handling
-        'cookiesfrombrowser': None,  # Disable browser cookies
-        'quiet': False,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Origin': 'https://www.instagram.com',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.instagram.com/',
+        },
+        'cookiefile': None,
+        'cookiesfrombrowser': None,
         'no_color': True,
-        'extract_flat': True,
+        'age_limit': None,
+        'geo_bypass': True,
+        'extract_flat': False,
         'force_generic_extractor': False,
     }
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
             try:
+                # Pre-configure the extractor
+                ydl.cache.remove()
+                
+                # Download the video
                 info = ydl.extract_info(url, download=True)
                 if info is None:
                     raise Exception("Failed to extract video info")
