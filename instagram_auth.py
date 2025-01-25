@@ -14,20 +14,15 @@ def get_instagram_cookies():
     """
     Automatically logs in to Instagram using Selenium and returns cookies
     """
-    # Create a temporary directory for user data
-    user_data_dir = tempfile.mkdtemp()
-    
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
-    chrome_options.add_argument(f'--user-data-dir={user_data_dir}')
     chrome_options.binary_location = '/usr/bin/chromium'
     
+    driver = webdriver.Chrome(options=chrome_options)
     try:
-        driver = webdriver.Chrome(options=chrome_options)
         driver.get('https://www.instagram.com/accounts/login/')
-        
         logging.info("Waiting for login form...")
         time.sleep(5)
         
@@ -56,29 +51,10 @@ def get_instagram_cookies():
         logging.info(f"Got {len(cookies)} cookies")
         
         # Save cookies to file
-        with open('instagram_cookies.txt', 'w') as f:
+        with open('instagram_cookies.json', 'w') as f:
             json.dump(cookies, f)
-        logging.info("Cookies saved to file")
         
-        driver.quit()
+        return 'instagram_cookies.json'
         
-        # Cleanup
-        try:
-            import shutil
-            shutil.rmtree(user_data_dir)
-        except Exception as e:
-            logging.warning(f"Failed to remove temporary directory: {e}")
-            
-        return True
-        
-    except Exception as e:
-        logging.error(f"Error getting Instagram cookies: {str(e)}")
-        if 'driver' in locals():
-            driver.quit()
-        # Cleanup on error
-        try:
-            import shutil
-            shutil.rmtree(user_data_dir)
-        except Exception as cleanup_error:
-            logging.warning(f"Failed to remove temporary directory: {cleanup_error}")
-        return False 
+    finally:
+        driver.quit() 
