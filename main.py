@@ -14,7 +14,7 @@ from telegram.ext import (
 
 from yt_dlp import YoutubeDL
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, IG_USERNAME, IG_PASSWORD
 
 # Enable logging for convenience
 logging.basicConfig(
@@ -32,16 +32,13 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
-    # Provide a cookies file to help avoid login issues / rate-limits.
-    IG_COOKIES_FILE = pathlib.Path('instagram_cookies.txt')
+    # Provide Instagram login credentials for authentication
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-        'format': 'mp4'
+        'format': 'mp4',
+        'username': IG_USERNAME,
+        'password': IG_PASSWORD
     }
-
-    # If the cookie file exists, add it to the yt-dlp options
-    if IG_COOKIES_FILE.is_file():
-        ydl_opts['cookies'] = str(IG_COOKIES_FILE)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
