@@ -2,6 +2,7 @@ import os
 import re
 import tempfile
 import logging
+import time
 
 from telegram import Update
 from telegram.ext import (
@@ -13,6 +14,8 @@ from telegram.ext import (
 
 from yt_dlp import YoutubeDL
 from config import BOT_TOKEN, IG_USERNAME, IG_PASSWORD
+from instagram_auth import get_instagram_cookies
+import json
 
 # Enable logging for convenience
 logging.basicConfig(
@@ -30,49 +33,24 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
+    # Try to use existing cookies or get new ones
+    cookies_file = 'instagram_cookies.txt'
+    if not os.path.exists(cookies_file) or time.time() - os.path.getmtime(cookies_file) > 86400:  # 24 hours
+        logging.info("Getting fresh Instagram cookies...")
+        if not get_instagram_cookies():
+            raise Exception("Failed to get Instagram cookies")
+    
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
         'format': 'best',
-        'username': IG_USERNAME,
-        'password': IG_PASSWORD,
+        'cookiefile': cookies_file,
         'verbose': True,
         'no_warnings': False,
-        'add_header': [
-            'User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
-            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language: en-US,en;q=0.5',
-            'Accept-Encoding: gzip, deflate',
-            'DNT: 1',
-            'Connection: keep-alive',
-            'Upgrade-Insecure-Requests: 1',
-            'Pragma: no-cache',
-            'Cache-Control: no-cache',
-        ],
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 12_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 105.0.0.11.118 (iPhone11,8; iOS 12_3_1; en_US; en-US; scale=2.00; 828x1792; 165586599)',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Origin': 'https://www.instagram.com',
-            'Connection': 'keep-alive',
-            'Referer': 'https://www.instagram.com/',
-        },
-        'cookiefile': None,
-        'cookiesfrombrowser': None,
-        'no_color': True,
-        'age_limit': None,
-        'geo_bypass': True,
-        'extract_flat': False,
-        'force_generic_extractor': False,
     }
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
             try:
-                # Pre-configure the extractor
-                ydl.cache.remove()
-                
-                # Download the video
                 info = ydl.extract_info(url, download=True)
                 if info is None:
                     raise Exception("Failed to extract video info")
