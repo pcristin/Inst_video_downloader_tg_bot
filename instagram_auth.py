@@ -70,7 +70,7 @@ def get_instagram_cookies():
             logging.info("Login button clicked.")
 
             # Wait for login to complete (you might need to adjust the sleep duration)
-            time.sleep(5)
+            time.sleep(20)
 
             # Check for successful login by looking for the home page element
             if "login" in driver.current_url:
