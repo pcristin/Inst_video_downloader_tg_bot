@@ -12,8 +12,7 @@ from telegram.ext import (
 )
 
 from yt_dlp import YoutubeDL
-
-from config import BOT_TOKEN
+from config import BOT_TOKEN, IG_USERNAME, IG_PASSWORD
 
 # Enable logging for convenience
 logging.basicConfig(
@@ -34,39 +33,40 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     ydl_opts = {
         'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
         'format': 'mp4',
-        'usenetrc': True,
-        # Additional options to help with Instagram
+        'username': IG_USERNAME,
+        'password': IG_PASSWORD,
         'extract_flat': False,
         'no_warnings': False,
         'verbose': True,
-        # Instagram specific options
         'add_header': [
-            'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Cookie:',
+            'User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         ],
-        # Force IPv4 to avoid IP-based blocks
         'source_address': '0.0.0.0',
+        # Add these options for better authentication handling
+        'cookiesfrombrowser': None,  # Disable browser cookies
+        'quiet': False,
+        'no_color': True,
+        'extract_flat': True,
+        'force_generic_extractor': False,
     }
 
     try:
         with YoutubeDL(ydl_opts) as ydl:
-            # First, try to extract video info
             try:
-                info = ydl.extract_info(url, download=False)
-                logging.info(f"Video info extracted successfully: {info.get('title', 'No title')}")
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    raise Exception("Failed to extract video info")
+                
+                video_path = ydl.prepare_filename(info)
+                if not os.path.exists(video_path):
+                    raise Exception(f"Video file not found at {video_path}")
+                
+                logging.info(f"Video downloaded successfully to {video_path}")
+                return video_path
+
             except Exception as e:
                 logging.error(f"Error extracting video info: {str(e)}")
                 raise
-
-            # Then download the video
-            info = ydl.extract_info(url, download=True)
-            video_path = ydl.prepare_filename(info)
-            
-            if not os.path.exists(video_path):
-                raise Exception(f"Video file not found at {video_path}")
-            
-            logging.info(f"Video downloaded successfully to {video_path}")
-            return video_path
 
     except Exception as e:
         logging.error(f"Error in download_instagram_video: {str(e)}")
@@ -123,6 +123,9 @@ def main():
     """
     Main entry point. Set up the bot handlers and start polling.
     """
+    if BOT_TOKEN is None:
+        raise ValueError("BOT_TOKEN is not set in environment variables")
+        
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # With group privacy off, the following will catch all text messages
