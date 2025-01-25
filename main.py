@@ -33,7 +33,7 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
-    # Try to use existing cookies or get new ones
+    # Use 'instagram_cookies.txt' as the cookies file
     cookies_file = 'instagram_cookies.txt'
     if not os.path.exists(cookies_file) or time.time() - os.path.getmtime(cookies_file) > 86400:  # 24 hours
         logging.info("Getting fresh Instagram cookies...")
