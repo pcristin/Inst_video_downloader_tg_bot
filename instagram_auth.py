@@ -42,7 +42,7 @@ def get_instagram_cookies():
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument(f'--user-data-dir={user_data_dir}')  # Unique user data directory
-        chrome_options.binary_location = '/usr/bin/chromium'  # Update this path if different
+        chrome_options.binary_location = '/usr/bin/chromedriver'  # Update this path if different
 
         # Initialize the WebDriver
         driver = webdriver.Chrome(options=chrome_options)
