@@ -13,7 +13,13 @@ def convert_cookies_to_netscape(cookies_json, output_file):
     """
     Converts JSON cookies from Selenium to Netscape format for yt-dlp.
     """
-    with open(output_file, 'w') as f:
+    # Determine newline format based on OS
+    if os.name == 'nt':  # Windows
+        newline = '\r\n'
+    else:  # Unix/Linux/Mac
+        newline = '\n'
+
+    with open(output_file, 'w', newline=newline) as f:
         f.write("# Netscape HTTP Cookie File\n")
         for cookie in cookies_json:
             # Ensure all required fields are present
@@ -21,12 +27,11 @@ def convert_cookies_to_netscape(cookies_json, output_file):
                 continue
             domain = cookie['domain']
             
-            # Determine the flag based on the presence of a leading dot
-            if domain.startswith('.'):
-                flag = 'TRUE'
-                domain = domain[1:]
-            else:
-                flag = 'FALSE'
+            # Add leading dot if not present
+            if not domain.startswith('.'):
+                domain = '.' + domain
+            
+            flag = 'TRUE'  # Since leading dot is present
             
             path = cookie.get('path', '/')
             secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
@@ -102,4 +107,7 @@ def get_instagram_cookies():
 
     finally:
         driver.quit()
-        logging.info("WebDriver session closed.") 
+        logging.info("WebDriver session closed.")
+
+if __name__ == "__main__":
+    get_instagram_cookies()

@@ -28,51 +28,9 @@ logging.basicConfig(
 # Define a regex pattern to detect Instagram video or reel links
 INSTAGRAM_VIDEO_PATTERN = r"(https?://(?:www\.)?instagram\.com/(?:p|reel)/[^ ]+)"
 
-async def download_instagram_video(url: str, download_path: str) -> str:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Use yt-dlp to download Instagram video to a temporary folder.
-    Returns the path to the downloaded file.
-    """
-    # Use 'instagram_cookies.txt' as the cookies file
-    cookies_file = 'instagram_cookies.txt'
-    if not os.path.exists(cookies_file) or time.time() - os.path.getmtime(cookies_file) > 86400:  # 24 hours
-        logging.info("Getting fresh Instagram cookies...")
-        if not get_instagram_cookies():
-            raise Exception("Failed to get Instagram cookies")
-    
-    ydl_opts = {
-        'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-        'format': 'best',
-        'cookiefile': cookies_file,
-        'verbose': True,
-        'no_warnings': False,
-    }
-
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    raise Exception("Failed to extract video info")
-                
-                video_path = ydl.prepare_filename(info)
-                if not os.path.exists(video_path):
-                    raise Exception(f"Video file not found at {video_path}")
-                
-                logging.info(f"Video downloaded successfully to {video_path}")
-                return video_path
-
-            except Exception as e:
-                logging.error(f"Error extracting video info: {str(e)}")
-                raise
-
-    except Exception as e:
-        logging.error(f"Error in download_instagram_video: {str(e)}")
-        raise
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Check the message for an Instagram link, download the video, and send it as a reply.
+    Handles incoming messages and processes Instagram video links.
     """
     if not update.message or not update.message.text:
         return
@@ -117,11 +75,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # The file will be automatically cleaned when tmp_dir is removed
 
+async def download_instagram_video(url: str, download_path: str) -> str:
+    """
+    Use yt-dlp to download Instagram video to a temporary folder.
+    Returns the path to the downloaded file.
+    """
+    # Use 'instagram_cookies.txt' as the cookies file
+    cookies_file = 'instagram_cookies.txt'
+    if not os.path.exists(cookies_file) or time.time() - os.path.getmtime(cookies_file) > 86400:  # 24 hours
+        logging.info("Getting fresh Instagram cookies...")
+        if not get_instagram_cookies():
+            raise Exception("Failed to get Instagram cookies")
+    
+    ydl_opts = {
+        'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
+        'format': 'best',
+        'cookiefile': cookies_file,
+        'verbose': True,
+        'no_warnings': False,
+    }
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    raise Exception("Failed to extract video info")
+                
+                video_path = ydl.prepare_filename(info)
+                if not os.path.exists(video_path):
+                    raise Exception(f"Video file not found at {video_path}")
+                
+                logging.info(f"Video downloaded successfully to {video_path}")
+                return video_path
+
+            except Exception as e:
+                logging.error(f"Error extracting video info: {str(e)}")
+                raise
+
+    except Exception as e:
+        logging.error(f"Error in download_instagram_video: {str(e)}")
+        raise
+
 def main():
     """
     Main entry point. Set up the bot handlers and start polling.
     """
-    if BOT_TOKEN is None:
+    if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is not set in environment variables")
         
     application = ApplicationBuilder().token(BOT_TOKEN).build()
