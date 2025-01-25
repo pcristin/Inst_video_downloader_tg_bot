@@ -20,14 +20,21 @@ def convert_cookies_to_netscape(cookies_json, output_file):
             if 'domain' not in cookie or 'name' not in cookie or 'value' not in cookie:
                 continue
             domain = cookie['domain']
+            
+            # Determine the flag based on the presence of a leading dot
             if domain.startswith('.'):
+                flag = 'TRUE'
                 domain = domain[1:]
-            flag = 'TRUE' if cookie.get('secure', False) else 'FALSE'
+            else:
+                flag = 'FALSE'
+            
             path = cookie.get('path', '/')
             secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
+            # Use '0' for session cookies if 'expiry' is not set
             expiration = str(int(cookie.get('expiry', 0)))
             name = cookie['name']
-            value = cookie['value']
+            value = cookie['value'].strip('"')  # Remove surrounding quotes if any
+            
             f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n")
 
 def get_instagram_cookies():
