@@ -12,35 +12,40 @@ from config import IG_USERNAME, IG_PASSWORD
 def convert_cookies_to_netscape(cookies_json, output_file):
     """
     Converts JSON cookies from Selenium to Netscape format for yt-dlp.
+    Ensures proper newline format and header for the cookies file.
     """
-    # Determine newline format based on OS
-    if os.name == 'nt':  # Windows
-        newline = '\r\n'
-    else:  # Unix/Linux/Mac
-        newline = '\n'
-
-    with open(output_file, 'w', newline=newline) as f:
+    # Always use Unix-style newlines for cookie files
+    with open(output_file, 'w', newline='\n', encoding='utf-8') as f:
+        # Write the required header
         f.write("# Netscape HTTP Cookie File\n")
+        f.write("# https://curl.haxx.se/rfc/cookie_spec.html\n")
+        f.write("# This is a generated file!  Do not edit.\n\n")
+        
         for cookie in cookies_json:
-            # Ensure all required fields are present
-            if 'domain' not in cookie or 'name' not in cookie or 'value' not in cookie:
+            # Skip invalid cookies
+            if not all(k in cookie for k in ('domain', 'name', 'value')):
                 continue
+                
             domain = cookie['domain']
-            
-            # Add leading dot if not present
-            if not domain.startswith('.'):
+            # Remove leading dot if present (we'll add it back)
+            domain = domain.lstrip('.')
+            # Always add leading dot for Instagram domains
+            if 'instagram.com' in domain:
                 domain = '.' + domain
-            
-            flag = 'TRUE'  # Since leading dot is present
-            
+                
+            flag = 'TRUE'
             path = cookie.get('path', '/')
-            secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
-            # Use '0' for session cookies if 'expiry' is not set
-            expiration = str(int(cookie.get('expiry', 0)))
+            secure = 'TRUE' if cookie.get('secure', True) else 'FALSE'
+            expiry = int(cookie.get('expiry', 0))
             name = cookie['name']
-            value = cookie['value'].strip('"')  # Remove surrounding quotes if any
+            value = cookie['value']
             
-            f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n")
+            # Ensure proper escaping of values
+            value = value.replace('\t', '\\t').replace('\n', '\\n').replace('\r', '\\r')
+            
+            # Write cookie in exact Netscape format with tab separators
+            cookie_line = f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n"
+            f.write(cookie_line)
 
 def get_instagram_cookies():
     """
