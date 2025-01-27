@@ -80,42 +80,45 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
-    # Use 'instagram_cookies.txt' as the cookies file
-    cookies_file = 'instagram_cookies.txt'
-    if not os.path.exists(cookies_file) or time.time() - os.path.getmtime(cookies_file) > 86400:  # 24 hours
-        logging.info("Getting fresh Instagram cookies...")
-        if not get_instagram_cookies():
-            raise Exception("Failed to get Instagram cookies")
-    
-    ydl_opts = {
-        'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-        'format': 'best',
-        'cookiefile': cookies_file,
-        'verbose': True,
-        'no_warnings': False,
-    }
+    async def try_download(retry=False):
+        if retry:
+            logging.info("Retrying with fresh cookies...")
+            if not get_instagram_cookies():
+                raise Exception("Failed to get fresh Instagram cookies")
+        
+        ydl_opts = {
+            'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
+            'format': 'best',
+            'cookiefile': 'instagram_cookies.txt',
+            'verbose': True,
+            'no_warnings': False,
+        }
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception("Failed to extract video info")
+            
+            video_path = ydl.prepare_filename(info)
+            if not os.path.exists(video_path):
+                raise Exception(f"Video file not found at {video_path}")
+            
+            logging.info(f"Video downloaded successfully to {video_path}")
+            return video_path
 
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    raise Exception("Failed to extract video info")
-                
-                video_path = ydl.prepare_filename(info)
-                if not os.path.exists(video_path):
-                    raise Exception(f"Video file not found at {video_path}")
-                
-                logging.info(f"Video downloaded successfully to {video_path}")
-                return video_path
-
-            except Exception as e:
-                logging.error(f"Error extracting video info: {str(e)}")
-                raise
-
+        # First attempt
+        return await try_download(retry=False)
     except Exception as e:
-        logging.error(f"Error in download_instagram_video: {str(e)}")
-        raise
+        error_str = str(e)
+        # Check if the error is related to authentication/cookies
+        if "login required" in error_str or "rate-limit reached" in error_str:
+            logging.info("Cookie expired or authentication failed, getting fresh cookies...")
+            # Second attempt with fresh cookies
+            return await try_download(retry=True)
+        else:
+            # If it's a different error, raise it
+            raise
 
 def main():
     """
