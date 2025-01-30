@@ -17,11 +17,14 @@ from config import BOT_TOKEN, IG_USERNAME, IG_PASSWORD
 from instagram_auth import get_instagram_cookies
 import json
 
-# Enable logging for convenience
+# Configure root logger
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# Set HTTPX logger to WARNING level to suppress INFO messages
+logging.getLogger('httpx').setLevel(logging.WARNING)
 
 # NOTE: Make sure group privacy is turned OFF in BotFather if you want to see all messages in the group.
 
