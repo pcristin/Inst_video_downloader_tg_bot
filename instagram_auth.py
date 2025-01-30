@@ -78,6 +78,90 @@ def human_like_typing(element, text):
         element.send_keys(char)
         sleep(random.uniform(0.1, 0.3))  # Random delay between keystrokes
 
+def browse_feed(driver):
+    """Simulates natural feed browsing behavior"""
+    try:
+        # Scroll a random number of times
+        scroll_times = random.randint(3, 7)
+        for _ in range(scroll_times):
+            # Random scroll amount
+            scroll_amount = random.randint(300, 1000)
+            driver.execute_script(f"window.scrollTo(0, window.scrollY + {scroll_amount})")
+            
+            # Random pause between scrolls
+            sleep(random.uniform(2.0, 5.0))
+            
+            # 30% chance to like a post
+            if random.random() < 0.3:
+                try:
+                    # Find all like buttons in view
+                    like_buttons = driver.find_elements(By.CSS_SELECTOR, "button svg[aria-label='Like']")
+                    if like_buttons:
+                        # Randomly choose one to like
+                        button = random.choice(like_buttons)
+                        random_mouse_movement(driver, button)
+                        button.click()
+                        logging.info("Liked a post")
+                        sleep(random.uniform(1.0, 3.0))
+                except Exception as e:
+                    logging.warning(f"Failed to like post: {e}")
+            
+            # 20% chance to view a post in detail
+            if random.random() < 0.2:
+                try:
+                    posts = driver.find_elements(By.CSS_SELECTOR, "article a")
+                    if posts:
+                        post = random.choice(posts)
+                        random_mouse_movement(driver, post)
+                        post.click()
+                        sleep(random.uniform(3.0, 7.0))
+                        
+                        # 20% chance to read comments
+                        if random.random() < 0.2:
+                            driver.execute_script(
+                                f"window.scrollTo(0, {random.randint(100, 300)})"
+                            )
+                            sleep(random.uniform(2.0, 4.0))
+                        
+                        # Close post
+                        close_button = driver.find_element(By.CSS_SELECTOR, "button svg[aria-label='Close']")
+                        random_mouse_movement(driver, close_button)
+                        close_button.click()
+                except Exception as e:
+                    logging.warning(f"Failed to interact with post: {e}")
+    except Exception as e:
+        logging.warning(f"Error during feed browsing: {e}")
+
+def watch_reels(driver):
+    """Simulates watching reels with natural behavior"""
+    try:
+        # Visit reels page
+        driver.get('https://www.instagram.com/reels/')
+        sleep(random.uniform(2.0, 4.0))
+        
+        # Watch 2-4 reels
+        watch_count = random.randint(2, 4)
+        for _ in range(watch_count):
+            # Watch each reel for 5-15 seconds
+            sleep(random.uniform(5.0, 15.0))
+            
+            # 20% chance to like the reel
+            if random.random() < 0.2:
+                try:
+                    like_button = driver.find_element(By.CSS_SELECTOR, "button svg[aria-label='Like']")
+                    random_mouse_movement(driver, like_button)
+                    like_button.click()
+                    logging.info("Liked a reel")
+                except Exception as e:
+                    logging.warning(f"Failed to like reel: {e}")
+            
+            # Scroll to next reel
+            driver.execute_script("window.scrollTo(0, window.scrollY + 800)")
+            sleep(random.uniform(1.0, 3.0))
+            
+    except Exception as e:
+        logging.warning(f"Error during reels watching: {e}")
+
 def get_instagram_cookies():
     """
     Automatically logs in to Instagram using Selenium with human-like behavior
@@ -159,20 +243,19 @@ def get_instagram_cookies():
         )
         logging.info("Login process completed.")
         
+        # After successful login
+        
+        # 70% chance to browse feed
+        if random.random() < 0.7:
+            browse_feed(driver)
+        
+        # 50% chance to watch reels
+        if random.random() < 0.5:
+            watch_reels(driver)
+        
         # Random delay before getting cookies
         sleep(random.uniform(2.0, 4.0))
         
-        # Simulate some random scrolling after login
-        scroll_amount = random.randint(100, 500)
-        driver.execute_script(f"window.scrollTo(0, {scroll_amount})")
-        human_like_delay()
-        driver.execute_script(f"window.scrollTo({scroll_amount}, 0)")
-        
-        # Check login success
-        if "login" in driver.current_url:
-            logging.error("Login failed. Please check your credentials.")
-            return None
-            
         # Get cookies
         cookies = driver.get_cookies()
         logging.info(f"Retrieved {len(cookies)} cookies.")
