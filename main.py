@@ -61,9 +61,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Send the video, replying to the original message
                 with open(video_file_path, 'rb') as video_file:
-                    await context.bot.send_document(
+                    await context.bot.send_video(
                         chat_id=update.effective_chat.id,
-                        document=video_file,
+                        video=video_file,
                         reply_to_message_id=update.message.message_id
                     )
 
@@ -95,20 +95,16 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     'cookiefile': 'instagram_cookies.txt',
     'verbose': True,
     'no_warnings': False,
-    # Force re-encoding to mp4 so that filters are applied:
+    # Force re-encoding to MP4 (ensuring filters are applied)
     'recode_video': 'mp4',
-    # (Remove or comment out merge_output_format and postprocessors)
-    # 'merge_output_format': 'mp4',
-    # 'postprocessors': [{
-    #     'key': 'FFmpegVideoRemuxer',
-    #     'preferedformat': 'mp4',
-    # }],
-    # Updated FFmpeg options for correct aspect ratio on Instagram Reels
     'ffmpeg_args': [
-        # Scale preserving aspect ratio and pad to 1080x1920
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
-        # High quality encoding settings
+        # Scale while preserving aspect ratio and pad to 1080x1920; set SAR to 1:1
+        '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,'
+               'pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+        # Use H.264 with explicit parameters to match Telegram’s expectations
         '-c:v', 'libx264',
+        '-profile:v', 'baseline',
+        '-level', '3.0',
         '-preset', 'slow',
         '-crf', '18',
         '-c:a', 'aac',
