@@ -90,24 +90,31 @@ async def download_instagram_video(url: str, download_path: str) -> str:
                 raise Exception("Failed to get fresh Instagram cookies")
         
         ydl_opts = {
-    'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-    'format': 'best',
-    'cookiefile': 'instagram_cookies.txt',
-    'verbose': True,
-    'no_warnings': False,
-    'recode_video': 'mp4',  # Force re-encoding so our filters are applied
-    'ffmpeg_args': [
-        # Re-encode the video to exactly 320x480 and set SAR to 1:1
-        '-vf', 'scale=320:480,setsar=1',
-        # Use H.264 with baseline profile and level 3.0
-        '-c:v', 'libx264',
-        '-profile:v', 'baseline',
-        '-level', '3.0',
-        '-preset', 'medium',
-        '-crf', '23',  # Adjust as necessary for quality/size balance
-        '-c:a', 'aac',
+            'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
+            'format': 'best',
+            'cookiefile': 'instagram_cookies.txt',
+            'verbose': True,
+            'no_warnings': False,
+            'recode_video': 'mp4',  # Force re-encoding so our filters are applied
+            'ffmpeg_args': [
+            # Convert input to yuv420p to ensure a known starting format, then scale and pad
+            '-vf', (
+                'format=yuv420p,'
+                'scale=320:480:force_original_aspect_ratio=decrease,'
+                'pad=320:480:(ow-iw)/2:(oh-ih)/2,'
+                'setsar=1'
+            ),
+            # Re-encode using libx264 with H.264 baseline profile and level 3.0
+            '-c:v', 'libx264',
+            '-profile:v', 'baseline',
+            '-level', '3.0',
+            '-preset', 'medium',
+            '-crf', '23',
+            # Force container-level aspect ratio to exactly 320:480
+            '-aspect', '320:480',
+            # Audio encoding settings
+            '-c:a', 'aac',
         '-b:a', '192k',
-        '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart'
     ],
 }
