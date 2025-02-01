@@ -95,18 +95,16 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     'cookiefile': 'instagram_cookies.txt',
     'verbose': True,
     'no_warnings': False,
-    # Force re-encoding to MP4 (ensuring filters are applied)
-    'recode_video': 'mp4',
+    'recode_video': 'mp4',  # Force re-encoding so our filters are applied
     'ffmpeg_args': [
-        # Scale while preserving aspect ratio and pad to 1080x1920; set SAR to 1:1
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,'
-               'pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
-        # Use H.264 with explicit parameters to match Telegram’s expectations
+        # Re-encode the video to exactly 320x480 and set SAR to 1:1
+        '-vf', 'scale=320:480,setsar=1',
+        # Use H.264 with baseline profile and level 3.0
         '-c:v', 'libx264',
         '-profile:v', 'baseline',
         '-level', '3.0',
-        '-preset', 'slow',
-        '-crf', '24',
+        '-preset', 'medium',
+        '-crf', '23',  # Adjust as necessary for quality/size balance
         '-c:a', 'aac',
         '-b:a', '192k',
         '-pix_fmt', 'yuv420p',
