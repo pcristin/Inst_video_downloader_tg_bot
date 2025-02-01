@@ -101,15 +101,20 @@ async def download_instagram_video(url: str, download_path: str) -> str:
                 'key': 'FFmpegVideoRemuxer',
                 'preferedformat': 'mp4',
             }],
-            # FFmpeg options specifically for vertical videos
+            # New FFmpeg options for proper aspect ratio
             'ffmpeg_args': [
-                # This will maintain aspect ratio for both horizontal and vertical videos
-                '-vf', 'scale=w=720:h=1280:force_original_aspect_ratio=preserve,pad=720:1280:(ow-iw)/2:(oh-ih)/2',
+                # First get video dimensions
+                '-vf', 'scale=iw*min(1080/iw\,1920/ih):ih*min(1080/iw\,1920/ih),pad=1080:1920:(1080-iw)/2:(1920-ih)/2:black',
+                # High quality encoding settings
                 '-c:v', 'libx264',
-                '-crf', '23',
-                '-preset', 'medium',
+                '-preset', 'slow',  # Better quality
+                '-crf', '18',       # Higher quality (lower = better)
                 '-c:a', 'aac',
-                '-b:a', '128k'
+                '-b:a', '192k',     # Better audio quality
+                # Ensure proper pixel format
+                '-pix_fmt', 'yuv420p',
+                # Fast start for web playback
+                '-movflags', '+faststart'
             ],
         }
 
