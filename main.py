@@ -61,9 +61,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 # Send the video, replying to the original message
                 with open(video_file_path, 'rb') as video_file:
-                    await context.bot.send_video(
+                    await context.bot.send_document(
                         chat_id=update.effective_chat.id,
-                        video=video_file,
+                        document=video_file,
                         reply_to_message_id=update.message.message_id
                     )
 
