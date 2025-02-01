@@ -95,15 +95,17 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     'cookiefile': 'instagram_cookies.txt',
     'verbose': True,
     'no_warnings': False,
-    # Format and encoding options
-    'merge_output_format': 'mp4',
-    'postprocessors': [{
-        'key': 'FFmpegVideoRemuxer',
-        'preferedformat': 'mp4',
-    }],
+    # Force re-encoding to mp4 so that filters are applied:
+    'recode_video': 'mp4',
+    # (Remove or comment out merge_output_format and postprocessors)
+    # 'merge_output_format': 'mp4',
+    # 'postprocessors': [{
+    #     'key': 'FFmpegVideoRemuxer',
+    #     'preferedformat': 'mp4',
+    # }],
     # Updated FFmpeg options for correct aspect ratio on Instagram Reels
     'ffmpeg_args': [
-        # Scale down preserving aspect ratio, then pad to 1080x1920 and set SAR to 1:1
+        # Scale preserving aspect ratio and pad to 1080x1920
         '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
         # High quality encoding settings
         '-c:v', 'libx264',
