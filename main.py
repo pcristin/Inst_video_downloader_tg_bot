@@ -83,7 +83,7 @@ async def download_instagram_video(url: str, download_path: str) -> str:
     Use yt-dlp to download Instagram video to a temporary folder.
     Returns the path to the downloaded file.
     """
-    async def try_download(retry=False):
+    def try_download(retry=False):
         if retry:
             logging.info("Retrying with fresh cookies...")
             if not get_instagram_cookies():
@@ -103,8 +103,8 @@ async def download_instagram_video(url: str, download_path: str) -> str:
             }],
             # New FFmpeg options for proper aspect ratio
             'ffmpeg_args': [
-                # First get video dimensions
-                '-vf', 'scale=iw*min(1080/iw\,1920/ih):ih*min(1080/iw\,1920/ih),pad=1080:1920:(1080-iw)/2:(1920-ih)/2:black',
+                # Preserve original aspect ratio without forced scaling
+                '-vf', 'scale=-2:1920:force_original_aspect_ratio=decrease',
                 # High quality encoding settings
                 '-c:v', 'libx264',
                 '-preset', 'slow',  # Better quality
@@ -132,14 +132,14 @@ async def download_instagram_video(url: str, download_path: str) -> str:
 
     try:
         # First attempt
-        return await try_download(retry=False)
+        return try_download(retry=False)
     except Exception as e:
         error_str = str(e)
         # Check if the error is related to authentication/cookies
         if "login required" in error_str or "rate-limit reached" in error_str:
             logging.info("Cookie expired or authentication failed, getting fresh cookies...")
             # Second attempt with fresh cookies
-            return await try_download(retry=True)
+            return try_download(retry=True)
         else:
             # If it's a different error, raise it
             raise
