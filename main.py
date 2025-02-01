@@ -104,7 +104,7 @@ async def download_instagram_video(url: str, download_path: str) -> str:
             # New FFmpeg options for proper aspect ratio
             'ffmpeg_args': [
                 # Auto-detect rotation and properly scale while maintaining aspect ratio
-                '-vf', 'scale=w=trunc(oh*a/2)*2:h=min(1920\,ih)',
+                '-vf', 'scale=if(gt(iw,ih),min(iw,1920),-2):if(lt(iw,ih),min(ih,1920),-2)',
                 # High quality encoding settings
                 '-c:v', 'libx264',
                 '-preset', 'slow',  # Better quality
