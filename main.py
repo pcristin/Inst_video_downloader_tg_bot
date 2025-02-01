@@ -91,33 +91,25 @@ async def download_instagram_video(url: str, download_path: str) -> str:
         
         ydl_opts = {
             'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-            'format': 'best[height<=1080]',  # Limit height to 1080p
+            'format': 'best',
             'cookiefile': 'instagram_cookies.txt',
             'verbose': True,
             'no_warnings': False,
-            # Video processing options
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }, {
-                # Ensure proper encoding and scaling
-                'key': 'FFmpegVideo',
-                'prefer_ffmpeg': True,
-                # Keep original aspect ratio and use high quality encoding
-                'opts': [
-                    '-vf', 'scale=iw*min(1920/iw\,1080/ih):ih*min(1920/iw\,1080/ih)',
-                    '-c:v', 'libx264',
-                    '-preset', 'medium',  # Balance between quality and encoding speed
-                    '-crf', '23',  # Quality level (lower = better, 23 is default)
-                    '-c:a', 'aac',
-                    '-b:a', '128k',
-                    '-movflags', '+faststart'
-                ]
-            }],
-            # Additional format selection options
+            # Format and encoding options
             'merge_output_format': 'mp4',
-            'prefer_ffmpeg': True,
-            'keepvideo': False,
+            'postprocessors': [{
+                'key': 'FFmpegVideoRemuxer',
+                'preferedformat': 'mp4',
+            }],
+            # FFmpeg options for proper scaling
+            'ffmpeg_args': [
+                '-vf', 'scale=w=1280:h=720:force_original_aspect_ratio=decrease',
+                '-c:v', 'libx264',
+                '-crf', '23',
+                '-preset', 'medium',
+                '-c:a', 'aac',
+                '-b:a', '128k'
+            ],
         }
 
         with YoutubeDL(ydl_opts) as ydl:
