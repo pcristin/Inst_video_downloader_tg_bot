@@ -106,7 +106,7 @@ async def download_instagram_video(url: str, download_path: str) -> str:
         '-profile:v', 'baseline',
         '-level', '3.0',
         '-preset', 'slow',
-        '-crf', '18',
+        '-crf', '23',
         '-c:a', 'aac',
         '-b:a', '192k',
         '-pix_fmt', 'yuv420p',
