@@ -90,33 +90,31 @@ async def download_instagram_video(url: str, download_path: str) -> str:
                 raise Exception("Failed to get fresh Instagram cookies")
         
         ydl_opts = {
-            'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
-            'format': 'best',
-            'cookiefile': 'instagram_cookies.txt',
-            'verbose': True,
-            'no_warnings': False,
-            # Format and encoding options
-            'merge_output_format': 'mp4',
-            'postprocessors': [{
-                'key': 'FFmpegVideoRemuxer',
-                'preferedformat': 'mp4',
-            }],
-            # New FFmpeg options for proper aspect ratio
-            'ffmpeg_args': [
-                # Auto-detect rotation and properly scale while maintaining aspect ratio
-                '-vf', 'scale=if(gt(iw,ih),min(iw,1920),-2):if(lt(iw,ih),min(ih,1920),-2)',
-                # High quality encoding settings
-                '-c:v', 'libx264',
-                '-preset', 'slow',  # Better quality
-                '-crf', '18',       # Higher quality (lower = better)
-                '-c:a', 'aac',
-                '-b:a', '192k',     # Better audio quality
-                # Ensure proper pixel format
-                '-pix_fmt', 'yuv420p',
-                # Fast start for web playback
-                '-movflags', '+faststart'
-            ],
-        }
+    'outtmpl': os.path.join(download_path, '%(title)s.%(ext)s'),
+    'format': 'best',
+    'cookiefile': 'instagram_cookies.txt',
+    'verbose': True,
+    'no_warnings': False,
+    # Format and encoding options
+    'merge_output_format': 'mp4',
+    'postprocessors': [{
+        'key': 'FFmpegVideoRemuxer',
+        'preferedformat': 'mp4',
+    }],
+    # Updated FFmpeg options for correct aspect ratio on Instagram Reels
+    'ffmpeg_args': [
+        # Scale down preserving aspect ratio, then pad to 1080x1920 and set SAR to 1:1
+        '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+        # High quality encoding settings
+        '-c:v', 'libx264',
+        '-preset', 'slow',
+        '-crf', '18',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart'
+    ],
+}
 
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
