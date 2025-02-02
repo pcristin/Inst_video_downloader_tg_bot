@@ -24,7 +24,7 @@ class TwoFactorAuth:
         """
         provisioning_uri = self.totp.provisioning_uri(
             name=settings.IG_USERNAME,
-            issuer_name="Instagram Video Bot"
+            issuer_name="Instagram"
         )
         
         qr = qrcode.main.QRCode(version=1, box_size=10, border=5)
