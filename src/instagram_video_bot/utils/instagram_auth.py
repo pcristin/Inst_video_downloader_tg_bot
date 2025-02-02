@@ -42,14 +42,12 @@ def get_chrome_options() -> Options:
     
     if platform.system().lower() == "linux":
         # Specific options for Ubuntu Chromium
-        chrome_options.binary_location = "/snap/bin/chromium"
-        chrome_options.add_argument("--headless")  # Use old headless mode for Ubuntu's Chromium
-        # Fix DevToolsActivePort error
-        chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.binary_location = "/usr/bin/chromedriver"  # Changed back to standard path
+        chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument('--disable-gpu')
-        # Add user data directory
+        chrome_options.add_argument("--remote-debugging-port=9222")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
     else:
         chrome_options.add_argument("--headless=new")
@@ -72,19 +70,8 @@ def get_chrome_options() -> Options:
 def get_webdriver() -> webdriver.Chrome:
     """Create and configure Chrome WebDriver based on OS."""
     try:
-        os_name = platform.system().lower()
-        
-        if os_name == "linux":
-            # For Linux, use latest ChromeDriver
-            driver_manager = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM)
-        else:
-            driver_manager = ChromeDriverManager()
-        
-        driver_path = driver_manager.install()
-        service = Service(
-            driver_path,
-            log_path='/tmp/chromedriver.log'  # Add log path for debugging
-        )
+        # Use system's ChromeDriver
+        service = Service("/usr/bin/chromedriver")
         
         driver = webdriver.Chrome(
             service=service,
