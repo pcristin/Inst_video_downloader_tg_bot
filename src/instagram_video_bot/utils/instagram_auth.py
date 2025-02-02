@@ -118,25 +118,39 @@ def refresh_instagram_cookies() -> bool:
         
         # Initialize Chrome driver with updated configuration
         driver = get_webdriver()
+        wait = WebDriverWait(driver, 20)  # Increased timeout
         
         try:
             # Navigate to Instagram login page
             driver.get('https://www.instagram.com/accounts/login/')
-            wait = WebDriverWait(driver, 10)
+            logger.info("Loaded Instagram login page")
             
-            # Wait for and fill in the login form
+            # Wait for login form to be fully loaded
+            wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "form[id='loginForm']"))
+            )
+            
+            # Wait and fill in the login form
             username_input = wait.until(
-                EC.presence_of_element_located((By.NAME, "username"))
+                EC.element_to_be_clickable((By.NAME, "username"))
             )
             password_input = wait.until(
-                EC.presence_of_element_located((By.NAME, "password"))
+                EC.element_to_be_clickable((By.NAME, "password"))
             )
             
+            # Clear and fill inputs
+            username_input.clear()
             username_input.send_keys(settings.IG_USERNAME)
+            password_input.clear()
             password_input.send_keys(settings.IG_PASSWORD)
+            logger.info("Filled login credentials")
             
-            # Submit the form
-            password_input.submit()
+            # Find and click the login button
+            login_button = wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+            )
+            login_button.click()
+            logger.info("Clicked login button")
             
             # Handle 2FA if configured
             if settings.TOTP_SECRET:
@@ -149,20 +163,36 @@ def refresh_instagram_cookies() -> bool:
                     # Generate and enter 2FA code
                     auth = TwoFactorAuth()
                     code = auth.get_current_code()
+                    code_input.clear()
                     code_input.send_keys(code)
-                    code_input.submit()
                     
+                    # Find and click the verify button
+                    verify_button = wait.until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='button']"))
+                    )
+                    verify_button.click()
                     logger.info("2FA code submitted")
+                    
                 except Exception as e:
                     logger.error(f"Failed to handle 2FA: {str(e)}")
                     return False
             
-            # Wait for successful login
-            wait.until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "span[role='link']")
-                )
-            )
+            # Wait for successful login by checking multiple possible elements
+            try:
+                wait.until(lambda d: any([
+                    len(d.find_elements(By.CSS_SELECTOR, "span[role='link']")) > 0,
+                    len(d.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0,
+                    len(d.find_elements(By.CSS_SELECTOR, "a[href='/']")) > 0
+                ]))
+                logger.info("Successfully logged in")
+            except Exception as e:
+                logger.error(f"Failed to verify login success: {str(e)}")
+                # Check for error messages
+                error_elements = driver.find_elements(By.CSS_SELECTOR, "p[role='alert']")
+                if error_elements:
+                    error_message = error_elements[0].text
+                    logger.error(f"Login error message: {error_message}")
+                return False
             
             # Get cookies
             cookies = driver.get_cookies()
