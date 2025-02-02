@@ -44,17 +44,28 @@ def get_chrome_options() -> Options:
         # Specific options for Ubuntu Chromium
         chrome_options.binary_location = "/snap/bin/chromium"
         chrome_options.add_argument("--headless")  # Use old headless mode for Ubuntu's Chromium
+        # Fix DevToolsActivePort error
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument('--disable-gpu')
+        # Add user data directory
+        chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
     else:
         chrome_options.add_argument("--headless=new")
-        
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-gpu")
+    
     # Common options
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-notifications")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-dev-tools")
+    chrome_options.add_argument("--no-default-browser-check")
+    chrome_options.add_argument("--ignore-certificate-errors")
+    chrome_options.add_argument("--disable-popup-blocking")
     
     return chrome_options
 
@@ -64,16 +75,16 @@ def get_webdriver() -> webdriver.Chrome:
         os_name = platform.system().lower()
         
         if os_name == "linux":
-            # Use specific ChromeDriver version for Ubuntu's Chromium
-            driver_manager = ChromeDriverManager(
-                chrome_type=ChromeType.CHROMIUM,
-                driver_version="85.0.4183.83"  # Match Ubuntu's Chromium version
-            )
+            # For Linux, use latest ChromeDriver
+            driver_manager = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM)
         else:
             driver_manager = ChromeDriverManager()
         
         driver_path = driver_manager.install()
-        service = Service(driver_path)
+        service = Service(
+            driver_path,
+            log_path='/tmp/chromedriver.log'  # Add log path for debugging
+        )
         
         driver = webdriver.Chrome(
             service=service,
