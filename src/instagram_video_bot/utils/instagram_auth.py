@@ -14,6 +14,7 @@ from selenium.webdriver.support.wait import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from ..config.settings import settings
+from .two_factor import TwoFactorAuth
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,25 @@ def refresh_instagram_cookies() -> bool:
             
             # Submit the form
             password_input.submit()
+            
+            # Handle 2FA if configured
+            if settings.TOTP_SECRET:
+                try:
+                    # Wait for 2FA input field
+                    code_input = wait.until(
+                        EC.presence_of_element_located((By.NAME, "verificationCode"))
+                    )
+                    
+                    # Generate and enter 2FA code
+                    auth = TwoFactorAuth()
+                    code = auth.get_current_code()
+                    code_input.send_keys(code)
+                    code_input.submit()
+                    
+                    logger.info("2FA code submitted")
+                except Exception as e:
+                    logger.error(f"Failed to handle 2FA: {str(e)}")
+                    return False
             
             # Wait for successful login (profile icon appears)
             wait.until(
