@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     # Two-factor authentication
     TOTP_SECRET: Optional[str] = None
     
+    # Proxy settings
+    PROXY_HOST: Optional[str] = None
+    PROXY_PORT: Optional[int] = None
+    PROXY_USERNAME: Optional[str] = None
+    PROXY_PASSWORD: Optional[str] = None
+    
     # Paths
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
     TEMP_DIR: Path = BASE_DIR / "temp"
