@@ -1,10 +1,49 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+instagram_cookies.txt
+cookies.txt
+temp/
+logs/
+*.log
+
+# Chrome WebDriver
+.wdm/
+chromedriver*
 
 # Distribution / packaging
 .Python
@@ -102,15 +141,6 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -134,9 +164,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
-
-# VS Code
-.vscode/
 
 # macOS
 .DS_Store
@@ -165,6 +192,5 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-cookies.txt
 extract_cookies.txt
 .netrc
