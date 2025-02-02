@@ -2,6 +2,7 @@
 import logging
 import time
 import platform
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -23,16 +24,38 @@ class InstagramAuthError(Exception):
     """Raised when Instagram authentication fails."""
     pass
 
+def check_chromium_installed() -> bool:
+    """Check if Chromium is installed on Linux."""
+    try:
+        subprocess.run(['which', 'chromium-browser'], check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError:
+        try:
+            subprocess.run(['which', 'chromium'], check=True, capture_output=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
 def get_chrome_options() -> Options:
     """Configure Chrome options for headless operation."""
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    
+    if platform.system().lower() == "linux":
+        # Specific options for Ubuntu Chromium
+        chrome_options.binary_location = "/snap/bin/chromium"
+        chrome_options.add_argument("--headless")  # Use old headless mode for Ubuntu's Chromium
+    else:
+        chrome_options.add_argument("--headless=new")
+        
+    # Common options
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-notifications")
     chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    
     return chrome_options
 
 def get_webdriver() -> webdriver.Chrome:
@@ -41,18 +64,26 @@ def get_webdriver() -> webdriver.Chrome:
         os_name = platform.system().lower()
         
         if os_name == "linux":
-            # For Linux systems
-            chrome_service = Service(
-                ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+            # Use specific ChromeDriver version for Ubuntu's Chromium
+            driver_manager = ChromeDriverManager(
+                chrome_type=ChromeType.CHROMIUM,
+                driver_version="85.0.4183.83"  # Match Ubuntu's Chromium version
             )
         else:
-            # For macOS and Windows
-            chrome_service = Service(ChromeDriverManager().install())
+            driver_manager = ChromeDriverManager()
         
-        return webdriver.Chrome(
-            service=chrome_service,
+        driver_path = driver_manager.install()
+        service = Service(driver_path)
+        
+        driver = webdriver.Chrome(
+            service=service,
             options=get_chrome_options()
         )
+        
+        # Set page load timeout
+        driver.set_page_load_timeout(30)
+        return driver
+        
     except Exception as e:
         logger.error(f"Failed to initialize WebDriver: {str(e)}")
         raise
