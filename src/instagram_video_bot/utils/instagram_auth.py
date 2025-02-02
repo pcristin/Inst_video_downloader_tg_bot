@@ -42,7 +42,7 @@ def get_chrome_options() -> Options:
     
     if platform.system().lower() == "linux":
         # Specific options for Ubuntu Chromium
-        chrome_options.binary_location = "/usr/bin/chromium-browser"  # Changed back to standard path
+        chrome_options.binary_location = "/usr/bin/chromium-browser"
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
@@ -54,6 +54,15 @@ def get_chrome_options() -> Options:
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-gpu")
+    
+    # Add proxy if configured
+    if settings.PROXY_HOST and settings.PROXY_PORT:
+        proxy_string = f"{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+        if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
+            auth = f"{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@"
+            proxy_string = f"{auth}{proxy_string}"
+        chrome_options.add_argument(f'--proxy-server=http://{proxy_string}')
+        logger.info(f"Using proxy: {settings.PROXY_HOST}:{settings.PROXY_PORT}")
     
     # Common options
     chrome_options.add_argument("--window-size=1920,1080")
