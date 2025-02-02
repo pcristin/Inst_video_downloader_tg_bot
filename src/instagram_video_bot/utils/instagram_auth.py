@@ -1,7 +1,7 @@
 """Instagram authentication and cookie management utilities."""
-import json
 import logging
 import time
+import platform
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -12,6 +12,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 
 from ..config.settings import settings
 from .two_factor import TwoFactorAuth
@@ -25,13 +26,36 @@ class InstagramAuthError(Exception):
 def get_chrome_options() -> Options:
     """Configure Chrome options for headless operation."""
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-notifications")
+    chrome_options.add_argument("--disable-extensions")
     return chrome_options
+
+def get_webdriver() -> webdriver.Chrome:
+    """Create and configure Chrome WebDriver based on OS."""
+    try:
+        os_name = platform.system().lower()
+        
+        if os_name == "linux":
+            # For Linux systems
+            chrome_service = Service(
+                ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+            )
+        else:
+            # For macOS and Windows
+            chrome_service = Service(ChromeDriverManager().install())
+        
+        return webdriver.Chrome(
+            service=chrome_service,
+            options=get_chrome_options()
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize WebDriver: {str(e)}")
+        raise
 
 def format_cookie_for_yt_dlp(cookie: Dict) -> str:
     """Format a cookie dictionary into Netscape format for yt-dlp."""
@@ -63,12 +87,8 @@ def refresh_instagram_cookies() -> bool:
     try:
         logger.info("Starting Instagram authentication process")
         
-        # Initialize Chrome driver
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(
-            service=service,
-            options=get_chrome_options()
-        )
+        # Initialize Chrome driver with updated configuration
+        driver = get_webdriver()
         
         try:
             # Navigate to Instagram login page
@@ -108,7 +128,7 @@ def refresh_instagram_cookies() -> bool:
                     logger.error(f"Failed to handle 2FA: {str(e)}")
                     return False
             
-            # Wait for successful login (profile icon appears)
+            # Wait for successful login
             wait.until(
                 EC.presence_of_element_located(
                     (By.CSS_SELECTOR, "span[role='link']")
@@ -130,4 +150,4 @@ def refresh_instagram_cookies() -> bool:
             
     except Exception as e:
         logger.error(f"Instagram authentication failed: {str(e)}")
-        return False 
+        return False
