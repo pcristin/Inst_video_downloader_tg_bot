@@ -118,7 +118,7 @@ def refresh_instagram_cookies() -> bool:
         
         # Initialize Chrome driver with updated configuration
         driver = get_webdriver()
-        wait = WebDriverWait(driver, 20)  # Increased timeout
+        wait = WebDriverWait(driver, 30)  # Increased timeout further
         
         try:
             # Navigate to Instagram login page
@@ -160,9 +160,22 @@ def refresh_instagram_cookies() -> bool:
                         EC.presence_of_element_located((By.NAME, "verificationCode"))
                     )
                     
-                    # Generate and enter 2FA code
+                    # Wait a moment for any animations to complete
+                    time.sleep(2)
+                    
+                    # Generate a fresh 2FA code
                     auth = TwoFactorAuth()
+                    remaining_time = 30 - (int(time.time()) % 30)
+                    
+                    # If code is about to expire, wait for new one
+                    if remaining_time < 5:
+                        logger.info(f"Waiting {remaining_time} seconds for fresh 2FA code")
+                        time.sleep(remaining_time + 1)
+                    
                     code = auth.get_current_code()
+                    logger.info("Generated fresh 2FA code")
+                    
+                    # Clear and enter code
                     code_input.clear()
                     code_input.send_keys(code)
                     
@@ -173,6 +186,9 @@ def refresh_instagram_cookies() -> bool:
                     verify_button.click()
                     logger.info("2FA code submitted")
                     
+                    # Wait a moment after submitting
+                    time.sleep(2)
+                    
                 except Exception as e:
                     logger.error(f"Failed to handle 2FA: {str(e)}")
                     return False
@@ -182,16 +198,22 @@ def refresh_instagram_cookies() -> bool:
                 wait.until(lambda d: any([
                     len(d.find_elements(By.CSS_SELECTOR, "span[role='link']")) > 0,
                     len(d.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0,
-                    len(d.find_elements(By.CSS_SELECTOR, "a[href='/']")) > 0
+                    len(d.find_elements(By.CSS_SELECTOR, "a[href='/']")) > 0,
+                    len(d.find_elements(By.CSS_SELECTOR, "svg[aria-label='Instagram']")) > 0
                 ]))
                 logger.info("Successfully logged in")
             except Exception as e:
                 logger.error(f"Failed to verify login success: {str(e)}")
                 # Check for error messages
-                error_elements = driver.find_elements(By.CSS_SELECTOR, "p[role='alert']")
+                error_elements = driver.find_elements(By.CSS_SELECTOR, "p[role='alert'], div[role='alert']")
                 if error_elements:
                     error_message = error_elements[0].text
                     logger.error(f"Login error message: {error_message}")
+                    
+                    # If code expired, try one more time
+                    if "code is no longer valid" in error_message.lower():
+                        logger.info("Code expired, retrying with fresh code")
+                        return refresh_instagram_cookies()
                 return False
             
             # Get cookies
