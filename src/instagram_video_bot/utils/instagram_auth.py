@@ -12,8 +12,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
 
 from ..config.settings import settings
 from .two_factor import TwoFactorAuth
@@ -36,6 +34,27 @@ def check_chromium_installed() -> bool:
         except subprocess.CalledProcessError:
             return False
 
+def get_proxy_options() -> dict:
+    """Get proxy configuration for WebDriver."""
+    if not settings.PROXY_HOST or not settings.PROXY_PORT:
+        return {}
+    
+    proxy_string = f"{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+    if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
+        auth = f"{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@"
+        proxy_string = f"{auth}{proxy_string}"
+    
+    # Use HTTP proxy only
+    proxy_options = {
+        'proxy': {
+            'httpProxy': f"http://{proxy_string}",
+            'proxyType': 'manual'
+        }
+    }
+    
+    logger.info(f"Using HTTP proxy: {settings.PROXY_HOST}:{settings.PROXY_PORT}")
+    return proxy_options
+
 def get_chrome_options() -> Options:
     """Configure Chrome options for headless operation."""
     chrome_options = Options()
@@ -49,20 +68,19 @@ def get_chrome_options() -> Options:
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument("--remote-debugging-port=9222")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
+        
+        # Add proxy directly to Chrome options for better HTTP proxy support
+        if settings.PROXY_HOST and settings.PROXY_PORT:
+            proxy_string = f"{settings.PROXY_HOST}:{settings.PROXY_PORT}"
+            if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
+                chrome_options.add_argument(f'--proxy-server=http://{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@{proxy_string}')
+            else:
+                chrome_options.add_argument(f'--proxy-server=http://{proxy_string}')
     else:
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-gpu")
-    
-    # Add proxy if configured
-    if settings.PROXY_HOST and settings.PROXY_PORT:
-        proxy_string = f"{settings.PROXY_HOST}:{settings.PROXY_PORT}"
-        if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
-            auth = f"{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@"
-            proxy_string = f"{auth}{proxy_string}"
-        chrome_options.add_argument(f'--proxy-server=http://{proxy_string}')
-        logger.info(f"Using proxy: {settings.PROXY_HOST}:{settings.PROXY_PORT}")
     
     # Common options
     chrome_options.add_argument("--window-size=1920,1080")
@@ -73,6 +91,8 @@ def get_chrome_options() -> Options:
     chrome_options.add_argument("--no-default-browser-check")
     chrome_options.add_argument("--ignore-certificate-errors")
     chrome_options.add_argument("--disable-popup-blocking")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--lang=en-US")
     
     return chrome_options
 
@@ -82,13 +102,30 @@ def get_webdriver() -> webdriver.Chrome:
         # Use system's ChromeDriver
         service = Service("/usr/bin/chromedriver")
         
+        # Get Chrome options
+        options = get_chrome_options()
+        
+        # Add proxy settings to options
+        proxy_options = get_proxy_options()
+        if proxy_options:
+            options.set_capability('proxy', proxy_options['proxy'])
+        
         driver = webdriver.Chrome(
             service=service,
-            options=get_chrome_options()
+            options=options
         )
         
         # Set page load timeout
         driver.set_page_load_timeout(30)
+        
+        # Add stealth settings
+        driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+            "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
+        # Enable network interception
+        driver.execute_cdp_cmd('Network.enable', {})
+        
         return driver
         
     except Exception as e:
