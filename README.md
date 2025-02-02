@@ -8,7 +8,7 @@ A Telegram bot that automatically downloads and forwards Instagram videos and re
 - 🤖 Works in private chats and groups
 - 🔄 Automatically processes Instagram links
 - 🎬 Optimizes video format for Telegram
-- 🔒 Handles Instagram authentication
+- 🔒 Handles Instagram authentication with 2FA support
 - ⚡ Fast and efficient downloads
 
 ## Prerequisites
@@ -16,6 +16,7 @@ A Telegram bot that automatically downloads and forwards Instagram videos and re
 - Python 3.11 or higher
 - Chrome/Chromium browser (for Instagram authentication)
 - FFmpeg (for video processing)
+- Google Authenticator or any TOTP-compatible app (for 2FA)
 
 ## Installation
 
@@ -42,6 +43,24 @@ A Telegram bot that automatically downloads and forwards Instagram videos and re
    IG_USERNAME=your_instagram_username
    IG_PASSWORD=your_instagram_password
    ```
+
+## Two-Factor Authentication Setup
+
+1. Run the 2FA setup script:
+   ```bash
+   python -m src.instagram_video_bot.setup_2fa
+   ```
+
+2. Scan the generated QR code (`2fa_qr.png`) with Google Authenticator or any TOTP app.
+
+3. Add the generated secret to your `.env` file:
+   ```env
+   TOTP_SECRET=your_generated_secret
+   ```
+
+4. Delete the QR code image for security.
+
+The bot will now automatically handle 2FA during Instagram authentication.
 
 ## Usage
 
@@ -100,7 +119,8 @@ instagram-video-bot/
 │       │   └── video_downloader.py
 │       └── utils/
 │           ├── __init__.py
-│           └── instagram_auth.py
+│           ├── instagram_auth.py
+│           └── two_factor.py
 ├── .env
 ├── .gitignore
 ├── README.md
@@ -123,3 +143,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - [Selenium](https://www.selenium.dev/)
+- [PyOTP](https://github.com/pyauth/pyotp)

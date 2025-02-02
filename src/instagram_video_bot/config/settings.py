@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     IG_USERNAME: str
     IG_PASSWORD: str
     
+    # Two-factor authentication
+    TOTP_SECRET: Optional[str] = None
+    
     # Paths
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
     TEMP_DIR: Path = BASE_DIR / "temp"

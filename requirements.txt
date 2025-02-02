@@ -8,6 +8,9 @@ python-dotenv==1.0.0
 # Instagram authentication
 selenium==4.16.0
 webdriver-manager==4.0.1
+pyotp==2.9.0
+qrcode==7.4.2
+pillow==10.2.0  # Required by qrcode
 
 # Development dependencies
 black==23.12.1
