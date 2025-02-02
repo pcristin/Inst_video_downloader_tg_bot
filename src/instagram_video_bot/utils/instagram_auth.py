@@ -42,7 +42,7 @@ def get_chrome_options() -> Options:
     
     if platform.system().lower() == "linux":
         # Specific options for Ubuntu Chromium
-        chrome_options.binary_location = "/usr/bin/chromedriver"  # Changed back to standard path
+        chrome_options.binary_location = "/usr/bin/chromium-browser"  # Changed back to standard path
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
