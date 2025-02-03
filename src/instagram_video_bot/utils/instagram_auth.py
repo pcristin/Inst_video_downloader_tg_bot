@@ -152,7 +152,7 @@ def save_cookies(cookies: List[Dict], output_file: Path) -> None:
     except Exception as e:
         raise InstagramAuthError(f"Failed to save cookies: {str(e)}")
 
-def refresh_instagram_cookies() -> bool:
+def refresh_instagram_cookies(retry_count: int = 0) -> bool:
     """
     Refresh Instagram authentication cookies using Selenium.
     
@@ -198,8 +198,8 @@ def refresh_instagram_cookies() -> bool:
             login_button.click()
             logger.info("Clicked login button")
             
-            # Handle 2FA if configured
-            if settings.TOTP_SECRET:
+            # Handle 2FA if TOTP_SECRET is provided and non-empty
+            if settings.TOTP_SECRET and settings.TOTP_SECRET.strip():
                 try:
                     # Wait for 2FA input field
                     code_input = wait.until(
@@ -256,10 +256,14 @@ def refresh_instagram_cookies() -> bool:
                     error_message = error_elements[0].text
                     logger.error(f"Login error message: {error_message}")
                     
-                    # If code expired, try one more time
+                    # If code expired, try again up to 3 times
                     if "code is no longer valid" in error_message.lower():
-                        logger.info("Code expired, retrying with fresh code")
-                        return refresh_instagram_cookies()
+                        if retry_count < 3:
+                            logger.info(f"Code expired, retrying with fresh code (attempt {retry_count + 1}/3)")
+                            return refresh_instagram_cookies(retry_count=retry_count+1)
+                        else:
+                            logger.error("Maximum retries for 2FA exhausted.")
+                            return False
                 return False
             
             # Get cookies
