@@ -143,7 +143,9 @@ def format_cookie_for_yt_dlp(cookie: Dict) -> str:
 def save_cookies(cookies: List[Dict], output_file: Path) -> None:
     """Save cookies in Netscape format for yt-dlp."""
     try:
-        with open(output_file, 'w', encoding='utf-8') as f:
+        with open(output_file, 'w', encoding='utf-8', newline='\n') as f:
+            # Write the required Netscape header
+            f.write("# Netscape HTTP Cookie File\n")
             for cookie in cookies:
                 if 'expiry' not in cookie:
                     cookie['expiry'] = int(time.time()) + 3600 * 24 * 365  # 1 year
