@@ -180,76 +180,49 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             
             logger.info("Loaded Instagram login page")
             
-            # Use stable attributes to find username input
-            username_selectors = [
-                "//input[@name='username']",
-                "//input[@aria-label='Phone number, username or email address']",
-                "//input[@autocapitalize='off' and @autocorrect='off']",
-                "//input[@aria-required='true' and @maxlength='75']",
-                "//input[@type='text' and @dir='auto']"
-            ]
-            
-            # Try to find username input
-            username_input = None
-            for selector in username_selectors:
-                try:
-                    username_input = wait.until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    if username_input and username_input.is_displayed():
-                        # Verify using stable attributes
-                        if (username_input.get_attribute('name') == 'username' or
-                            username_input.get_attribute('aria-label') == 'Phone number, username or email address'):
-                            break
-                except:
-                    continue
-            
-            if not username_input:
-                # Try to find by form structure
-                try:
-                    form = driver.find_element(By.TAG_NAME, "form")
-                    inputs = form.find_elements(By.TAG_NAME, "input")
-                    for input_elem in inputs:
-                        if (input_elem.get_attribute('type') == 'text' and 
-                            input_elem.is_displayed()):
-                            username_input = input_elem
-                            break
-                except:
-                    pass
-            
-            if not username_input:
-                raise InstagramAuthError("Could not find username input")
-            
-            # Use stable attributes for password field
-            password_selectors = [
-                "//input[@name='password']",
-                "//input[@type='password']",
-                "//input[@aria-label='Password']",
-                "//form//input[@type='password']"
-            ]
-            
-            # Try to find password input
-            password_input = None
-            for selector in password_selectors:
-                try:
-                    password_input = wait.until(
-                        EC.presence_of_element_located((By.XPATH, selector))
-                    )
-                    if password_input.is_displayed():
-                        break
-                except:
-                    continue
-            
-            if not password_input:
-                raise InstagramAuthError("Could not find password input")
-            
-            # Clear and fill inputs with delays and retry on failure
+            # Wait for the login form to be present
             try:
-                driver.execute_script("arguments[0].value = '';", username_input)
+                form = wait.until(
+                    EC.presence_of_element_located((By.TAG_NAME, "form"))
+                )
+            except:
+                raise InstagramAuthError("Could not find login form")
+            
+            # Find username field using reliable methods
+            try:
+                username_input = wait.until(
+                    EC.presence_of_element_located((By.NAME, "username"))
+                )
+            except:
+                try:
+                    username_input = form.find_element(By.CSS_SELECTOR, "input[name='username']")
+                except:
+                    try:
+                        username_input = form.find_element(By.CSS_SELECTOR, "input[type='text']")
+                    except:
+                        raise InstagramAuthError("Could not find username input")
+            
+            # Find password field using reliable methods
+            try:
+                password_input = wait.until(
+                    EC.presence_of_element_located((By.NAME, "password"))
+                )
+            except:
+                try:
+                    password_input = form.find_element(By.CSS_SELECTOR, "input[name='password']")
+                except:
+                    try:
+                        password_input = form.find_element(By.CSS_SELECTOR, "input[type='password']")
+                    except:
+                        raise InstagramAuthError("Could not find password input")
+            
+            # Clear and fill inputs with delays
+            try:
+                username_input.clear()
                 username_input.send_keys(settings.IG_USERNAME)
                 time.sleep(1)
                 
-                driver.execute_script("arguments[0].value = '';", password_input)
+                password_input.clear()
                 password_input.send_keys(settings.IG_PASSWORD)
                 time.sleep(1)
                 
@@ -258,39 +231,27 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                 logger.error(f"Failed to fill credentials: {str(e)}")
                 return False
             
-            # Updated login button selectors
-            login_selectors = [
-                "//button[@type='submit']",
-                "//button[contains(text(), 'Log in')]",
-                "//button[contains(text(), 'Log In')]",
-                "//button[contains(@class, 'primary')]",
-                "//div[contains(text(), 'Log in')]/parent::button"
-            ]
-            
-            # Try to find and click login button
-            login_button = None
-            for selector in login_selectors:
-                try:
-                    login_button = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, selector))
-                    )
-                    if login_button.is_displayed():
-                        break
-                except:
-                    continue
-            
-            if not login_button:
-                raise InstagramAuthError("Could not find login button")
-            
-            # Try to click the button using different methods
+            # Find and click submit button
             try:
-                login_button.click()
+                submit_button = form.find_element(By.CSS_SELECTOR, "button[type='submit']")
             except:
                 try:
-                    driver.execute_script("arguments[0].click();", login_button)
+                    submit_button = form.find_element(By.XPATH, "//button[contains(text(), 'Log in')]")
+                except:
+                    try:
+                        submit_button = form.find_element(By.XPATH, "//button[.//div[contains(text(), 'Log in')]]")
+                    except:
+                        raise InstagramAuthError("Could not find login button")
+            
+            # Click the button
+            try:
+                submit_button.click()
+            except:
+                try:
+                    driver.execute_script("arguments[0].click();", submit_button)
                 except:
                     actions = webdriver.ActionChains(driver)
-                    actions.move_to_element(login_button).click().perform()
+                    actions.move_to_element(submit_button).click().perform()
             
             time.sleep(5)  # Wait for login process
             logger.info("Clicked login button")
