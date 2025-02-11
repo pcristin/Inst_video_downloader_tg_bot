@@ -159,80 +159,138 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
     try:
         logger.info("Starting Instagram authentication process")
         driver = get_webdriver()
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 30)  # Increased timeout
         
         try:
             # Navigate to Instagram login page and wait for it to load completely
             driver.get('https://www.instagram.com/accounts/login/')
-            time.sleep(5)  # Wait for any redirects
+            time.sleep(3)  # Initial wait
+            
+            # Try to find and click any "Accept Cookies" button if present
+            try:
+                cookie_buttons = driver.find_elements(By.XPATH, 
+                    "//*[contains(text(), 'Accept') or contains(text(), 'Allow')]")
+                for button in cookie_buttons:
+                    if button.is_displayed():
+                        button.click()
+                        time.sleep(2)
+                        break
+            except Exception:
+                pass
+            
             logger.info("Loaded Instagram login page")
             
-            # Wait for and switch to login form iframe if present
-            iframes = driver.find_elements(By.TAG_NAME, "iframe")
-            if iframes:
-                driver.switch_to.frame(iframes[0])
-            
-            # Find username and password fields with multiple selectors
-            username_input = None
-            password_input = None
-            
-            selectors = [
-                (By.NAME, "username"),
-                (By.CSS_SELECTOR, "input[name='username']"),
-                (By.CSS_SELECTOR, "input[aria-label='Phone number, username, or email']")
+            # Updated selectors for username field with exact Instagram classes
+            username_selectors = [
+                "//input[@class='_aa4b _add6 _ac4d _ap35']",
+                "//input[@name='username']",
+                "//label[@class='_aa48']/input",
+                "//input[@aria-label='Phone number, username or email address']"
             ]
             
-            for by, selector in selectors:
+            # Try to find username input
+            username_input = None
+            for selector in username_selectors:
                 try:
-                    username_input = wait.until(EC.element_to_be_clickable((by, selector)))
-                    break
+                    username_input = wait.until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    if username_input and username_input.is_displayed():
+                        # Verify we found the correct element
+                        if username_input.get_attribute('class') == '_aa4b _add6 _ac4d _ap35':
+                            break
                 except:
                     continue
             
             if not username_input:
+                # Try to refresh the page and try again
+                driver.refresh()
+                time.sleep(5)
+                for selector in username_selectors:
+                    try:
+                        username_input = wait.until(
+                            EC.presence_of_element_located((By.XPATH, selector))
+                        )
+                        if username_input and username_input.is_displayed():
+                            if username_input.get_attribute('class') == '_aa4b _add6 _ac4d _ap35':
+                                break
+                    except:
+                        continue
+            
+            if not username_input:
                 raise InstagramAuthError("Could not find username input")
             
-            # Similar for password
-            for by, selector in [(By.NAME, "password"), (By.CSS_SELECTOR, "input[type='password']")]:
+            # Updated selectors for password field with exact Instagram classes
+            password_selectors = [
+                "//input[@type='password' and @class='_aa4b _add6 _ac4d _ap35']",
+                "//input[@name='password' and @class='_aa4b _add6 _ac4d _ap35']",
+                "//label[@class='_aa48']/input[@type='password']"
+            ]
+            
+            # Try to find password input
+            password_input = None
+            for selector in password_selectors:
                 try:
-                    password_input = wait.until(EC.element_to_be_clickable((by, selector)))
-                    break
+                    password_input = wait.until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    if password_input.is_displayed():
+                        break
                 except:
                     continue
             
             if not password_input:
                 raise InstagramAuthError("Could not find password input")
             
-            # Clear and fill inputs with delays
-            username_input.clear()
-            time.sleep(1)
-            username_input.send_keys(settings.IG_USERNAME)
-            time.sleep(1)
-            password_input.clear()
-            time.sleep(1)
-            password_input.send_keys(settings.IG_PASSWORD)
-            time.sleep(1)
-            logger.info("Filled login credentials")
+            # Clear and fill inputs with delays and retry on failure
+            try:
+                driver.execute_script("arguments[0].value = '';", username_input)
+                username_input.send_keys(settings.IG_USERNAME)
+                time.sleep(1)
+                
+                driver.execute_script("arguments[0].value = '';", password_input)
+                password_input.send_keys(settings.IG_PASSWORD)
+                time.sleep(1)
+                
+                logger.info("Filled login credentials")
+            except Exception as e:
+                logger.error(f"Failed to fill credentials: {str(e)}")
+                return False
             
-            # Find and click login button
-            button_selectors = [
-                "button[type='submit']",
-                "button._acan._acap._acas._aj1-",
-                "button[class*='primary']"
+            # Updated login button selectors
+            login_selectors = [
+                "//button[@type='submit']",
+                "//button[contains(text(), 'Log in')]",
+                "//button[contains(text(), 'Log In')]",
+                "//button[contains(@class, 'primary')]",
+                "//div[contains(text(), 'Log in')]/parent::button"
             ]
             
+            # Try to find and click login button
             login_button = None
-            for selector in button_selectors:
+            for selector in login_selectors:
                 try:
-                    login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-                    break
+                    login_button = wait.until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    if login_button.is_displayed():
+                        break
                 except:
                     continue
             
             if not login_button:
                 raise InstagramAuthError("Could not find login button")
             
-            login_button.click()
+            # Try to click the button using different methods
+            try:
+                login_button.click()
+            except:
+                try:
+                    driver.execute_script("arguments[0].click();", login_button)
+                except:
+                    actions = webdriver.ActionChains(driver)
+                    actions.move_to_element(login_button).click().perform()
+            
             time.sleep(5)  # Wait for login process
             logger.info("Clicked login button")
             
