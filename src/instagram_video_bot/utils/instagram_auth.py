@@ -182,7 +182,7 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             
             # Updated selectors for username field with exact Instagram classes
             username_selectors = [
-                "//input[@class='_aa4b _add6 _ac4d _ap35']",
+                "//input[@class='_aa48']",
                 "//input[@name='username']",
                 "//label[@class='_aa48']/input",
                 "//input[@aria-label='Phone number, username or email address']"
@@ -197,7 +197,7 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                     )
                     if username_input and username_input.is_displayed():
                         # Verify we found the correct element
-                        if username_input.get_attribute('class') == '_aa4b _add6 _ac4d _ap35':
+                        if username_input.get_attribute('class') == '_aa48':
                             break
                 except:
                     continue
