@@ -180,12 +180,13 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             
             logger.info("Loaded Instagram login page")
             
-            # Updated selectors for username field with exact Instagram classes
+            # Use stable attributes to find username input
             username_selectors = [
-                "//input[@class='_aa48']",
                 "//input[@name='username']",
-                "//label[@class='_aa48']/input",
-                "//input[@aria-label='Phone number, username or email address']"
+                "//input[@aria-label='Phone number, username or email address']",
+                "//input[@autocapitalize='off' and @autocorrect='off']",
+                "//input[@aria-required='true' and @maxlength='75']",
+                "//input[@type='text' and @dir='auto']"
             ]
             
             # Try to find username input
@@ -196,35 +197,35 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                         EC.presence_of_element_located((By.XPATH, selector))
                     )
                     if username_input and username_input.is_displayed():
-                        # Verify we found the correct element
-                        if username_input.get_attribute('class') == '_aa48':
+                        # Verify using stable attributes
+                        if (username_input.get_attribute('name') == 'username' or
+                            username_input.get_attribute('aria-label') == 'Phone number, username or email address'):
                             break
                 except:
                     continue
             
             if not username_input:
-                # Try to refresh the page and try again
-                driver.refresh()
-                time.sleep(5)
-                for selector in username_selectors:
-                    try:
-                        username_input = wait.until(
-                            EC.presence_of_element_located((By.XPATH, selector))
-                        )
-                        if username_input and username_input.is_displayed():
-                            if username_input.get_attribute('class') == '_aa4b _add6 _ac4d _ap35':
-                                break
-                    except:
-                        continue
+                # Try to find by form structure
+                try:
+                    form = driver.find_element(By.TAG_NAME, "form")
+                    inputs = form.find_elements(By.TAG_NAME, "input")
+                    for input_elem in inputs:
+                        if (input_elem.get_attribute('type') == 'text' and 
+                            input_elem.is_displayed()):
+                            username_input = input_elem
+                            break
+                except:
+                    pass
             
             if not username_input:
                 raise InstagramAuthError("Could not find username input")
             
-            # Updated selectors for password field with exact Instagram classes
+            # Use stable attributes for password field
             password_selectors = [
-                "//input[@type='password' and @class='_aa4b _add6 _ac4d _ap35']",
-                "//input[@name='password' and @class='_aa4b _add6 _ac4d _ap35']",
-                "//label[@class='_aa48']/input[@type='password']"
+                "//input[@name='password']",
+                "//input[@type='password']",
+                "//input[@aria-label='Password']",
+                "//form//input[@type='password']"
             ]
             
             # Try to find password input
