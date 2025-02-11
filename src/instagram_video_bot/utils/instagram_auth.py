@@ -155,125 +155,129 @@ def save_cookies(cookies: List[Dict], output_file: Path) -> None:
         raise InstagramAuthError(f"Failed to save cookies: {str(e)}")
 
 def refresh_instagram_cookies(retry_count: int = 0) -> bool:
-    """
-    Refresh Instagram authentication cookies using Selenium.
-    
-    Returns:
-        bool: True if cookies were successfully refreshed, False otherwise
-    """
+    """Refresh Instagram authentication cookies using Selenium."""
     try:
         logger.info("Starting Instagram authentication process")
-        
-        # Initialize Chrome driver with updated configuration
         driver = get_webdriver()
-        wait = WebDriverWait(driver, 30)  # Increased timeout further
+        wait = WebDriverWait(driver, 20)
         
         try:
-            # Navigate to Instagram login page
+            # Navigate to Instagram login page and wait for it to load completely
             driver.get('https://www.instagram.com/accounts/login/')
+            time.sleep(5)  # Wait for any redirects
             logger.info("Loaded Instagram login page")
             
-            # Wait for login form to be fully loaded
-            wait.until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "form[id='loginForm']"))
-            )
+            # Wait for and switch to login form iframe if present
+            iframes = driver.find_elements(By.TAG_NAME, "iframe")
+            if iframes:
+                driver.switch_to.frame(iframes[0])
             
-            # Wait and fill in the login form
-            username_input = wait.until(
-                EC.element_to_be_clickable((By.NAME, "username"))
-            )
-            password_input = wait.until(
-                EC.element_to_be_clickable((By.NAME, "password"))
-            )
+            # Find username and password fields with multiple selectors
+            username_input = None
+            password_input = None
             
-            # Clear and fill inputs
+            selectors = [
+                (By.NAME, "username"),
+                (By.CSS_SELECTOR, "input[name='username']"),
+                (By.CSS_SELECTOR, "input[aria-label='Phone number, username, or email']")
+            ]
+            
+            for by, selector in selectors:
+                try:
+                    username_input = wait.until(EC.element_to_be_clickable((by, selector)))
+                    break
+                except:
+                    continue
+            
+            if not username_input:
+                raise InstagramAuthError("Could not find username input")
+            
+            # Similar for password
+            for by, selector in [(By.NAME, "password"), (By.CSS_SELECTOR, "input[type='password']")]:
+                try:
+                    password_input = wait.until(EC.element_to_be_clickable((by, selector)))
+                    break
+                except:
+                    continue
+            
+            if not password_input:
+                raise InstagramAuthError("Could not find password input")
+            
+            # Clear and fill inputs with delays
             username_input.clear()
+            time.sleep(1)
             username_input.send_keys(settings.IG_USERNAME)
+            time.sleep(1)
             password_input.clear()
+            time.sleep(1)
             password_input.send_keys(settings.IG_PASSWORD)
+            time.sleep(1)
             logger.info("Filled login credentials")
             
-            # Find and click the login button
-            login_button = wait.until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
-            )
+            # Find and click login button
+            button_selectors = [
+                "button[type='submit']",
+                "button._acan._acap._acas._aj1-",
+                "button[class*='primary']"
+            ]
+            
+            login_button = None
+            for selector in button_selectors:
+                try:
+                    login_button = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
+                    break
+                except:
+                    continue
+            
+            if not login_button:
+                raise InstagramAuthError("Could not find login button")
+            
             login_button.click()
+            time.sleep(5)  # Wait for login process
             logger.info("Clicked login button")
             
-            # Handle 2FA if TOTP_SECRET is provided and non-empty
-            if settings.TOTP_SECRET and settings.TOTP_SECRET.strip():
-                try:
-                    # Wait for 2FA input field
-                    code_input = wait.until(
-                        EC.presence_of_element_located((By.NAME, "verificationCode"))
-                    )
-                    
-                    # Wait a moment for any animations to complete
-                    time.sleep(2)
-                    
-                    # Generate a fresh 2FA code
-                    auth = TwoFactorAuth()
-                    remaining_time = 30 - (int(time.time()) % 30)
-                    
-                    # If code is about to expire, wait for new one
-                    if remaining_time < 5:
-                        logger.info(f"Waiting {remaining_time} seconds for fresh 2FA code")
-                        time.sleep(remaining_time + 1)
-                    
-                    code = auth.get_current_code()
-                    logger.info("Generated fresh 2FA code")
-                    
-                    # Clear and enter code
-                    code_input.clear()
-                    code_input.send_keys(code)
-                    
-                    # Find and click the verify button
-                    verify_button = wait.until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='button']"))
-                    )
-                    verify_button.click()
-                    logger.info("2FA code submitted")
-                    
-                    # Wait a moment after submitting
-                    time.sleep(2)
-                    
-                except Exception as e:
-                    logger.error(f"Failed to handle 2FA: {str(e)}")
-                    return False
+            # Wait for successful login
+            success_selectors = [
+                "//div[@role='menuitem']",  # Profile menu item
+                "//span[contains(text(), 'Search')]",  # Search text
+                "//a[@href='/direct/inbox/']",  # Direct messages link
+                "//span[@class='_aaav']",  # Profile icon
+                "//a[@href='/explore/']"  # Explore link
+            ]
             
-            # Wait for successful login by checking multiple possible elements
-            try:
-                wait.until(lambda d: any([
-                    len(d.find_elements(By.CSS_SELECTOR, "span[role='link']")) > 0,
-                    len(d.find_elements(By.CSS_SELECTOR, "svg[aria-label='Home']")) > 0,
-                    len(d.find_elements(By.CSS_SELECTOR, "a[href='/']")) > 0,
-                    len(d.find_elements(By.CSS_SELECTOR, "svg[aria-label='Instagram']")) > 0
-                ]))
-                logger.info("Successfully logged in")
-            except Exception as e:
-                logger.error(f"Failed to verify login success: {str(e)}")
-                # Check for error messages
-                error_elements = driver.find_elements(By.CSS_SELECTOR, "p[role='alert'], div[role='alert']")
-                if error_elements:
-                    error_message = error_elements[0].text
-                    logger.error(f"Login error message: {error_message}")
-                    
-                    # If code expired, try again up to 3 times
-                    if "code is no longer valid" in error_message.lower():
-                        if retry_count < 3:
-                            logger.info(f"Code expired, retrying with fresh code (attempt {retry_count + 1}/3)")
-                            return refresh_instagram_cookies(retry_count=retry_count+1)
-                        else:
-                            logger.error("Maximum retries for 2FA exhausted.")
-                            return False
+            login_successful = False
+            for selector in success_selectors:
+                try:
+                    wait.until(EC.presence_of_element_located((By.XPATH, selector)))
+                    login_successful = True
+                    break
+                except:
+                    continue
+            
+            if not login_successful:
+                error_selectors = [
+                    "//p[@data-testid='login-error-message']",
+                    "//div[contains(@class, 'error')]",
+                    "//p[contains(text(), 'sorry')]",
+                    "//p[contains(text(), 'Please wait')]"
+                ]
+                
+                for selector in error_selectors:
+                    try:
+                        error_elem = driver.find_element(By.XPATH, selector)
+                        logger.error(f"Login error: {error_elem.text}")
+                        return False
+                    except:
+                        continue
+                
+                logger.error("Could not verify login success")
                 return False
             
-            # Get cookies
+            # Get and save cookies
             cookies = driver.get_cookies()
             if not cookies:
                 raise InstagramAuthError("No cookies found after login")
             
-            # Save cookies
             save_cookies(cookies, settings.COOKIES_FILE)
             logger.info("Instagram authentication successful")
             return True
