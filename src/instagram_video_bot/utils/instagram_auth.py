@@ -4,7 +4,7 @@ import time
 import platform
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -44,7 +44,6 @@ def get_proxy_options() -> dict:
         auth = f"{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@"
         proxy_string = f"{auth}{proxy_string}"
     
-    # Use HTTP proxy only
     proxy_options = {
         'proxy': {
             'httpProxy': f"http://{proxy_string}",
@@ -56,20 +55,22 @@ def get_proxy_options() -> dict:
     return proxy_options
 
 def get_chrome_options() -> Options:
-    """Configure Chrome options for headless operation."""
+    """Configure Chrome options for headless operation with some stealth settings."""
     chrome_options = Options()
     
+    # Add some anti-detection flags
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    
     if platform.system().lower() == "linux":
-        # Specific options for Ubuntu Chromium
         chrome_options.binary_location = "/usr/bin/chromium-browser"
-        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--headless")  # For testing, you might remove headless mode.
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--remote-debugging-port=9222")
         chrome_options.add_argument("--user-data-dir=/tmp/chrome-data")
         
-        # Add proxy directly to Chrome options for better HTTP proxy support
         if settings.PROXY_HOST and settings.PROXY_PORT:
             proxy_string = f"{settings.PROXY_HOST}:{settings.PROXY_PORT}"
             if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
@@ -99,33 +100,36 @@ def get_chrome_options() -> Options:
 def get_webdriver() -> webdriver.Chrome:
     """Create and configure Chrome WebDriver based on OS."""
     try:
-        # Use system's ChromeDriver
         service = Service("/usr/bin/chromedriver")
-        
-        # Get Chrome options
         options = get_chrome_options()
         
-        # Add proxy settings to options
+        # If proxy options exist, add them as capabilities.
         proxy_options = get_proxy_options()
         if proxy_options:
             options.set_capability('proxy', proxy_options['proxy'])
         
-        driver = webdriver.Chrome(
-            service=service,
-            options=options
-        )
-        
-        # Set page load timeout
+        driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(30)
         
-        # Add stealth settings
+        # Overwrite the navigator.webdriver property for stealth.
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+                """
+            },
+        )
+        
+        # Set a realistic user agent.
         driver.execute_cdp_cmd('Network.setUserAgentOverride', {
-            "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "userAgent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36")
         })
-        
-        # Enable network interception
         driver.execute_cdp_cmd('Network.enable', {})
-        
         return driver
         
     except Exception as e:
@@ -136,7 +140,7 @@ def format_cookie_for_yt_dlp(cookie: Dict) -> str:
     """Format a cookie dictionary into Netscape format for yt-dlp."""
     return (
         f"{cookie['domain']}\tTRUE\t{cookie['path']}\t"
-        f"{'TRUE' if cookie['secure'] else 'FALSE'}\t{cookie['expiry']}\t"
+        f"{'TRUE' if cookie.get('secure', False) else 'FALSE'}\t{cookie.get('expiry', int(time.time()) + 31536000)}\t"
         f"{cookie['name']}\t{cookie['value']}"
     )
 
@@ -144,11 +148,11 @@ def save_cookies(cookies: List[Dict], output_file: Path) -> None:
     """Save cookies in Netscape format for yt-dlp."""
     try:
         with open(output_file, 'w', encoding='utf-8', newline='\n') as f:
-            # Write the required Netscape header
             f.write("# Netscape HTTP Cookie File\n")
             for cookie in cookies:
+                # Ensure expiry exists; default to 1 year from now if missing.
                 if 'expiry' not in cookie:
-                    cookie['expiry'] = int(time.time()) + 3600 * 24 * 365  # 1 year
+                    cookie['expiry'] = int(time.time()) + 3600 * 24 * 365
                 f.write(format_cookie_for_yt_dlp(cookie) + '\n')
         logger.info(f"Cookies saved to {output_file}")
     except Exception as e:
@@ -159,141 +163,94 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
     try:
         logger.info("Starting Instagram authentication process")
         driver = get_webdriver()
-        wait = WebDriverWait(driver, 30)  # Increased timeout
+        # Increase the explicit wait timeout if needed.
+        wait = WebDriverWait(driver, 30)
         
         try:
-            # Navigate to Instagram login page and wait for it to load completely
             driver.get('https://www.instagram.com/accounts/login/')
-            time.sleep(3)  # Initial wait
+            logger.info("Instagram login page loaded")
             
-            # Try to find and click any "Accept Cookies" button if present
+            # Wait for the username field to be visible.
+            # (Presence is not enough because Instagram sometimes hides the fields initially.)
+            username_input = wait.until(
+                EC.visibility_of_element_located((By.NAME, "username"))
+            )
+            
+            # (Optional) Accept cookies if the popup appears.
             try:
-                cookie_buttons = driver.find_elements(By.XPATH, 
-                    "//*[contains(text(), 'Accept') or contains(text(), 'Allow')]")
-                for button in cookie_buttons:
-                    if button.is_displayed():
-                        button.click()
-                        time.sleep(2)
-                        break
+                # Try a couple of possible selectors for the "Accept" button.
+                accept_button = wait.until(EC.element_to_be_clickable((
+                    By.XPATH, "//*[contains(text(), 'Accept') or contains(text(), 'Allow')]"
+                )))
+                accept_button.click()
+                logger.info("Accepted cookies")
+                # Give the page a moment to update after clicking.
+                time.sleep(2)
             except Exception:
-                pass
+                logger.debug("Cookie acceptance not required or button not found.")
             
-            logger.info("Loaded Instagram login page")
+            # Wait for the password field to be visible.
+            password_input = wait.until(
+                EC.visibility_of_element_located((By.NAME, "password"))
+            )
             
-            # Wait for the login form to be present
-            try:
-                form = wait.until(
-                    EC.presence_of_element_located((By.TAG_NAME, "form"))
-                )
-            except:
-                raise InstagramAuthError("Could not find login form")
+            # Fill in the login credentials.
+            username_input.clear()
+            username_input.send_keys(settings.IG_USERNAME)
+            time.sleep(1)
             
-            # Find username field using reliable methods
-            try:
-                username_input = wait.until(
-                    EC.presence_of_element_located((By.NAME, "username"))
-                )
-            except:
-                try:
-                    username_input = form.find_element(By.CSS_SELECTOR, "input[name='username']")
-                except:
-                    try:
-                        username_input = form.find_element(By.CSS_SELECTOR, "input[type='text']")
-                    except:
-                        raise InstagramAuthError("Could not find username input")
+            password_input.clear()
+            password_input.send_keys(settings.IG_PASSWORD)
+            time.sleep(1)
+            logger.info("Filled in login credentials")
             
-            # Find password field using reliable methods
-            try:
-                password_input = wait.until(
-                    EC.presence_of_element_located((By.NAME, "password"))
-                )
-            except:
-                try:
-                    password_input = form.find_element(By.CSS_SELECTOR, "input[name='password']")
-                except:
-                    try:
-                        password_input = form.find_element(By.CSS_SELECTOR, "input[type='password']")
-                    except:
-                        raise InstagramAuthError("Could not find password input")
-            
-            # Clear and fill inputs with delays
-            try:
-                username_input.clear()
-                username_input.send_keys(settings.IG_USERNAME)
-                time.sleep(1)
-                
-                password_input.clear()
-                password_input.send_keys(settings.IG_PASSWORD)
-                time.sleep(1)
-                
-                logger.info("Filled login credentials")
-            except Exception as e:
-                logger.error(f"Failed to fill credentials: {str(e)}")
-                return False
-            
-            # Find and click submit button
-            try:
-                submit_button = form.find_element(By.CSS_SELECTOR, "button[type='submit']")
-            except:
-                try:
-                    submit_button = form.find_element(By.XPATH, "//button[contains(text(), 'Log in')]")
-                except:
-                    try:
-                        submit_button = form.find_element(By.XPATH, "//button[.//div[contains(text(), 'Log in')]]")
-                    except:
-                        raise InstagramAuthError("Could not find login button")
-            
-            # Click the button
-            try:
-                submit_button.click()
-            except:
-                try:
-                    driver.execute_script("arguments[0].click();", submit_button)
-                except:
-                    actions = webdriver.ActionChains(driver)
-                    actions.move_to_element(submit_button).click().perform()
-            
-            time.sleep(5)  # Wait for login process
+            # Locate and click the login/submit button.
+            submit_button = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
+            )
+            submit_button.click()
             logger.info("Clicked login button")
             
-            # Wait for successful login
-            success_selectors = [
-                "//div[@role='menuitem']",  # Profile menu item
-                "//span[contains(text(), 'Search')]",  # Search text
-                "//a[@href='/direct/inbox/']",  # Direct messages link
-                "//span[@class='_aaav']",  # Profile icon
-                "//a[@href='/explore/']"  # Explore link
+            # Wait for an element that only appears when logged in.
+            # Adjust the selectors if Instagram changes its layout.
+            success_indicators = [
+                (By.XPATH, "//div[@role='menuitem']"),
+                (By.XPATH, "//span[contains(text(), 'Search')]"),
+                (By.XPATH, "//a[contains(@href, '/direct/inbox/')]"),
+                (By.XPATH, "//span[contains(@class, '_aaav')]"),
+                (By.XPATH, "//a[contains(@href, '/explore/')]")
             ]
             
             login_successful = False
-            for selector in success_selectors:
+            for locator in success_indicators:
                 try:
-                    wait.until(EC.presence_of_element_located((By.XPATH, selector)))
+                    wait.until(EC.visibility_of_element_located(locator))
                     login_successful = True
+                    logger.info(f"Login indicator found: {locator}")
                     break
-                except:
+                except Exception:
                     continue
             
             if not login_successful:
+                # Try to capture possible error messages.
                 error_selectors = [
-                    "//p[@data-testid='login-error-message']",
-                    "//div[contains(@class, 'error')]",
-                    "//p[contains(text(), 'sorry')]",
-                    "//p[contains(text(), 'Please wait')]"
+                    (By.XPATH, "//p[@data-testid='login-error-message']"),
+                    (By.XPATH, "//div[contains(@class, 'error')]"),
+                    (By.XPATH, "//p[contains(text(), 'sorry')]"),
+                    (By.XPATH, "//p[contains(text(), 'Please wait')]")
                 ]
-                
-                for selector in error_selectors:
+                for sel in error_selectors:
                     try:
-                        error_elem = driver.find_element(By.XPATH, selector)
+                        error_elem = driver.find_element(*sel)
                         logger.error(f"Login error: {error_elem.text}")
                         return False
-                    except:
+                    except Exception:
                         continue
                 
                 logger.error("Could not verify login success")
                 return False
             
-            # Get and save cookies
+            # If login is successful, extract and save cookies.
             cookies = driver.get_cookies()
             if not cookies:
                 raise InstagramAuthError("No cookies found after login")
