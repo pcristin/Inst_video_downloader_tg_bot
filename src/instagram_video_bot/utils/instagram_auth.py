@@ -163,36 +163,51 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
     try:
         logger.info("Starting Instagram authentication process")
         driver = get_webdriver()
-        # Increase the explicit wait timeout if needed.
         wait = WebDriverWait(driver, 30)
-        
         try:
+            # Load the login page.
             driver.get('https://www.instagram.com/accounts/login/')
             logger.info("Instagram login page loaded")
             
-            # Wait for the username field to be visible.
-            # (Presence is not enough because Instagram sometimes hides the fields initially.)
-            username_input = wait.until(
-                EC.visibility_of_element_located((By.NAME, "username"))
-            )
+            # Allow a moment for the page to render any cookie/consent dialog.
+            time.sleep(3)
             
-            # (Optional) Accept cookies if the popup appears.
+            # Attempt to dismiss the cookie consent (if present).
             try:
-                # Try a couple of possible selectors for the "Accept" button.
-                accept_button = wait.until(EC.element_to_be_clickable((
-                    By.XPATH, "//*[contains(text(), 'Accept') or contains(text(), 'Allow')]"
-                )))
+                accept_button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Accept') or contains(text(), 'Allow')]"))
+                )
                 accept_button.click()
-                logger.info("Accepted cookies")
-                # Give the page a moment to update after clicking.
+                logger.info("Cookie consent accepted.")
+                # Allow time for the dialog to disappear.
                 time.sleep(2)
-            except Exception:
-                logger.debug("Cookie acceptance not required or button not found.")
+            except Exception as e:
+                logger.debug("Cookie consent dialog not found or already dismissed: " + str(e))
             
-            # Wait for the password field to be visible.
-            password_input = wait.until(
-                EC.visibility_of_element_located((By.NAME, "password"))
-            )
+            # Wait for the login form to become visible.
+            form = wait.until(EC.visibility_of_element_located((By.TAG_NAME, "form")))
+            logger.info("Login form located.")
+            
+            # Now wait for the username field.
+            try:
+                username_input = wait.until(
+                    EC.visibility_of_element_located((By.NAME, "username"))
+                )
+            except Exception as e:
+                logger.error("Username field not visible: " + str(e))
+                # As a fallback, try to locate it inside the form.
+                username_input = form.find_element(By.CSS_SELECTOR, "input[name='username']")
+            logger.info("Username input located.")
+            
+            # Wait for the password field.
+            try:
+                password_input = wait.until(
+                    EC.visibility_of_element_located((By.NAME, "password"))
+                )
+            except Exception as e:
+                logger.error("Password field not visible: " + str(e))
+                password_input = form.find_element(By.CSS_SELECTOR, "input[name='password']")
+            logger.info("Password input located.")
             
             # Fill in the login credentials.
             username_input.clear()
@@ -202,37 +217,39 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             password_input.clear()
             password_input.send_keys(settings.IG_PASSWORD)
             time.sleep(1)
-            logger.info("Filled in login credentials")
+            logger.info("Login credentials entered.")
             
-            # Locate and click the login/submit button.
-            submit_button = wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
-            )
+            # Locate and click the login button.
+            try:
+                submit_button = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[@type='submit']"))
+                )
+            except Exception as e:
+                logger.error("Login button not clickable: " + str(e))
+                submit_button = form.find_element(By.XPATH, "//button[contains(., 'Log in')]")
             submit_button.click()
-            logger.info("Clicked login button")
+            logger.info("Login button clicked.")
             
             # Wait for an element that only appears when logged in.
-            # Adjust the selectors if Instagram changes its layout.
+            # (You may need to adjust the following selector if Instagram changes its layout.)
             success_indicators = [
                 (By.XPATH, "//div[@role='menuitem']"),
                 (By.XPATH, "//span[contains(text(), 'Search')]"),
                 (By.XPATH, "//a[contains(@href, '/direct/inbox/')]"),
-                (By.XPATH, "//span[contains(@class, '_aaav')]"),
                 (By.XPATH, "//a[contains(@href, '/explore/')]")
             ]
-            
             login_successful = False
             for locator in success_indicators:
                 try:
                     wait.until(EC.visibility_of_element_located(locator))
-                    login_successful = True
                     logger.info(f"Login indicator found: {locator}")
+                    login_successful = True
                     break
                 except Exception:
                     continue
             
             if not login_successful:
-                # Try to capture possible error messages.
+                # Try capturing any error messages from Instagram.
                 error_selectors = [
                     (By.XPATH, "//p[@data-testid='login-error-message']"),
                     (By.XPATH, "//div[contains(@class, 'error')]"),
@@ -246,11 +263,10 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                         return False
                     except Exception:
                         continue
-                
-                logger.error("Could not verify login success")
+                logger.error("Login success could not be verified after clicking submit.")
                 return False
             
-            # If login is successful, extract and save cookies.
+            # Extract and save cookies.
             cookies = driver.get_cookies()
             if not cookies:
                 raise InstagramAuthError("No cookies found after login")
@@ -258,10 +274,10 @@ def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             save_cookies(cookies, settings.COOKIES_FILE)
             logger.info("Instagram authentication successful")
             return True
-            
+        
         finally:
             driver.quit()
-            
+    
     except Exception as e:
-        logger.error(f"Instagram authentication failed: {str(e)}")
+        logger.error("Instagram authentication failed: " + str(e), exc_info=True)
         return False
