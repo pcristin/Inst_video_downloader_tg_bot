@@ -45,7 +45,16 @@ def convert_playwright_cookie_to_ytdlp(cookie: Cookie) -> YtDlpCookie:
 
 async def setup_browser_context(playwright: Playwright) -> tuple[Browser, BrowserContext]:
     """Setup browser and context with proper configuration."""
-    browser_args = []
+    browser_args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-infobars',
+        '--window-position=0,0',
+        '--ignore-certifcate-errors',
+        '--ignore-certifcate-errors-spki-list',
+        '--disable-notifications',
+        '--disable-popup-blocking',
+    ]
     
     proxy: Optional[ProxySettings] = None
     if settings.PROXY_HOST and settings.PROXY_PORT:
@@ -59,20 +68,36 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
             })
 
     browser = await playwright.chromium.launch(
-        headless=True,
+        headless=False,  # Set to False for debugging
         args=browser_args
     )
     
     context = await browser.new_context(
         viewport={'width': 1920, 'height': 1080},
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        proxy=proxy
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        proxy=proxy,
+        java_script_enabled=True,
+        locale='en-US',
+        timezone_id='Europe/London',
+        geolocation={'latitude': 51.5074, 'longitude': -0.1278},  # London coordinates
+        permissions=['geolocation']
     )
     
-    # Disable WebDriver flag
+    # Additional stealth setup
     await context.add_init_script("""
+        // Overwrite the 'webdriver' property
         Object.defineProperty(navigator, 'webdriver', {
             get: () => undefined
+        });
+        
+        // Overwrite the plugins length
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5]
+        });
+        
+        // Overwrite the languages property
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en']
         });
     """)
     
@@ -122,27 +147,39 @@ async def login_to_instagram(page: Page) -> None:
         logger.info("Starting Instagram login process")
         logger.info(f"Using username: {settings.IG_USERNAME}")
         
-        # Wait for the login form to be ready
-        logger.debug("Waiting for login form...")
-        await page.wait_for_selector('input[name="username"]', timeout=10000)
-        logger.debug("Login form found")
+        # Wait for the page to be fully loaded
+        await page.wait_for_load_state('networkidle')
+        logger.debug("Page fully loaded")
         
         # Take screenshot before login
         await page.screenshot(path='before_login.png')
         
-        # Wait for and fill username field
+        # Wait for the login form with increased timeout
+        logger.debug("Waiting for login form...")
+        try:
+            await page.wait_for_selector('input[name="username"]', timeout=60000)
+            logger.debug("Login form found")
+        except Exception as e:
+            logger.error("Could not find login form, checking page content...")
+            page_content = await page.content()
+            if "challenge" in page_content.lower():
+                raise InstagramAuthError("Instagram is requesting verification. Please log in manually first.")
+            raise
+        
+        # Add random delays between actions
+        await asyncio.sleep(2)
+        
+        # Fill username with human-like typing
         logger.debug("Filling username...")
         username_input = page.get_by_label("Username or email")
-        await username_input.fill(settings.IG_USERNAME)
-        await page.wait_for_timeout(1000)
-        logger.debug("Username filled")
+        await username_input.fill(settings.IG_USERNAME, timeout=10000)
+        await asyncio.sleep(1.5)
         
-        # Wait for and fill password field
+        # Fill password with human-like typing
         logger.debug("Filling password...")
         password_input = page.get_by_label("Password")
-        await password_input.fill(settings.IG_PASSWORD)
-        await page.wait_for_timeout(1000)
-        logger.debug("Password filled")
+        await password_input.fill(settings.IG_PASSWORD, timeout=10000)
+        await asyncio.sleep(2)
         
         # Take screenshot after filling form
         await page.screenshot(path='filled_form.png')
@@ -150,13 +187,13 @@ async def login_to_instagram(page: Page) -> None:
         # Click login button
         logger.debug("Clicking login button...")
         login_button = page.get_by_role("button", name="Log in")
-        await login_button.click()
+        await login_button.click(timeout=10000)
         logger.debug("Login button clicked")
         
-        # Wait for successful login indicators
+        # Wait for successful login indicators with increased timeout
         logger.debug("Waiting for login confirmation...")
         try:
-            await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=10000)
+            await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=60000)
             logger.info("Successfully logged in to Instagram")
             
             # Take screenshot after successful login
@@ -165,18 +202,27 @@ async def login_to_instagram(page: Page) -> None:
         except Exception as e:
             # Take screenshot on error
             await page.screenshot(path='login_error.png')
+            page_content = await page.content()
+            
+            if "challenge" in page_content.lower():
+                raise InstagramAuthError("Instagram is requesting additional verification. Please log in manually first.")
+            
+            if "suspicious" in page_content.lower():
+                raise InstagramAuthError("Instagram detected suspicious activity. Please log in manually first.")
             
             # Check for error messages
             error_selectors = [
                 'text="Sorry, your password was incorrect."',
                 'text="The username you entered doesn\'t belong to an account."',
                 'text="Please wait a few minutes before you try again."',
-                '[data-testid="login-error-message"]'
+                '[data-testid="login-error-message"]',
+                'text="Suspicious Login Attempt"',
+                'text="We detected an unusual login attempt"'
             ]
             
             for selector in error_selectors:
                 try:
-                    error_text = await page.text_content(selector)
+                    error_text = await page.text_content(selector, timeout=5000)
                     if error_text:
                         logger.error(f"Login error: {error_text}")
                         raise InstagramAuthError(f"Login failed: {error_text}")
