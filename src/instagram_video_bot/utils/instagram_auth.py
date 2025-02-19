@@ -127,6 +127,9 @@ async def login_to_instagram(page: Page) -> None:
         await page.wait_for_selector('input[name="username"]', timeout=10000)
         logger.debug("Login form found")
         
+        # Take screenshot before login
+        await page.screenshot(path='before_login.png')
+        
         # Wait for and fill username field
         logger.debug("Filling username...")
         username_input = page.get_by_label("Username or email")
@@ -141,6 +144,9 @@ async def login_to_instagram(page: Page) -> None:
         await page.wait_for_timeout(1000)
         logger.debug("Password filled")
         
+        # Take screenshot after filling form
+        await page.screenshot(path='filled_form.png')
+        
         # Click login button
         logger.debug("Clicking login button...")
         login_button = page.get_by_role("button", name="Log in")
@@ -152,17 +158,25 @@ async def login_to_instagram(page: Page) -> None:
         try:
             await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=10000)
             logger.info("Successfully logged in to Instagram")
+            
+            # Take screenshot after successful login
+            await page.screenshot(path='after_login.png')
+            
         except Exception as e:
+            # Take screenshot on error
+            await page.screenshot(path='login_error.png')
+            
             # Check for error messages
             error_selectors = [
                 'text="Sorry, your password was incorrect."',
                 'text="The username you entered doesn\'t belong to an account."',
-                'text="Please wait a few minutes before you try again."'
+                'text="Please wait a few minutes before you try again."',
+                '[data-testid="login-error-message"]'
             ]
             
             for selector in error_selectors:
                 try:
-                    error_text = await page.text_content(f'[data-testid="login-error-message"], {selector}')
+                    error_text = await page.text_content(selector)
                     if error_text:
                         logger.error(f"Login error: {error_text}")
                         raise InstagramAuthError(f"Login failed: {error_text}")
@@ -222,6 +236,10 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                 ])
                 logger.info(f"Collected {len(cookies)} cookies")
                 
+                # Log cookie domains for debugging
+                domains = set(cookie.get('domain', '') for cookie in cookies)
+                logger.debug(f"Cookie domains: {domains}")
+                
                 # Save cookies for yt-dlp
                 logger.debug(f"Saving cookies to {settings.COOKIES_FILE}")
                 save_cookies(cookies, Path(settings.COOKIES_FILE))
@@ -250,7 +268,10 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
         logger.error(f"Failed to initialize Playwright: {str(e)}")
         raise InstagramAuthError(f"Failed to initialize browser: {str(e)}")
 
-# For synchronous usage in other parts of the code
 def refresh_instagram_cookies_sync(retry_count: int = 0) -> bool:
     """Synchronous wrapper for refresh_instagram_cookies."""
-    return asyncio.run(refresh_instagram_cookies(retry_count))
+    try:
+        return asyncio.run(refresh_instagram_cookies(retry_count))
+    except Exception as e:
+        logger.error(f"Failed to refresh cookies synchronously: {str(e)}")
+        return False
