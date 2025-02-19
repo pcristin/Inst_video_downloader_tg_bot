@@ -11,6 +11,9 @@ load_dotenv()
 class Settings(BaseSettings):
     """Application settings."""
     
+    # Development mode
+    DEV_MODE: bool = False
+    
     # Bot settings
     BOT_TOKEN: str
     
