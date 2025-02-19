@@ -1,4 +1,5 @@
 """Instagram video downloading service."""
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from yt_dlp import YoutubeDL
 
 from ..config.settings import settings
-from ..utils.instagram_auth import refresh_instagram_cookies
+from ..utils.instagram_auth import refresh_instagram_cookies, refresh_instagram_cookies_sync
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,10 @@ class VideoDownloader:
             AuthenticationError: If Instagram authentication fails
             DownloadError: If video download fails
         """
-        def try_download(retry: bool = False) -> VideoInfo:
+        async def try_download(retry: bool = False) -> VideoInfo:
             if retry:
                 logger.info("Retrying with fresh cookies...")
-                if not refresh_instagram_cookies():
+                if not await refresh_instagram_cookies():
                     raise AuthenticationError("Failed to refresh Instagram cookies")
 
             self.ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
@@ -105,10 +106,10 @@ class VideoDownloader:
                 raise DownloadError(f"Download failed: {str(e)}")
 
         try:
-            return try_download(retry=False)
+            return await try_download(retry=False)
         except Exception as e:
             error_str = str(e).lower()
             if "login required" in error_str or "rate-limit reached" in error_str:
                 logger.info("Authentication failed, retrying with fresh cookies...")
-                return try_download(retry=True)
+                return await try_download(retry=True)
             raise 
