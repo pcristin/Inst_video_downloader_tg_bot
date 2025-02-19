@@ -4,9 +4,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Any, TypedDict, Optional
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, ProxySettings, Cookie
 from playwright.async_api._generated import Playwright
 
 from ..config.settings import settings
@@ -18,10 +18,36 @@ class InstagramAuthError(Exception):
     """Raised when Instagram authentication fails."""
     pass
 
+class YtDlpCookie(TypedDict):
+    """Type definition for yt-dlp cookie format."""
+    domain: str
+    path: str
+    name: str
+    value: str
+    secure: bool
+    expires: int
+
+def convert_playwright_cookie_to_ytdlp(cookie: Cookie) -> YtDlpCookie:
+    """Convert a Playwright cookie to yt-dlp format."""
+    domain = cookie.get('domain', '')
+    # Ensure domain starts with a dot for non-specific subdomains
+    if domain and not domain.startswith('.') and domain.count('.') >= 1:
+        domain = '.' + domain
+
+    return {
+        'domain': domain,
+        'path': cookie.get('path', '/'),
+        'name': cookie.get('name', ''),
+        'value': cookie.get('value', ''),
+        'secure': cookie.get('secure', False),
+        'expires': int(cookie.get('expires', time.time() + 31536000))  # Default to 1 year
+    }
+
 async def setup_browser_context(playwright: Playwright) -> tuple[Browser, BrowserContext]:
     """Setup browser and context with proper configuration."""
     browser_args = []
     
+    proxy: Optional[ProxySettings] = None
     if settings.PROXY_HOST and settings.PROXY_PORT:
         proxy = {
             'server': f'http://{settings.PROXY_HOST}:{settings.PROXY_PORT}'
@@ -31,8 +57,6 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
                 'username': settings.PROXY_USERNAME,
                 'password': settings.PROXY_PASSWORD
             })
-    else:
-        proxy = None
 
     browser = await playwright.chromium.launch(
         headless=True,
@@ -54,23 +78,30 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
     
     return browser, context
 
-def format_cookie_for_yt_dlp(cookie: Dict) -> str:
+def format_cookie_for_yt_dlp(cookie: YtDlpCookie) -> str:
     """Format a cookie dictionary into Netscape format for yt-dlp."""
     return (
         f"{cookie['domain']}\tTRUE\t{cookie['path']}\t"
-        f"{'TRUE' if cookie.get('secure', False) else 'FALSE'}\t{cookie.get('expires', int(time.time()) + 31536000)}\t"
+        f"{'TRUE' if cookie['secure'] else 'FALSE'}\t{cookie['expires']}\t"
         f"{cookie['name']}\t{cookie['value']}"
     )
 
-def save_cookies(cookies: List[Dict], output_file: Path) -> None:
+def save_cookies(cookies: List[Cookie], output_file: Path) -> None:
     """Save cookies in Netscape format for yt-dlp."""
     try:
         with open(output_file, 'w', encoding='utf-8', newline='\n') as f:
-            f.write("# Netscape HTTP Cookie File\n")
-            for cookie in cookies:
-                if 'expires' not in cookie:
-                    cookie['expires'] = int(time.time()) + 3600 * 24 * 365
+            f.write("# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n# This is a generated file!  Do not edit.\n\n")
+            
+            # Convert and filter Instagram-related cookies
+            yt_dlp_cookies = [
+                convert_playwright_cookie_to_ytdlp(cookie)
+                for cookie in cookies
+                if '.instagram.com' in cookie.get('domain', '')
+            ]
+            
+            for cookie in yt_dlp_cookies:
                 f.write(format_cookie_for_yt_dlp(cookie) + '\n')
+                
         logger.info(f"Cookies saved to {output_file}")
     except Exception as e:
         raise InstagramAuthError(f"Failed to save cookies: {str(e)}")
@@ -127,11 +158,28 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                 # Perform login
                 await login_to_instagram(page)
                 
-                # Get cookies after successful login
-                cookies = await context.cookies()
+                # Visit multiple Instagram pages to ensure all necessary cookies are set
+                for url in [
+                    'https://www.instagram.com/',
+                    'https://www.instagram.com/direct/inbox/',
+                    'https://www.instagram.com/explore/'
+                ]:
+                    await page.goto(url)
+                    await page.wait_for_timeout(1000)
+                
+                # Get cookies for all Instagram domains
+                cookies = await context.cookies([
+                    'https://www.instagram.com',
+                    'https://instagram.com',
+                    'https://i.instagram.com',
+                    'https://graph.instagram.com'
+                ])
                 
                 # Save cookies for yt-dlp
-                save_cookies(cookies, Path('instagram_cookies.txt'))
+                save_cookies(cookies, Path(settings.COOKIES_FILE))
+                
+                # Log cookie info for debugging
+                logger.info(f"Saved {len(cookies)} Instagram cookies to {settings.COOKIES_FILE}")
                 
                 return True
                 
