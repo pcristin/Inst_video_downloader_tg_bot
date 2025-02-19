@@ -54,6 +54,11 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
         '--ignore-certifcate-errors-spki-list',
         '--disable-notifications',
         '--disable-popup-blocking',
+        '--disable-dev-shm-usage',  # Required for headless environments
+        '--disable-gpu',            # Required for some headless environments
+        '--no-first-run',
+        '--no-service-autorun',
+        '--password-store=basic'
     ]
     
     proxy: Optional[ProxySettings] = None
@@ -68,7 +73,7 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
             })
 
     browser = await playwright.chromium.launch(
-        headless=False,  # Set to False for debugging
+        headless=True,  # Always use headless mode for VPS
         args=browser_args
     )
     
@@ -99,7 +104,20 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en']
         });
+        
+        // Add webgl vendor
+        Object.defineProperty(navigator, 'vendor', {
+            get: () => 'Google Inc.'
+        });
+        
+        // Add platform
+        Object.defineProperty(navigator, 'platform', {
+            get: () => 'Win32'
+        });
     """)
+    
+    # Set default timeout
+    context.set_default_timeout(60000)  # 60 seconds
     
     return browser, context
 
@@ -151,9 +169,6 @@ async def login_to_instagram(page: Page) -> None:
         await page.wait_for_load_state('networkidle')
         logger.debug("Page fully loaded")
         
-        # Take screenshot before login
-        await page.screenshot(path='before_login.png')
-        
         # Wait for the login form with increased timeout
         logger.debug("Waiting for login form...")
         try:
@@ -172,17 +187,14 @@ async def login_to_instagram(page: Page) -> None:
         # Fill username with human-like typing
         logger.debug("Filling username...")
         username_input = page.get_by_label("Username or email")
-        await username_input.fill(settings.IG_USERNAME, timeout=10000)
+        await username_input.type(settings.IG_USERNAME, delay=100)  # Type with delay
         await asyncio.sleep(1.5)
         
         # Fill password with human-like typing
         logger.debug("Filling password...")
         password_input = page.get_by_label("Password")
-        await password_input.fill(settings.IG_PASSWORD, timeout=10000)
+        await password_input.type(settings.IG_PASSWORD, delay=100)  # Type with delay
         await asyncio.sleep(2)
-        
-        # Take screenshot after filling form
-        await page.screenshot(path='filled_form.png')
         
         # Click login button
         logger.debug("Clicking login button...")
@@ -196,12 +208,7 @@ async def login_to_instagram(page: Page) -> None:
             await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=60000)
             logger.info("Successfully logged in to Instagram")
             
-            # Take screenshot after successful login
-            await page.screenshot(path='after_login.png')
-            
         except Exception as e:
-            # Take screenshot on error
-            await page.screenshot(path='login_error.png')
             page_content = await page.content()
             
             if "challenge" in page_content.lower():
