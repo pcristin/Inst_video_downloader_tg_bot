@@ -118,39 +118,82 @@ async def handle_cookie_consent(page: Page) -> None:
 
 async def login_to_instagram(page: Page) -> None:
     """Handle the Instagram login process."""
-    logger.info("Starting Instagram login process")
-    
-    # Wait for and fill username field
-    username_input = page.get_by_label("Username or email")
-    await username_input.fill(settings.IG_USERNAME)
-    await page.wait_for_timeout(1000)
-    
-    # Wait for and fill password field
-    password_input = page.get_by_label("Password")
-    await password_input.fill(settings.IG_PASSWORD)
-    await page.wait_for_timeout(1000)
-    
-    # Click login button
-    login_button = page.get_by_role("button", name="Log in")
-    await login_button.click()
-    
-    # Wait for successful login indicators
     try:
-        await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=10000)
-        logger.info("Successfully logged in to Instagram")
+        logger.info("Starting Instagram login process")
+        logger.info(f"Using username: {settings.IG_USERNAME}")
+        
+        # Wait for the login form to be ready
+        logger.debug("Waiting for login form...")
+        await page.wait_for_selector('input[name="username"]', timeout=10000)
+        logger.debug("Login form found")
+        
+        # Wait for and fill username field
+        logger.debug("Filling username...")
+        username_input = page.get_by_label("Username or email")
+        await username_input.fill(settings.IG_USERNAME)
+        await page.wait_for_timeout(1000)
+        logger.debug("Username filled")
+        
+        # Wait for and fill password field
+        logger.debug("Filling password...")
+        password_input = page.get_by_label("Password")
+        await password_input.fill(settings.IG_PASSWORD)
+        await page.wait_for_timeout(1000)
+        logger.debug("Password filled")
+        
+        # Click login button
+        logger.debug("Clicking login button...")
+        login_button = page.get_by_role("button", name="Log in")
+        await login_button.click()
+        logger.debug("Login button clicked")
+        
+        # Wait for successful login indicators
+        logger.debug("Waiting for login confirmation...")
+        try:
+            await page.wait_for_selector('a[href="/direct/inbox/"]', timeout=10000)
+            logger.info("Successfully logged in to Instagram")
+        except Exception as e:
+            # Check for error messages
+            error_selectors = [
+                'text="Sorry, your password was incorrect."',
+                'text="The username you entered doesn\'t belong to an account."',
+                'text="Please wait a few minutes before you try again."'
+            ]
+            
+            for selector in error_selectors:
+                try:
+                    error_text = await page.text_content(f'[data-testid="login-error-message"], {selector}')
+                    if error_text:
+                        logger.error(f"Login error: {error_text}")
+                        raise InstagramAuthError(f"Login failed: {error_text}")
+                except Exception:
+                    continue
+            
+            # If no specific error found, raise the original error
+            logger.error(f"Login verification failed: {e}")
+            raise InstagramAuthError("Failed to verify successful login")
+            
     except Exception as e:
-        logger.error(f"Login verification failed: {e}")
-        raise InstagramAuthError("Failed to verify successful login")
+        if not isinstance(e, InstagramAuthError):
+            logger.error(f"Unexpected error during login: {str(e)}")
+            raise InstagramAuthError(f"Login process failed: {str(e)}")
+        raise
 
 async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
     """Refresh Instagram authentication cookies using Playwright."""
     try:
+        logger.info("Starting Instagram cookie refresh process")
         async with async_playwright() as p:
             browser, context = await setup_browser_context(p)
             
             try:
                 page = await context.new_page()
+                logger.debug("Opening Instagram login page...")
                 await page.goto('https://www.instagram.com/accounts/login/')
+                
+                # Take screenshot for debugging
+                await page.screenshot(path='login_page.png')
+                logger.debug("Login page screenshot saved as login_page.png")
                 
                 # Handle cookie consent if present
                 await handle_cookie_consent(page)
@@ -159,6 +202,7 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                 await login_to_instagram(page)
                 
                 # Visit multiple Instagram pages to ensure all necessary cookies are set
+                logger.debug("Visiting additional Instagram pages...")
                 for url in [
                     'https://www.instagram.com/',
                     'https://www.instagram.com/direct/inbox/',
@@ -166,20 +210,26 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                 ]:
                     await page.goto(url)
                     await page.wait_for_timeout(1000)
+                    logger.debug(f"Visited {url}")
                 
                 # Get cookies for all Instagram domains
+                logger.debug("Collecting cookies...")
                 cookies = await context.cookies([
                     'https://www.instagram.com',
                     'https://instagram.com',
                     'https://i.instagram.com',
                     'https://graph.instagram.com'
                 ])
+                logger.info(f"Collected {len(cookies)} cookies")
                 
                 # Save cookies for yt-dlp
+                logger.debug(f"Saving cookies to {settings.COOKIES_FILE}")
                 save_cookies(cookies, Path(settings.COOKIES_FILE))
-                
-                # Log cookie info for debugging
                 logger.info(f"Saved {len(cookies)} Instagram cookies to {settings.COOKIES_FILE}")
+                
+                # Take screenshot of logged-in state
+                await page.screenshot(path='logged_in.png')
+                logger.debug("Logged-in state screenshot saved as logged_in.png")
                 
                 return True
                 
