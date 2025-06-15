@@ -24,11 +24,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 2G
+          cpus: '0.8'  # 80% of 1 CPU
+          memory: 1G
         reservations:
-          cpus: '0.5'
-          memory: 512M
+          cpus: '0.2'  # 20% minimum
+          memory: 256M
     # Health check
     healthcheck:
       test: ["CMD", "python", "-m", "src.instagram_video_bot.utils.health_check"]

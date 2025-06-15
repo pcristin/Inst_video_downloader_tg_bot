@@ -15,12 +15,12 @@ services:
       # Enable development mode
       - DEV_MODE=true
       - LOG_LEVEL=DEBUG
-    # Remove resource limits for development
+    # Adjusted resource limits for development
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 4G
+          cpus: '0.9'  # 90% of 1 CPU for dev
+          memory: 1.5G
     # More frequent health checks in dev
     healthcheck:
       interval: 10s
