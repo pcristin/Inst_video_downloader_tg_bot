@@ -3,8 +3,8 @@
 echo "Setting up Two-Factor Authentication for Instagram Video Bot..."
 echo "=================================================="
 
-# Run the 2FA setup in a temporary container
-docker-compose run --rm instagram-video-bot python -m src.instagram_video_bot.setup_2fa
+# Run the 2FA setup in a temporary container, overriding the entrypoint
+docker-compose run --rm --entrypoint python instagram-video-bot -m src.instagram_video_bot.setup_2fa
 
 # Check if QR code was generated
 if [ -f "2fa_qr.png" ]; then
