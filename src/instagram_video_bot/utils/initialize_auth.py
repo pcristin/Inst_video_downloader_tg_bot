@@ -37,7 +37,20 @@ async def initialize_authentication():
 
 def initialize_auth_sync():
     """Synchronous wrapper for initialize_authentication."""
-    return asyncio.run(initialize_authentication())
+    try:
+        # Try to get existing event loop
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If loop is running, create a new task
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, initialize_authentication())
+                return future.result()
+        else:
+            return loop.run_until_complete(initialize_authentication())
+    except RuntimeError:
+        # No event loop exists, create a new one
+        return asyncio.run(initialize_authentication())
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

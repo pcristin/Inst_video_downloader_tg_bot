@@ -57,10 +57,6 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install chromium && \
-    playwright install-deps chromium
-
 # Copy application code
 COPY src/ ./src/
 
@@ -68,12 +64,15 @@ COPY src/ ./src/
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
 
-# Create necessary directories
+# Create necessary directories and set permissions
 RUN mkdir -p temp && \
     chown -R botuser:botuser /app
 
 # Switch to non-root user
 USER botuser
+
+# Install Playwright browsers as the botuser
+RUN playwright install chromium
 
 # Set the entrypoint
 ENTRYPOINT ["/app/docker-entrypoint.sh"] 

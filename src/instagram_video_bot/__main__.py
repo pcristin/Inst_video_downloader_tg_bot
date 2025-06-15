@@ -46,10 +46,9 @@ def main() -> None:
         # Create required directories
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Initialize Instagram authentication
-        logger.info("Initializing Instagram authentication...")
-        if not initialize_auth_sync():
-            logger.warning("Instagram authentication failed, bot will attempt to authenticate on first use")
+        # Skip Instagram authentication at startup to avoid event loop conflicts
+        # Authentication will happen automatically when first video is requested
+        logger.info("Bot will authenticate with Instagram when first video is requested")
         
         # Start the bot
         bot = TelegramBot()
