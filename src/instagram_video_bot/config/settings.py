@@ -30,10 +30,10 @@ class Settings(BaseSettings):
     PROXY_USERNAME: Optional[str] = None
     PROXY_PASSWORD: Optional[str] = None
     
-    # Paths
+    # Paths - with Docker support
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
-    TEMP_DIR: Path = BASE_DIR / "temp"
-    COOKIES_FILE: Path = BASE_DIR / "instagram_cookies.txt"
+    TEMP_DIR: Path = Path(os.getenv('TEMP_DIR', BASE_DIR / "temp"))
+    COOKIES_FILE: Path = Path(os.getenv('COOKIES_FILE', BASE_DIR / "instagram_cookies.txt"))
     
     # Video processing settings
     VIDEO_WIDTH: int = 320
@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     
+    # Docker-specific settings
+    RUNNING_IN_DOCKER: bool = os.path.exists('/.dockerenv')
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -52,7 +55,12 @@ class Settings(BaseSettings):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.TEMP_DIR.mkdir(exist_ok=True)
+        # Ensure directories exist
+        self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        # Create cookies file if it doesn't exist
+        if not self.COOKIES_FILE.exists():
+            self.COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.COOKIES_FILE.touch()
 
 # Create global settings instance
 settings = Settings() 
