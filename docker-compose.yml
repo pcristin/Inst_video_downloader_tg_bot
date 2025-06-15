@@ -10,14 +10,14 @@ services:
     volumes:
       # Mount temp directory for video downloads
       - ./temp:/app/temp
-      # Mount cookies file to persist authentication
-      - ./instagram_cookies.txt:/app/instagram_cookies.txt
+      # Mount cookies directory to persist authentication
+      - ./cookies:/app/cookies
       # Mount logs directory (optional)
       - ./logs:/app/logs
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
-      - COOKIES_FILE=/app/instagram_cookies.txt
+      - COOKIES_FILE=/app/cookies/instagram_cookies.txt
       # Additional environment variables for container
       - TZ=UTC
     # Resource limits (optional)
