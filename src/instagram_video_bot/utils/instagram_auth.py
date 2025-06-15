@@ -10,6 +10,7 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from playwright.async_api._generated import Playwright
 
 from ..config.settings import settings
+from .two_factor import TwoFactorAuth
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,64 @@ async def login_to_instagram(page: Page) -> None:
             raise InstagramAuthError("Could not find login button")
         
         await login_button.click()
+        
+        # Wait a bit to see if 2FA is required
+        await page.wait_for_timeout(3000)
+        
+        # Check for 2FA prompt
+        two_fa_selectors = [
+            'input[name="verificationCode"]',
+            'input[aria-label="Security code"]',
+            'input[placeholder*="code"]',
+            '//input[@name="verificationCode"]',
+            '//input[contains(@aria-label, "code")]'
+        ]
+        
+        two_fa_input = None
+        for selector in two_fa_selectors:
+            try:
+                if selector.startswith('//'):
+                    element = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
+                else:
+                    element = await page.wait_for_selector(selector, timeout=3000)
+                if element:
+                    two_fa_input = element
+                    break
+            except Exception:
+                continue
+        
+        if two_fa_input and settings.TOTP_SECRET:
+            logger.info("2FA required, generating code...")
+            auth = TwoFactorAuth()
+            code = auth.get_current_code()
+            logger.info(f"Using 2FA code: {code}")
+            
+            await two_fa_input.click()
+            await page.keyboard.type(code, delay=100)
+            
+            # Find and click confirm button
+            confirm_selectors = [
+                'button[type="button"]:has-text("Confirm")',
+                'button:has-text("Confirm")',
+                'button:has-text("Submit")',
+                '//button[contains(text(), "Confirm")]',
+                '//button[@type="button" and contains(text(), "Confirm")]'
+            ]
+            
+            for selector in confirm_selectors:
+                try:
+                    if selector.startswith('//'):
+                        button = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
+                    else:
+                        button = await page.wait_for_selector(selector, timeout=3000)
+                    if button:
+                        await button.click()
+                        break
+                except Exception:
+                    continue
+            
+            # Wait for navigation after 2FA
+            await page.wait_for_timeout(3000)
         
         success_selectors = [
             'a[href="/direct/inbox/"]',
