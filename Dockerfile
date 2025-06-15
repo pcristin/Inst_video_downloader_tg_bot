@@ -64,6 +64,10 @@ RUN playwright install chromium && \
 # Copy application code
 COPY src/ ./src/
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Create necessary directories
 RUN mkdir -p temp && \
     chown -R botuser:botuser /app
@@ -72,4 +76,4 @@ RUN mkdir -p temp && \
 USER botuser
 
 # Set the entrypoint
-ENTRYPOINT ["python", "-m", "src.instagram_video_bot"] 
+ENTRYPOINT ["/app/docker-entrypoint.sh"] 
