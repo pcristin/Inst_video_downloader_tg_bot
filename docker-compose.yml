@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  instagram-video-bot:
+    build: .
+    container_name: instagram-video-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount temp directory for video downloads
+      - ./temp:/app/temp
+      # Mount cookies file to persist authentication
+      - ./instagram_cookies.txt:/app/instagram_cookies.txt
+      # Mount logs directory (optional)
+      - ./logs:/app/logs
+    environment:
+      # Override paths to use container paths
+      - TEMP_DIR=/app/temp
+      - COOKIES_FILE=/app/instagram_cookies.txt
+      # Additional environment variables for container
+      - TZ=UTC
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.instagram_video_bot.utils.health_check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s 

@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  instagram-video-bot:
+    # Override for development
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Mount source code for hot reload
+      - ./src:/app/src:ro
+      # Mount requirements for easy updates
+      - ./requirements.txt:/app/requirements.txt:ro
+    environment:
+      # Enable development mode
+      - DEV_MODE=true
+      - LOG_LEVEL=DEBUG
+    # Remove resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+    # More frequent health checks in dev
+    healthcheck:
+      interval: 10s
+      timeout: 5s 
