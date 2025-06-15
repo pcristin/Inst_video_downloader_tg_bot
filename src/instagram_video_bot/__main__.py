@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config.settings import settings
 from .services.telegram_bot import TelegramBot
+from .utils.initialize_auth import initialize_auth_sync
 
 def setup_logging() -> None:
     """Configure logging for the application."""
@@ -44,6 +45,11 @@ def main() -> None:
         
         # Create required directories
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize Instagram authentication
+        logger.info("Initializing Instagram authentication...")
+        if not initialize_auth_sync():
+            logger.warning("Instagram authentication failed, bot will attempt to authenticate on first use")
         
         # Start the bot
         bot = TelegramBot()

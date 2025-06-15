@@ -12,9 +12,15 @@ if [ -d "$COOKIES_FILE" ]; then
     rm -rf "$COOKIES_FILE"
 fi
 
-if [ ! -f "$COOKIES_FILE" ]; then
-    echo "Creating cookies file..."
-    touch "$COOKIES_FILE"
+# Create a properly formatted Netscape cookies file if it doesn't exist or is empty
+if [ ! -f "$COOKIES_FILE" ] || [ ! -s "$COOKIES_FILE" ]; then
+    echo "Creating properly formatted cookies file..."
+    cat > "$COOKIES_FILE" << 'EOF'
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+EOF
 fi
 
 # Ensure temp directory exists
