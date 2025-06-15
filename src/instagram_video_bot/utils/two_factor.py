@@ -12,7 +12,9 @@ class TwoFactorAuth:
     
     def __init__(self):
         """Initialize 2FA with a secret key."""
-        self.secret = settings.TOTP_SECRET or pyotp.random_base32()
+        raw_secret = settings.TOTP_SECRET or pyotp.random_base32()
+        # Remove spaces and convert to uppercase for Base32 compatibility
+        self.secret = raw_secret.replace(' ', '').upper()
         self.totp = pyotp.TOTP(self.secret)
     
     def generate_qr(self, save_path: Path) -> None:
