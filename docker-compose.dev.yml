@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   instagram-video-bot:
     # Override for development
@@ -15,12 +13,6 @@ services:
       # Enable development mode
       - DEV_MODE=true
       - LOG_LEVEL=DEBUG
-    # Adjusted resource limits for development
-    deploy:
-      resources:
-        limits:
-          cpus: '0.9'  # 90% of 1 CPU for dev
-          memory: 1.5G
     # More frequent health checks in dev
     healthcheck:
       interval: 10s
