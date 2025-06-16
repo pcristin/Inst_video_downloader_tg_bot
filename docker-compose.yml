@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   instagram-video-bot:
     build: .
@@ -20,15 +18,6 @@ services:
       - COOKIES_FILE=/app/cookies/instagram_cookies.txt
       # Additional environment variables for container
       - TZ=UTC
-    # Resource limits (optional)
-    deploy:
-      resources:
-        limits:
-          cpus: '0.8'  # 80% of 1 CPU
-          memory: 1G
-        reservations:
-          cpus: '0.2'  # 20% minimum
-          memory: 256M
     # Health check
     healthcheck:
       test: ["CMD", "python", "-m", "src.instagram_video_bot.utils.health_check"]

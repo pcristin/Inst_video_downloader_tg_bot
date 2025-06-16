@@ -350,28 +350,82 @@ async def login_to_instagram(page: Page) -> None:
         # Add random initial delay
         await page.wait_for_timeout(random.randint(2000, 4000))
         
+        # Debug: Log current URL and page title
+        current_url = page.url
+        page_title = await page.title()
+        logger.info(f"Current URL: {current_url}")
+        logger.info(f"Page title: {page_title}")
+        
+        # Check if we're being blocked or redirected
+        if "challenge" in current_url.lower() or "checkpoint" in current_url.lower():
+            raise InstagramAuthError("Instagram presented a challenge/checkpoint page")
+        
+        # More comprehensive username selectors
         username_selectors = [
             'input[name="username"]',
             'input[aria-label="Phone number, username, or email"]',
             'input[aria-label="Username or email"]',
+            'input[autocomplete="username"]',
+            'input[placeholder*="username" i]',
+            'input[placeholder*="phone" i]',
+            'input[placeholder*="email" i]',
+            'input[type="text"][name="username"]',
+            'input[type="email"][name="username"]',
+            'input[type="tel"][name="username"]',
+            '#loginForm input[name="username"]',
+            'form input[name="username"]',
+            '[data-testid="username-input"]',
+            '[data-testid="login-username"]',
             '//input[@name="username"]',
-            '//input[contains(@aria-label, "username")]'
+            '//input[contains(@aria-label, "username")]',
+            '//input[contains(@aria-label, "Phone number")]',
+            '//input[contains(@aria-label, "email")]',
+            '//input[contains(@placeholder, "username")]',
+            '//input[contains(@placeholder, "phone")]',
+            '//input[contains(@placeholder, "email")]'
         ]
         
         username_input = None
-        for selector in username_selectors:
+        for i, selector in enumerate(username_selectors):
             try:
+                logger.debug(f"Trying username selector {i+1}/{len(username_selectors)}: {selector}")
                 if selector.startswith('//'):
-                    element = await page.wait_for_selector(f"xpath={selector}", timeout=5000)
+                    element = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
                 else:
-                    element = await page.wait_for_selector(selector, timeout=5000)
+                    element = await page.wait_for_selector(selector, timeout=3000)
                 if element:
-                    username_input = element
-                    break
-            except Exception:
+                    # Verify the element is visible and interactable
+                    is_visible = await element.is_visible()
+                    is_enabled = await element.is_enabled()
+                    logger.debug(f"Found username input with selector {i+1}: visible={is_visible}, enabled={is_enabled}")
+                    if is_visible and is_enabled:
+                        username_input = element
+                        break
+            except Exception as e:
+                logger.debug(f"Selector {i+1} failed: {str(e)}")
                 continue
         
         if not username_input:
+            # Debug: Save screenshot and page content
+            await page.screenshot(path='/app/temp/login_debug.png')
+            page_content = await page.content()
+            logger.error("Could not find username input field")
+            logger.debug(f"Page content length: {len(page_content)}")
+            
+            # Log first 2000 characters of page content for debugging
+            logger.debug(f"Page content preview: {page_content[:2000]}")
+            
+            # Check if login form exists at all
+            form_selectors = ['form', '#loginForm', '[role="main"]', 'main']
+            for selector in form_selectors:
+                try:
+                    form = await page.wait_for_selector(selector, timeout=2000)
+                    if form:
+                        logger.debug(f"Found form with selector: {selector}")
+                        break
+                except:
+                    continue
+            
             raise InstagramAuthError("Could not find username input field")
         
         # Human-like username typing
@@ -387,27 +441,45 @@ async def login_to_instagram(page: Page) -> None:
         # Random delay before password
         await page.wait_for_timeout(random.randint(800, 1500))
         
+        # More comprehensive password selectors
         password_selectors = [
             'input[name="password"]',
             'input[aria-label="Password"]',
+            'input[type="password"]',
+            'input[autocomplete="current-password"]',
+            'input[autocomplete="password"]',
+            'input[placeholder*="password" i]',
+            '#loginForm input[name="password"]',
+            'form input[name="password"]',
+            '[data-testid="password-input"]',
+            '[data-testid="login-password"]',
             '//input[@name="password"]',
-            '//input[@type="password"]'
+            '//input[@type="password"]',
+            '//input[contains(@aria-label, "Password")]',
+            '//input[contains(@placeholder, "password")]'
         ]
         
         password_input = None
-        for selector in password_selectors:
+        for i, selector in enumerate(password_selectors):
             try:
+                logger.debug(f"Trying password selector {i+1}/{len(password_selectors)}: {selector}")
                 if selector.startswith('//'):
-                    element = await page.wait_for_selector(f"xpath={selector}", timeout=5000)
+                    element = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
                 else:
-                    element = await page.wait_for_selector(selector, timeout=5000)
+                    element = await page.wait_for_selector(selector, timeout=3000)
                 if element:
-                    password_input = element
-                    break
-            except Exception:
+                    is_visible = await element.is_visible()
+                    is_enabled = await element.is_enabled()
+                    logger.debug(f"Found password input with selector {i+1}: visible={is_visible}, enabled={is_enabled}")
+                    if is_visible and is_enabled:
+                        password_input = element
+                        break
+            except Exception as e:
+                logger.debug(f"Password selector {i+1} failed: {str(e)}")
                 continue
         
         if not password_input:
+            await page.screenshot(path='/app/temp/password_debug.png')
             raise InstagramAuthError("Could not find password input field")
         
         # Human-like password typing
@@ -423,28 +495,49 @@ async def login_to_instagram(page: Page) -> None:
         # Random delay before clicking login
         await page.wait_for_timeout(random.randint(1000, 2000))
         
+        # More comprehensive login button selectors
         login_button_selectors = [
             'button[type="submit"]',
             'button:has-text("Log in")',
             'button:has-text("Log In")',
+            'button:has-text("Sign In")',
+            'input[type="submit"]',
+            'input[value="Log in"]',
+            'input[value="Log In"]',
+            '[role="button"]:has-text("Log in")',
+            '[data-testid="login-button"]',
+            '[data-testid="loginButton"]',
+            '#loginForm button[type="submit"]',
+            'form button[type="submit"]',
+            'button[aria-label="Log in"]',
             '//button[@type="submit"]',
-            '//button[contains(text(), "Log")]'
+            '//button[contains(text(), "Log")]',
+            '//input[@type="submit"]',
+            '//input[contains(@value, "Log")]',
+            '//button[contains(@aria-label, "Log")]'
         ]
         
         login_button = None
-        for selector in login_button_selectors:
+        for i, selector in enumerate(login_button_selectors):
             try:
+                logger.debug(f"Trying login button selector {i+1}/{len(login_button_selectors)}: {selector}")
                 if selector.startswith('//'):
-                    element = await page.wait_for_selector(f"xpath={selector}", timeout=5000)
+                    element = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
                 else:
-                    element = await page.wait_for_selector(selector, timeout=5000)
+                    element = await page.wait_for_selector(selector, timeout=3000)
                 if element:
-                    login_button = element
-                    break
-            except Exception:
+                    is_visible = await element.is_visible()
+                    is_enabled = await element.is_enabled()
+                    logger.debug(f"Found login button with selector {i+1}: visible={is_visible}, enabled={is_enabled}")
+                    if is_visible and is_enabled:
+                        login_button = element
+                        break
+            except Exception as e:
+                logger.debug(f"Login button selector {i+1} failed: {str(e)}")
                 continue
         
         if not login_button:
+            await page.screenshot(path='/app/temp/login_button_debug.png')
             raise InstagramAuthError("Could not find login button")
         
         await human_like_click(page, login_button)
@@ -452,13 +545,20 @@ async def login_to_instagram(page: Page) -> None:
         # Wait longer to see if 2FA is required
         await page.wait_for_timeout(random.randint(4000, 6000))
         
-        # Check for 2FA prompt
+        # Check for 2FA prompt with more selectors
         two_fa_selectors = [
             'input[name="verificationCode"]',
             'input[aria-label="Security code"]',
-            'input[placeholder*="code"]',
+            'input[placeholder*="code" i]',
+            'input[placeholder*="6-digit" i]',
+            'input[autocomplete="one-time-code"]',
+            '[data-testid="verification-code-input"]',
+            '[data-testid="confirmationCodeInput"]',
+            '#verificationCodeInput',
             '//input[@name="verificationCode"]',
-            '//input[contains(@aria-label, "code")]'
+            '//input[contains(@aria-label, "code")]',
+            '//input[contains(@placeholder, "code")]',
+            '//input[contains(@placeholder, "6-digit")]'
         ]
         
         two_fa_input = None
@@ -468,7 +568,7 @@ async def login_to_instagram(page: Page) -> None:
                     element = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
                 else:
                     element = await page.wait_for_selector(selector, timeout=3000)
-                if element:
+                if element and await element.is_visible():
                     two_fa_input = element
                     break
             except Exception:
@@ -497,7 +597,13 @@ async def login_to_instagram(page: Page) -> None:
                 'button[type="button"]:has-text("Confirm")',
                 'button:has-text("Confirm")',
                 'button:has-text("Submit")',
+                'button:has-text("Continue")',
+                'button:has-text("Verify")',
+                '[data-testid="confirm-button"]',
                 '//button[contains(text(), "Confirm")]',
+                '//button[contains(text(), "Submit")]',
+                '//button[contains(text(), "Continue")]',
+                '//button[contains(text(), "Verify")]',
                 '//button[@type="button" and contains(text(), "Confirm")]'
             ]
             
@@ -507,7 +613,7 @@ async def login_to_instagram(page: Page) -> None:
                         button = await page.wait_for_selector(f"xpath={selector}", timeout=3000)
                     else:
                         button = await page.wait_for_selector(selector, timeout=3000)
-                    if button:
+                    if button and await button.is_visible():
                         await human_like_click(page, button)
                         break
                 except Exception:
@@ -516,13 +622,22 @@ async def login_to_instagram(page: Page) -> None:
             # Wait longer after 2FA
             await page.wait_for_timeout(random.randint(5000, 8000))
         
-        # Check for successful login with longer timeout
+        # Check for successful login with longer timeout and more selectors
         success_selectors = [
             'a[href="/direct/inbox/"]',
             'a[href="/explore/"]',
             'svg[aria-label="Home"]',
+            'svg[aria-label="Direct"]',
+            '[data-testid="mobile-nav-button"]',
+            '[aria-label="Home"]',
+            '[aria-label="Direct"]',
+            'nav[role="navigation"]',
             '//a[@href="/direct/inbox/"]',
-            '//a[contains(@href, "/explore")]'
+            '//a[contains(@href, "/explore")]',
+            '//svg[@aria-label="Home"]',
+            '//svg[@aria-label="Direct"]',
+            '//*[@aria-label="Home"]',
+            '//*[@aria-label="Direct"]'
         ]
         
         logged_in = False
@@ -533,6 +648,7 @@ async def login_to_instagram(page: Page) -> None:
                 else:
                     await page.wait_for_selector(selector, timeout=15000)
                 logged_in = True
+                logger.info(f"Login success detected with selector: {selector}")
                 break
             except Exception:
                 continue
@@ -542,17 +658,32 @@ async def login_to_instagram(page: Page) -> None:
             # Add final random delay to look more human
             await page.wait_for_timeout(random.randint(2000, 4000))
         else:
-            error_content = await page.content()
-            if "challenge" in error_content.lower():
+            # More detailed error analysis
+            current_url = await page.url
+            page_content = await page.content()
+            await page.screenshot(path='/app/temp/login_failed_debug.png')
+            
+            logger.error(f"Login verification failed. Current URL: {current_url}")
+            
+            if "challenge" in page_content.lower():
                 raise InstagramAuthError("Instagram is requesting additional verification")
-            elif "suspicious" in error_content.lower():
+            elif "suspicious" in page_content.lower():
                 raise InstagramAuthError("Instagram detected suspicious activity")
+            elif "checkpoint" in current_url.lower():
+                raise InstagramAuthError("Instagram checkpoint - account may be restricted")
+            elif "login" in current_url.lower():
+                raise InstagramAuthError("Still on login page - credentials may be incorrect")
             else:
                 raise InstagramAuthError("Failed to verify successful login")
             
     except Exception as e:
         if not isinstance(e, InstagramAuthError):
             logger.error(f"Unexpected error during login: {str(e)}")
+            # Save debug screenshot on any error
+            try:
+                await page.screenshot(path='/app/temp/error_debug.png')
+            except:
+                pass
             raise InstagramAuthError(f"Login process failed: {str(e)}")
         raise
 
