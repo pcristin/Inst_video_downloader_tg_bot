@@ -3,17 +3,34 @@
 import sys
 import os
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Add the src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.instagram_video_bot.utils.cookie_importer import import_account_cookies
 
-# Replace this with your actual account line
-ACCOUNT_LINE = os.getenv('ACCOUNT_LINE')
+# Read account line from secure file
+def read_account_line():
+    """Read account line from account.txt file."""
+    account_file = Path('account.txt')
+    if not account_file.exists():
+        print("❌ account.txt file not found!")
+        print("Create account.txt file with your account line:")
+        print("echo 'your_account_line_here' > account.txt")
+        sys.exit(1)
+    
+    try:
+        with open(account_file, 'r', encoding='utf-8') as f:
+            line = f.read().strip()
+            if not line:
+                print("❌ account.txt is empty!")
+                sys.exit(1)
+            return line
+    except Exception as e:
+        print(f"❌ Error reading account.txt: {e}")
+        sys.exit(1)
+
+ACCOUNT_LINE = read_account_line()
 
 # Determine output file path
 if os.path.exists('/.dockerenv'):
