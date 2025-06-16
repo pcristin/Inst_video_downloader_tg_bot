@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from typing import Dict, List, Any, TypedDict, Optional
 
+# type: ignore
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, ProxySettings, Cookie
 from playwright.async_api._generated import Playwright
 
