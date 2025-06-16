@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+import random
 from pathlib import Path
 from typing import Dict, List, Any, TypedDict, Optional
 
@@ -72,7 +73,8 @@ async def handle_cookie_consent(page: Page) -> None:
         consent_button = page.get_by_role("button", name="Allow all cookies")
         if await consent_button.is_visible(timeout=5000):
             await consent_button.click()
-            await page.wait_for_timeout(1000)
+            # Add random delay
+            await page.wait_for_timeout(random.randint(1000, 2000))
     except Exception:
         pass
 
@@ -104,13 +106,20 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
             })
 
     browser = await playwright.chromium.launch(
-        headless=True,
+        headless=False,  # Changed to non-headless to avoid detection
         args=browser_args
     )
     
+    # More realistic user agents
+    user_agents = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    ]
+    
     context = await browser.new_context(
         viewport={'width': 1920, 'height': 1080},
-        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        user_agent=random.choice(user_agents),  # Random user agent
         proxy=proxy,
         java_script_enabled=True,
         locale='en-US',
@@ -131,11 +140,29 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
     
     return browser, context
 
+async def human_like_type(page: Page, selector: str, text: str) -> None:
+    """Type text with human-like delays and patterns."""
+    element = await page.wait_for_selector(selector)
+    await element.click()
+    
+    # Clear existing text
+    await element.evaluate('el => el.value = ""')
+    
+    # Type with random delays between characters
+    for char in text:
+        await page.keyboard.type(char, delay=random.randint(50, 200))
+        # Occasionally pause as humans do
+        if random.random() < 0.1:  # 10% chance
+            await page.wait_for_timeout(random.randint(200, 500))
+
 async def login_to_instagram(page: Page) -> None:
-    """Handle the Instagram login process."""
+    """Handle the Instagram login process with human-like behavior."""
     try:
         logger.info("Starting Instagram login process")
         await page.wait_for_load_state('networkidle')
+        
+        # Add random initial delay
+        await page.wait_for_timeout(random.randint(2000, 4000))
         
         username_selectors = [
             'input[name="username"]',
@@ -161,9 +188,18 @@ async def login_to_instagram(page: Page) -> None:
         if not username_input:
             raise InstagramAuthError("Could not find username input field")
         
+        # Human-like username typing
         await username_input.evaluate('el => el.value = ""')
         await username_input.click()
-        await page.keyboard.type(settings.IG_USERNAME, delay=100)
+        await page.wait_for_timeout(random.randint(500, 1000))
+        
+        for char in settings.IG_USERNAME:
+            await page.keyboard.type(char, delay=random.randint(80, 250))
+            if random.random() < 0.05:  # 5% chance to pause
+                await page.wait_for_timeout(random.randint(100, 300))
+        
+        # Random delay before password
+        await page.wait_for_timeout(random.randint(800, 1500))
         
         password_selectors = [
             'input[name="password"]',
@@ -188,9 +224,18 @@ async def login_to_instagram(page: Page) -> None:
         if not password_input:
             raise InstagramAuthError("Could not find password input field")
         
+        # Human-like password typing
         await password_input.evaluate('el => el.value = ""')
         await password_input.click()
-        await page.keyboard.type(settings.IG_PASSWORD, delay=100)
+        await page.wait_for_timeout(random.randint(300, 800))
+        
+        for char in settings.IG_PASSWORD:
+            await page.keyboard.type(char, delay=random.randint(70, 200))
+            if random.random() < 0.03:  # 3% chance to pause
+                await page.wait_for_timeout(random.randint(100, 400))
+        
+        # Random delay before clicking login
+        await page.wait_for_timeout(random.randint(1000, 2000))
         
         login_button_selectors = [
             'button[type="submit"]',
@@ -218,8 +263,8 @@ async def login_to_instagram(page: Page) -> None:
         
         await login_button.click()
         
-        # Wait a bit to see if 2FA is required
-        await page.wait_for_timeout(3000)
+        # Wait longer to see if 2FA is required
+        await page.wait_for_timeout(random.randint(4000, 6000))
         
         # Check for 2FA prompt
         two_fa_selectors = [
@@ -249,8 +294,17 @@ async def login_to_instagram(page: Page) -> None:
             code = auth.get_current_code()
             logger.info(f"Using 2FA code: {code}")
             
+            # Human-like 2FA code entry
             await two_fa_input.click()
-            await page.keyboard.type(code, delay=100)
+            await page.wait_for_timeout(random.randint(500, 1000))
+            
+            for char in code:
+                await page.keyboard.type(char, delay=random.randint(150, 300))
+                if random.random() < 0.1:  # 10% chance to pause
+                    await page.wait_for_timeout(random.randint(200, 500))
+            
+            # Wait before confirming
+            await page.wait_for_timeout(random.randint(1000, 2000))
             
             # Find and click confirm button
             confirm_selectors = [
@@ -273,9 +327,10 @@ async def login_to_instagram(page: Page) -> None:
                 except Exception:
                     continue
             
-            # Wait for navigation after 2FA
-            await page.wait_for_timeout(3000)
+            # Wait longer after 2FA
+            await page.wait_for_timeout(random.randint(5000, 8000))
         
+        # Check for successful login with longer timeout
         success_selectors = [
             'a[href="/direct/inbox/"]',
             'a[href="/explore/"]',
@@ -288,9 +343,9 @@ async def login_to_instagram(page: Page) -> None:
         for selector in success_selectors:
             try:
                 if selector.startswith('//'):
-                    await page.wait_for_selector(f"xpath={selector}", timeout=10000)
+                    await page.wait_for_selector(f"xpath={selector}", timeout=15000)
                 else:
-                    await page.wait_for_selector(selector, timeout=10000)
+                    await page.wait_for_selector(selector, timeout=15000)
                 logged_in = True
                 break
             except Exception:
@@ -298,6 +353,8 @@ async def login_to_instagram(page: Page) -> None:
         
         if logged_in:
             logger.info("Successfully logged in to Instagram")
+            # Add final random delay to look more human
+            await page.wait_for_timeout(random.randint(2000, 4000))
         else:
             error_content = await page.content()
             if "challenge" in error_content.lower():
@@ -323,6 +380,10 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             try:
                 page = await context.new_page()
                 await page.goto('https://www.instagram.com/accounts/login/')
+                
+                # Add random delay after page load
+                await page.wait_for_timeout(random.randint(2000, 4000))
+                
                 await handle_cookie_consent(page)
                 await login_to_instagram(page)
                 
@@ -333,7 +394,8 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
                     'https://www.instagram.com/explore/'
                 ]:
                     await page.goto(url)
-                    await page.wait_for_timeout(1000)
+                    # Random delay between page visits
+                    await page.wait_for_timeout(random.randint(1500, 3000))
                 
                 cookies = await context.cookies([
                     'https://www.instagram.com',
@@ -349,7 +411,8 @@ async def refresh_instagram_cookies(retry_count: int = 0) -> bool:
             except Exception as e:
                 if retry_count < 2:
                     logger.warning(f"Login attempt failed, retrying... Error: {str(e)}")
-                    await asyncio.sleep(5)
+                    # Longer delay between retries to avoid looking automated
+                    await asyncio.sleep(random.randint(10, 20))
                     return await refresh_instagram_cookies(retry_count + 1)
                 else:
                     logger.error(f"Login failed after {retry_count + 1} attempts: {str(e)}")
