@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import random
+import math
 from pathlib import Path
 from typing import Dict, List, Any, TypedDict, Optional
 
@@ -91,7 +92,31 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
         '--disable-gpu',
         '--no-first-run',
         '--no-service-autorun',
-        '--password-store=basic'
+        '--password-store=basic',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-extensions',
+        '--disable-plugins',
+        '--disable-images',
+        '--disable-javascript-harmony-shipping',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--disable-hang-monitor',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-update',
+        '--no-default-browser-check',
+        '--disable-default-apps',
+        '--disable-domain-reliability',
+        '--disable-background-networking',
+        '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-back-forward-cache',
+        '--disable-logging',
+        '--disable-permissions-api',
+        '--hide-scrollbars',
+        '--mute-audio'
     ]
     
     proxy: Optional[ProxySettings] = None
@@ -106,7 +131,7 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
             })
 
     browser = await playwright.chromium.launch(
-        headless=False,  # Changed to non-headless to avoid detection
+        headless=True,  # Back to headless for VPS compatibility
         args=browser_args
     )
     
@@ -123,19 +148,140 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
         proxy=proxy,
         java_script_enabled=True,
         locale='en-US',
-        timezone_id='America/Los_Angeles'
+        timezone_id='America/Los_Angeles',
+        color_scheme='light',
+        reduced_motion='no-preference',
+        forced_colors='none',
+        extra_http_headers={
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0'
+        }
     )
     
+    # Advanced anti-detection script
     await context.add_init_script("""
+        // Remove webdriver property
         Object.defineProperty(navigator, 'webdriver', {
             get: () => undefined
         });
+        
+        // Mock plugins
         Object.defineProperty(navigator, 'plugins', {
             get: () => [1, 2, 3, 4, 5]
         });
+        
+        // Mock languages
         Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en']
         });
+        
+        // Mock permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+        
+        // Mock chrome runtime
+        if (!window.chrome) {
+            window.chrome = {};
+        }
+        if (!window.chrome.runtime) {
+            window.chrome.runtime = {};
+        }
+        
+        // Hide automation traces
+        delete window.navigator.__proto__.webdriver;
+        
+        // Override the plugins property to use a custom getter
+        Object.defineProperty(navigator, 'plugins', {
+            get: function() {
+                return [1, 2, 3, 4, 5];
+            },
+        });
+        
+        // Mock battery API
+        Object.defineProperty(navigator, 'getBattery', {
+            get: () => () => Promise.resolve({
+                charging: true,
+                chargingTime: 0,
+                dischargingTime: Infinity,
+                level: 1
+            })
+        });
+        
+        // Mock connection
+        Object.defineProperty(navigator, 'connection', {
+            get: () => ({
+                effectiveType: '4g',
+                rtt: 50,
+                downlink: 10,
+                saveData: false
+            })
+        });
+        
+        // Mock hardware concurrency
+        Object.defineProperty(navigator, 'hardwareConcurrency', {
+            get: () => 4
+        });
+        
+        // Mock device memory
+        Object.defineProperty(navigator, 'deviceMemory', {
+            get: () => 8
+        });
+        
+        // Override toString to hide headless nature
+        const elementDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            ...elementDescriptor,
+            get: function() {
+                if (this.tagName === 'BODY') {
+                    return Math.max(document.documentElement.clientHeight, window.innerHeight || 0);
+                }
+                return elementDescriptor.get.apply(this);
+            }
+        });
+        
+        // Mock screen properties
+        Object.defineProperty(screen, 'availTop', { get: () => 0 });
+        Object.defineProperty(screen, 'availLeft', { get: () => 0 });
+        Object.defineProperty(screen, 'availWidth', { get: () => 1920 });
+        Object.defineProperty(screen, 'availHeight', { get: () => 1080 });
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+        Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+        
+        // Mock notification permission
+        Object.defineProperty(Notification, 'permission', {
+            get: () => 'default'
+        });
+        
+        // Add some realistic properties
+        Object.defineProperty(window, 'outerHeight', { get: () => 1080 });
+        Object.defineProperty(window, 'outerWidth', { get: () => 1920 });
+        
+        // Mock speech synthesis
+        if (!window.speechSynthesis) {
+            window.speechSynthesis = {
+                getVoices: () => [],
+                speak: () => {},
+                cancel: () => {},
+                pause: () => {},
+                resume: () => {},
+                speaking: false,
+                pending: false,
+                paused: false
+            };
+        }
     """)
     
     return browser, context
@@ -143,6 +289,16 @@ async def setup_browser_context(playwright: Playwright) -> tuple[Browser, Browse
 async def human_like_type(page: Page, selector: str, text: str) -> None:
     """Type text with human-like delays and patterns."""
     element = await page.wait_for_selector(selector)
+    
+    # Move mouse to element before clicking
+    box = await element.bounding_box()
+    if box:
+        # Add some randomness to click position
+        x = box['x'] + box['width'] / 2 + random.randint(-20, 20)
+        y = box['y'] + box['height'] / 2 + random.randint(-5, 5)
+        await page.mouse.move(x, y)
+        await page.wait_for_timeout(random.randint(100, 300))
+    
     await element.click()
     
     # Clear existing text
@@ -154,6 +310,36 @@ async def human_like_type(page: Page, selector: str, text: str) -> None:
         # Occasionally pause as humans do
         if random.random() < 0.1:  # 10% chance
             await page.wait_for_timeout(random.randint(200, 500))
+
+async def human_like_click(page: Page, element) -> None:
+    """Click an element with human-like mouse movement."""
+    box = await element.bounding_box()
+    if box:
+        # Add randomness to click position
+        x = box['x'] + box['width'] / 2 + random.randint(-10, 10)
+        y = box['y'] + box['height'] / 2 + random.randint(-3, 3)
+        
+        # Move mouse in a slightly curved path
+        current_pos = await page.evaluate('() => [window.mouseX || 0, window.mouseY || 0]')
+        start_x, start_y = current_pos[0], current_pos[1]
+        
+        # Move in 3-5 steps
+        steps = random.randint(3, 5)
+        for i in range(steps):
+            progress = (i + 1) / steps
+            # Add slight curve
+            curve_offset = math.sin(progress * math.pi) * random.randint(-5, 5)
+            intermediate_x = start_x + (x - start_x) * progress + curve_offset
+            intermediate_y = start_y + (y - start_y) * progress
+            
+            await page.mouse.move(intermediate_x, intermediate_y)
+            await page.wait_for_timeout(random.randint(20, 50))
+        
+        # Final position and click
+        await page.mouse.move(x, y)
+        await page.wait_for_timeout(random.randint(50, 150))
+    
+    await element.click()
 
 async def login_to_instagram(page: Page) -> None:
     """Handle the Instagram login process with human-like behavior."""
@@ -261,7 +447,7 @@ async def login_to_instagram(page: Page) -> None:
         if not login_button:
             raise InstagramAuthError("Could not find login button")
         
-        await login_button.click()
+        await human_like_click(page, login_button)
         
         # Wait longer to see if 2FA is required
         await page.wait_for_timeout(random.randint(4000, 6000))
@@ -322,7 +508,7 @@ async def login_to_instagram(page: Page) -> None:
                     else:
                         button = await page.wait_for_selector(selector, timeout=3000)
                     if button:
-                        await button.click()
+                        await human_like_click(page, button)
                         break
                 except Exception:
                     continue
