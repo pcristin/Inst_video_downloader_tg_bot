@@ -46,9 +46,17 @@ def main() -> None:
         # Create required directories
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Skip Instagram authentication at startup to avoid event loop conflicts
-        # Authentication will happen automatically when first video is requested
-        logger.info("Bot will authenticate with Instagram when first video is requested")
+        # Check if cookies file exists
+        if settings.COOKIES_FILE.exists():
+            logger.info(f"Found cookies file: {settings.COOKIES_FILE}")
+            logger.info("Bot will use existing cookies for Instagram authentication")
+        else:
+            logger.warning(f"No cookies file found at: {settings.COOKIES_FILE}")
+            logger.warning("You need to import cookies before the bot can work")
+            logger.warning("Run: python3 import_cookies.py")
+        
+        logger.info("Note: Automatic cookie refresh is disabled to prevent login loops")
+        logger.info("If authentication fails, manually refresh cookies with: python3 refresh_cookies.py")
         
         # Start the bot
         bot = TelegramBot()
