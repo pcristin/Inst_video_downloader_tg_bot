@@ -21,9 +21,6 @@ restart: ## Restart the bot
 logs: ## View bot logs (follow mode)
 	docker-compose logs -f
 
-restart: ## Restart the bot
-	docker-compose restart
-
 shell: ## Open a shell in the running container
 	docker-compose exec instagram-video-bot /bin/bash
 
