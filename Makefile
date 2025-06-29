@@ -15,6 +15,9 @@ up: ## Start the bot in detached mode
 down: ## Stop the bot
 	docker-compose down
 
+restart: ## Restart the bot
+	docker-compose restart
+
 logs: ## View bot logs (follow mode)
 	docker-compose logs -f
 
