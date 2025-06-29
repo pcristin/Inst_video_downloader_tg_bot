@@ -60,6 +60,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY src/ ./src/
 
+# Copy management scripts
+COPY manage_accounts.py check_cookies.py monitor_cookies.py refresh_cookies.py warmup_account.py ./
+
 # Copy entrypoint script
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
