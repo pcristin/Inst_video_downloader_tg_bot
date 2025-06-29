@@ -78,8 +78,21 @@ class TelegramBot:
                 await status_message.delete()
 
         except VideoDownloadError as e:
-            error_message = f"❌ Sorry, couldn't download the video: {str(e)}"
-            logger.error(error_message)
+            error_str = str(e).lower()
+            if "authentication failed" in error_str or "cookies have expired" in error_str:
+                error_message = (
+                    "🔐 Instagram authentication failed. The session has expired.\n"
+                    "The bot administrator needs to refresh the cookies.\n"
+                    "Please try again later."
+                )
+            elif "rate-limit" in error_str:
+                error_message = (
+                    "⏳ Instagram rate limit reached. Please wait a few minutes and try again."
+                )
+            else:
+                error_message = f"❌ Sorry, couldn't download the video: {str(e)}"
+            
+            logger.error(f"Download error for {url}: {str(e)}")
             await self._handle_error(update.message, status_message, error_message)
 
         except Exception as e:

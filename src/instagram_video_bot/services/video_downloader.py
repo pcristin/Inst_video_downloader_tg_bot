@@ -80,8 +80,13 @@ class VideoDownloader:
         async def try_download(retry: bool = False) -> VideoInfo:
             if retry:
                 logger.info("Retrying with fresh cookies...")
-                if not await refresh_instagram_cookies():
-                    raise AuthenticationError("Failed to refresh Instagram cookies")
+                try:
+                    success = await refresh_instagram_cookies()
+                    if not success:
+                        raise AuthenticationError("Failed to refresh Instagram cookies - please update cookies manually")
+                except Exception as e:
+                    logger.error(f"Cookie refresh failed: {str(e)}")
+                    raise AuthenticationError(f"Cookie refresh failed: {str(e)}. Please import fresh cookies using: python3 import_cookies.py")
 
             self.ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
 
@@ -109,7 +114,16 @@ class VideoDownloader:
             return await try_download(retry=False)
         except Exception as e:
             error_str = str(e).lower()
-            if "login required" in error_str or "rate-limit reached" in error_str:
+            if ("login required" in error_str or 
+                "rate-limit reached" in error_str or 
+                "no csrf token" in error_str):
                 logger.info("Authentication failed, retrying with fresh cookies...")
-                return await try_download(retry=True)
+                try:
+                    return await try_download(retry=True)
+                except AuthenticationError:
+                    # Don't retry again if authentication fails
+                    raise AuthenticationError(
+                        "Instagram authentication failed. Your cookies have expired. "
+                        "Please run 'python3 import_cookies.py' to import fresh cookies."
+                    )
             raise 
