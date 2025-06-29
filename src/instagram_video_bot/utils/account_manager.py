@@ -1,0 +1,246 @@
+"""Account manager for handling multiple Instagram accounts."""
+import json
+import logging
+import random
+import time
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from ..config.settings import settings
+from .instagram_auth import refresh_instagram_cookies_sync
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class Account:
+    """Instagram account data."""
+    username: str
+    password: str
+    totp_secret: str
+    last_used: Optional[datetime] = None
+    is_banned: bool = False
+    cookies_file: Optional[Path] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            'username': self.username,
+            'password': self.password,
+            'totp_secret': self.totp_secret,
+            'last_used': self.last_used.isoformat() if self.last_used else None,
+            'is_banned': self.is_banned,
+            'cookies_file': str(self.cookies_file) if self.cookies_file else None
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Account':
+        """Create from dictionary."""
+        return cls(
+            username=data['username'],
+            password=data['password'],
+            totp_secret=data['totp_secret'],
+            last_used=datetime.fromisoformat(data['last_used']) if data.get('last_used') else None,
+            is_banned=data.get('is_banned', False),
+            cookies_file=Path(data['cookies_file']) if data.get('cookies_file') else None
+        )
+
+class AccountManager:
+    """Manages multiple Instagram accounts with rotation and health tracking."""
+    
+    def __init__(self, accounts_file: Path = Path('accounts.txt'), 
+                 state_file: Path = Path('accounts_state.json')):
+        """Initialize account manager."""
+        self.accounts_file = accounts_file
+        self.state_file = state_file
+        self.accounts: List[Account] = []
+        self.current_account: Optional[Account] = None
+        self.cookies_dir = Path('cookies')
+        self.cookies_dir.mkdir(exist_ok=True)
+        
+        # Load accounts
+        self._load_accounts()
+        self._load_state()
+    
+    def _load_accounts(self) -> None:
+        """Load accounts from file."""
+        if not self.accounts_file.exists():
+            logger.warning(f"No accounts file found at {self.accounts_file}")
+            return
+        
+        with open(self.accounts_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Parse account format: username|password|totp_secret
+                parts = line.split('|')
+                if len(parts) >= 3:
+                    account = Account(
+                        username=parts[0].strip(),
+                        password=parts[1].strip(),
+                        totp_secret=parts[2].strip()
+                    )
+                    self.accounts.append(account)
+        
+        logger.info(f"Loaded {len(self.accounts)} accounts")
+    
+    def _load_state(self) -> None:
+        """Load account state from JSON file."""
+        if not self.state_file.exists():
+            return
+        
+        try:
+            with open(self.state_file, 'r') as f:
+                state = json.load(f)
+            
+            # Update accounts with saved state
+            for saved_account in state.get('accounts', []):
+                for account in self.accounts:
+                    if account.username == saved_account['username']:
+                        account.last_used = datetime.fromisoformat(saved_account['last_used']) if saved_account.get('last_used') else None
+                        account.is_banned = saved_account.get('is_banned', False)
+                        account.cookies_file = Path(saved_account['cookies_file']) if saved_account.get('cookies_file') else None
+                        break
+        except Exception as e:
+            logger.error(f"Failed to load state: {e}")
+    
+    def _save_state(self) -> None:
+        """Save account state to JSON file."""
+        try:
+            state = {
+                'accounts': [acc.to_dict() for acc in self.accounts],
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+    
+    def get_next_account(self) -> Optional[Account]:
+        """Get the next available account using rotation."""
+        available_accounts = [
+            acc for acc in self.accounts 
+            if not acc.is_banned
+        ]
+        
+        if not available_accounts:
+            logger.error("No available accounts!")
+            return None
+        
+        # Sort by last used time (oldest first)
+        available_accounts.sort(
+            key=lambda acc: acc.last_used or datetime.min
+        )
+        
+        # Get the account that hasn't been used for the longest time
+        selected = available_accounts[0]
+        
+        # Check if it was used recently (within last hour)
+        if selected.last_used:
+            time_since_used = datetime.now() - selected.last_used
+            if time_since_used < timedelta(hours=1):
+                logger.warning(f"Account {selected.username} was used recently ({time_since_used.seconds//60} minutes ago)")
+                # Add some randomness to avoid patterns
+                if len(available_accounts) > 1:
+                    selected = random.choice(available_accounts[:3])  # Pick from top 3 least recently used
+        
+        return selected
+    
+    def setup_account(self, account: Account) -> bool:
+        """Setup an account by logging in and saving cookies."""
+        logger.info(f"Setting up account: {account.username}")
+        
+        # Update environment variables for login
+        import os
+        os.environ['IG_USERNAME'] = account.username
+        os.environ['IG_PASSWORD'] = account.password
+        os.environ['TOTP_SECRET'] = account.totp_secret
+        
+        # Reload settings to pick up new values
+        settings.IG_USERNAME = account.username
+        settings.IG_PASSWORD = account.password
+        settings.TOTP_SECRET = account.totp_secret
+        
+        # Set cookies file path for this account
+        cookies_file = self.cookies_dir / f"{account.username}_cookies.txt"
+        settings.COOKIES_FILE = cookies_file
+        
+        try:
+            # Try to login and generate cookies
+            success = refresh_instagram_cookies_sync()
+            
+            if success:
+                account.cookies_file = cookies_file
+                account.last_used = datetime.now()
+                self.current_account = account
+                self._save_state()
+                logger.info(f"Successfully setup account: {account.username}")
+                return True
+            else:
+                logger.error(f"Failed to setup account: {account.username}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error setting up account {account.username}: {e}")
+            return False
+    
+    def mark_account_banned(self, account: Account) -> None:
+        """Mark an account as banned."""
+        logger.warning(f"Marking account as banned: {account.username}")
+        account.is_banned = True
+        self._save_state()
+        
+        # Try to switch to next account
+        next_account = self.get_next_account()
+        if next_account:
+            logger.info(f"Switching to next account: {next_account.username}")
+            self.setup_account(next_account)
+    
+    def rotate_account(self) -> bool:
+        """Rotate to the next available account."""
+        next_account = self.get_next_account()
+        if not next_account:
+            logger.error("No accounts available for rotation!")
+            return False
+        
+        if next_account == self.current_account:
+            logger.info("Already using the best available account")
+            return True
+        
+        return self.setup_account(next_account)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get status of all accounts."""
+        total = len(self.accounts)
+        banned = sum(1 for acc in self.accounts if acc.is_banned)
+        available = total - banned
+        
+        return {
+            'total_accounts': total,
+            'banned_accounts': banned,
+            'available_accounts': available,
+            'current_account': self.current_account.username if self.current_account else None,
+            'accounts': [
+                {
+                    'username': acc.username,
+                    'is_banned': acc.is_banned,
+                    'last_used': acc.last_used.isoformat() if acc.last_used else None,
+                    'has_cookies': acc.cookies_file and acc.cookies_file.exists()
+                }
+                for acc in self.accounts
+            ]
+        }
+
+# Global account manager instance
+account_manager: Optional[AccountManager] = None
+
+def get_account_manager() -> AccountManager:
+    """Get or create the global account manager instance."""
+    global account_manager
+    if account_manager is None:
+        account_manager = AccountManager()
+    return account_manager 

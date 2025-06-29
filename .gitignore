@@ -42,6 +42,9 @@ logs/
 *.log
 2fa_qr.png
 account.txt
+accounts.txt
+accounts_state.json
+cookies/
 
 # Chrome WebDriver
 .wdm/

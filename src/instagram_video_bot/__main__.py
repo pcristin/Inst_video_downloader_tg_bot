@@ -46,17 +46,43 @@ def main() -> None:
         # Create required directories
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         
-        # Check if cookies file exists
-        if settings.COOKIES_FILE.exists():
-            logger.info(f"Found cookies file: {settings.COOKIES_FILE}")
-            logger.info("Bot will use existing cookies for Instagram authentication")
+        # Check for account management
+        if Path('accounts.txt').exists():
+            logger.info("Found accounts.txt - using multi-account mode")
+            from .utils.account_manager import get_account_manager
+            
+            manager = get_account_manager()
+            status = manager.get_status()
+            
+            logger.info(f"Loaded {status['total_accounts']} accounts ({status['available_accounts']} available)")
+            
+            # Setup first available account
+            if status['available_accounts'] > 0:
+                if manager.rotate_account():
+                    logger.info(f"Using account: {manager.current_account.username}")
+                else:
+                    logger.error("Failed to setup any account")
+                    logger.error("Run: python3 manage_accounts.py setup")
+                    sys.exit(1)
+            else:
+                logger.error("No available accounts!")
+                logger.error("Run: python3 manage_accounts.py status")
+                sys.exit(1)
         else:
-            logger.warning(f"No cookies file found at: {settings.COOKIES_FILE}")
-            logger.warning("You need to import cookies before the bot can work")
-            logger.warning("Run: python3 import_cookies.py")
+            # Single account mode (legacy)
+            logger.info("Using single account mode")
+            
+            # Check if cookies file exists
+            if settings.COOKIES_FILE.exists():
+                logger.info(f"Found cookies file: {settings.COOKIES_FILE}")
+                logger.info("Bot will use existing cookies for Instagram authentication")
+            else:
+                logger.warning(f"No cookies file found at: {settings.COOKIES_FILE}")
+                logger.warning("You need to import cookies before the bot can work")
+                logger.warning("Run: python3 import_cookies.py")
         
         logger.info("Note: Automatic cookie refresh is disabled to prevent login loops")
-        logger.info("If authentication fails, manually refresh cookies with: python3 refresh_cookies.py")
+        logger.info("If authentication fails, manually refresh cookies or rotate accounts")
         
         # Start the bot
         bot = TelegramBot()
