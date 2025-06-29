@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from yt_dlp import YoutubeDL
 
 from ..config.settings import settings
-from ..utils.instagram_auth import refresh_instagram_cookies, refresh_instagram_cookies_sync
 
 logger = logging.getLogger(__name__)
 
@@ -77,53 +76,47 @@ class VideoDownloader:
             AuthenticationError: If Instagram authentication fails
             DownloadError: If video download fails
         """
-        async def try_download(retry: bool = False) -> VideoInfo:
-            if retry:
-                logger.info("Retrying with fresh cookies...")
-                try:
-                    success = await refresh_instagram_cookies()
-                    if not success:
-                        raise AuthenticationError("Failed to refresh Instagram cookies - please update cookies manually")
-                except Exception as e:
-                    logger.error(f"Cookie refresh failed: {str(e)}")
-                    raise AuthenticationError(f"Cookie refresh failed: {str(e)}. Please import fresh cookies using: python3 import_cookies.py")
-
-            self.ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
-
-            try:
-                with YoutubeDL(self.ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info is None:
-                        raise DownloadError("Failed to extract video info")
-
-                    video_path = Path(ydl.prepare_filename(info))
-                    if not video_path.exists():
-                        raise DownloadError(f"Video file not found at {video_path}")
-
-                    logger.info(f"Video downloaded successfully to {video_path}")
-                    return VideoInfo(
-                        file_path=video_path,
-                        title=info.get('title', ''),
-                        duration=info.get('duration'),
-                        description=info.get('description')
-                    )
-            except Exception as e:
-                raise DownloadError(f"Download failed: {str(e)}")
+        self.ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
 
         try:
-            return await try_download(retry=False)
+            with YoutubeDL(self.ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                if info is None:
+                    raise DownloadError("Failed to extract video info")
+
+                video_path = Path(ydl.prepare_filename(info))
+                if not video_path.exists():
+                    raise DownloadError(f"Video file not found at {video_path}")
+
+                logger.info(f"Video downloaded successfully to {video_path}")
+                return VideoInfo(
+                    file_path=video_path,
+                    title=info.get('title', ''),
+                    duration=info.get('duration'),
+                    description=info.get('description')
+                )
         except Exception as e:
             error_str = str(e).lower()
-            if ("login required" in error_str or 
-                "rate-limit reached" in error_str or 
-                "no csrf token" in error_str):
-                logger.info("Authentication failed, retrying with fresh cookies...")
-                try:
-                    return await try_download(retry=True)
-                except AuthenticationError:
-                    # Don't retry again if authentication fails
-                    raise AuthenticationError(
-                        "Instagram authentication failed. Your cookies have expired. "
-                        "Please run 'python3 import_cookies.py' to import fresh cookies."
-                    )
-            raise 
+            
+            # Check for authentication-related errors
+            if any(phrase in error_str for phrase in [
+                "login required", 
+                "rate-limit reached", 
+                "no csrf token",
+                "authentication failed",
+                "cookies",
+                "locked behind the login page"
+            ]):
+                raise AuthenticationError(
+                    "Instagram authentication failed. Your cookies have expired. "
+                    "Please import fresh cookies using: python3 import_cookies.py"
+                )
+            
+            # Check for rate limiting
+            if "rate-limit" in error_str or "too many requests" in error_str:
+                raise DownloadError(
+                    "Instagram rate limit reached. Please wait a few minutes and try again."
+                )
+            
+            # Generic download error
+            raise DownloadError(f"Download failed: {str(e)}") 
