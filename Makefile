@@ -76,7 +76,7 @@ format-instmanager: ## Format raw InstAccountsManager accounts (run on host)
 	python3 format_instmanager_accounts.py
 
 import-instmanager: ## Import InstAccountsManager format accounts from instmanager_accounts.txt
-	docker-compose run --rm -v ./instmanager_accounts.txt:/app/instmanager_accounts.txt --entrypoint python instagram-video-bot /app/import_cookies_instmanager.py
+	docker-compose run --rm -v $(PWD)/instmanager_accounts.txt:/app/instmanager_accounts.txt --entrypoint python instagram-video-bot /app/import_cookies_instmanager.py
 
 create-preauth: ## Create accounts_preauth.txt from imported cookie files
 	docker-compose run --rm --entrypoint sh instagram-video-bot -c "ls /app/cookies/*_cookies.txt | sed 's/\/app\/cookies\///g' | sed 's/_cookies.txt//g' > /app/accounts_preauth.txt && echo 'Created accounts_preauth.txt with:' && cat /app/accounts_preauth.txt"

@@ -26,26 +26,37 @@ def parse_account_line(account_line: str) -> Dict[str, Any]:
     }
 
 def parse_instaccountsmanager_format(account_line: str) -> Dict[str, Any]:
-    """Parse InstAccountsManager format: login:password||cookies||mail:mailpassword"""
+    """Parse InstAccountsManager format: username:password|user_agent|device_info|cookies||email:email_password"""
     try:
-        # Split by || to get main parts
-        main_parts = account_line.strip().split('||')
+        # First split by || to separate main data from email
+        main_split = account_line.strip().split('||')
         
-        if len(main_parts) < 3:
-            raise ValueError(f"Invalid InstAccountsManager format. Expected 3 parts separated by ||, got {len(main_parts)}")
+        if len(main_split) < 2:
+            raise ValueError(f"Invalid InstAccountsManager format. Expected 2 parts separated by ||, got {len(main_split)}")
+        
+        # Parse the main part (everything before ||)
+        main_part = main_split[0]
+        main_parts = main_part.split('|')
+        
+        if len(main_parts) < 4:
+            raise ValueError(f"Invalid main part format. Expected 4 parts separated by |, got {len(main_parts)}")
         
         # Parse login credentials
         login_part = main_parts[0]
         if ':' not in login_part:
-            raise ValueError("Invalid login format. Expected login:password")
+            raise ValueError("Invalid login format. Expected username:password")
         
         username, password = login_part.split(':', 1)
         
-        # Parse cookies
-        cookies_raw = main_parts[1]
+        # Extract user agent and device info (parts 1 and 2)
+        user_agent = main_parts[1]
+        device_info = main_parts[2]
+        
+        # Parse cookies (part 3)
+        cookies_raw = main_parts[3]
         
         # Parse email credentials
-        email_part = main_parts[2]
+        email_part = main_split[1]
         if ':' not in email_part:
             raise ValueError("Invalid email format. Expected email:password")
         
@@ -54,6 +65,8 @@ def parse_instaccountsmanager_format(account_line: str) -> Dict[str, Any]:
         return {
             'username': username.strip(),
             'password': password.strip(),
+            'user_agent': user_agent.strip(),
+            'device_info': device_info.strip(),
             'email': email.strip(),
             'email_password': email_password.strip(),
             'cookies_raw': cookies_raw.strip(),
