@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev accounts-status accounts-setup accounts-rotate accounts-reset accounts-warmup check-cookies import-cookies format-instmanager import-instmanager create-preauth monitor-cookies
+.PHONY: help build up down logs restart shell clean setup-2fa dev accounts-status accounts-setup accounts-rotate accounts-reset accounts-warmup check-cookies import-cookies format-instmanager import-instmanager create-preauth monitor-cookies warmup warmup-batch warmup-available warmup-banned warmup-help
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -83,4 +83,63 @@ create-preauth: ## Create accounts_preauth.txt from imported cookie files
 
 # Monitoring Commands
 monitor-cookies: ## Start cookie health monitoring
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/monitor_cookies.py 
+	docker-compose run --rm --entrypoint python instagram-video-bot /app/monitor_cookies.py
+
+# Enhanced Account Warmup Commands
+warmup: ## Warm up specific account with browser simulation (usage: make warmup USERNAME=6118patriciaser.173)
+	@if [ -z "$(USERNAME)" ]; then \
+		echo "❌ Error: USERNAME is required"; \
+		echo "Usage: make warmup USERNAME=6118patriciaser.173"; \
+		exit 1; \
+	fi
+	docker-compose run --rm --entrypoint python instagram-video-bot /app/warmup_account.py $(USERNAME)
+
+warmup-batch: ## Warm up multiple accounts with delays (usage: make warmup-batch ACCOUNTS="user1 user2 user3" DELAY=3600)
+	@if [ -z "$(ACCOUNTS)" ]; then \
+		echo "❌ Error: ACCOUNTS is required"; \
+		echo "Usage: make warmup-batch ACCOUNTS=\"6118patriciaser.173 dr.elizabeth3771462\" DELAY=3600"; \
+		exit 1; \
+	fi
+	@for account in $(ACCOUNTS); do \
+		echo "🔥 Warming up account: $$account"; \
+		docker-compose run --rm --entrypoint python instagram-video-bot /app/warmup_account.py $$account || true; \
+		if [ "$(DELAY)" != "" ] && [ "$$account" != "$$(echo $(ACCOUNTS) | rev | cut -d' ' -f1 | rev)" ]; then \
+			echo "⏰ Waiting $(DELAY) seconds before next account..."; \
+			sleep $(DELAY); \
+		fi; \
+	done
+
+warmup-available: ## Warm up all available (non-banned) accounts with 4 hour delays
+	@echo "🔥 Starting batch warmup of available accounts..."
+	@accounts=$$(docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "✅" | awk -F'|' '{print $$2}' | tr -d ' ' | head -3); \
+	if [ -z "$$accounts" ]; then \
+		echo "❌ No available accounts found"; \
+		exit 1; \
+	fi; \
+	make warmup-batch ACCOUNTS="$$accounts" DELAY=14400
+
+warmup-banned: ## Warm up all banned accounts to potentially restore them (usage: make warmup-banned)
+	@echo "🔥 Starting warmup of banned accounts..."
+	@accounts=$$(docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "❌" | awk -F'|' '{print $$2}' | tr -d ' '); \
+	if [ -z "$$accounts" ]; then \
+		echo "✅ No banned accounts found"; \
+		exit 0; \
+	fi; \
+	make warmup-batch ACCOUNTS="$$accounts" DELAY=7200
+
+warmup-help: ## Show warmup command examples
+	@echo "🔥 Account Warmup Commands:"
+	@echo ""
+	@echo "Single account:"
+	@echo "  make warmup USERNAME=6118patriciaser.173"
+	@echo ""
+	@echo "Multiple accounts with delays:"
+	@echo "  make warmup-batch ACCOUNTS=\"user1 user2 user3\" DELAY=3600"
+	@echo ""
+	@echo "All available accounts (max 3, 4h delays):"
+	@echo "  make warmup-available"
+	@echo ""
+	@echo "All banned accounts (2h delays):"
+	@echo "  make warmup-banned"
+	@echo ""
+	@echo "💡 Recommended: Warm up 2-3 accounts per day with 4+ hour delays" 
