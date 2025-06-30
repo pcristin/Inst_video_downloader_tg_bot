@@ -168,13 +168,23 @@ def main():
         parser.print_help()
         return
     
-    # Check if accounts.txt exists
-    if not Path('accounts.txt').exists():
-        print("❌ No accounts.txt file found!")
-        print("\nCreate accounts.txt with format:")
-        print("username|password|totp_secret")
-        print("\nExample:")
-        print("samosirarlene|@encore05|4NPFTMJUVP7NPXPZC3MDZ26SVZTW5GUL")
+    # Check if accounts files exist
+    preauth_file = Path('accounts_preauth.txt')
+    accounts_file = Path('accounts.txt')
+    
+    if not preauth_file.exists() and not accounts_file.exists():
+        print("❌ No accounts file found!")
+        print("\nCreate one of these files:")
+        print("1. accounts_preauth.txt (for pre-authenticated accounts)")
+        print("   Format: one username per line")
+        print("   Example:")
+        print("   ms.stevenbaker682510")
+        print("   6118patriciaser.173")
+        print()
+        print("2. accounts.txt (for traditional accounts)")
+        print("   Format: username|password|totp_secret")
+        print("   Example:")
+        print("   samosirarlene|@encore05|4NPFTMJUVP7NPXPZC3MDZ26SVZTW5GUL")
         sys.exit(1)
     
     # Execute command
