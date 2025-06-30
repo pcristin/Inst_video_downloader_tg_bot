@@ -14,6 +14,8 @@ services:
       - ./logs:/app/logs
       # Mount accounts_preauth file for pre-authenticated accounts
       - ./accounts_preauth.txt:/app/accounts_preauth.txt
+      # Mount accounts state file to persist banned/usage status
+      - ./accounts_state.json:/app/accounts_state.json
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
