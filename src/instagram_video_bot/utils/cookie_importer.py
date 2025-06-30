@@ -25,6 +25,117 @@ def parse_account_line(account_line: str) -> Dict[str, Any]:
         'additional_info': parts[7] if len(parts) > 7 else ''
     }
 
+def parse_instaccountsmanager_format(account_line: str) -> Dict[str, Any]:
+    """Parse InstAccountsManager format: login:password||cookies||mail:mailpassword"""
+    try:
+        # Split by || to get main parts
+        main_parts = account_line.strip().split('||')
+        
+        if len(main_parts) < 3:
+            raise ValueError(f"Invalid InstAccountsManager format. Expected 3 parts separated by ||, got {len(main_parts)}")
+        
+        # Parse login credentials
+        login_part = main_parts[0]
+        if ':' not in login_part:
+            raise ValueError("Invalid login format. Expected login:password")
+        
+        username, password = login_part.split(':', 1)
+        
+        # Parse cookies
+        cookies_raw = main_parts[1]
+        
+        # Parse email credentials
+        email_part = main_parts[2]
+        if ':' not in email_part:
+            raise ValueError("Invalid email format. Expected email:password")
+        
+        email, email_password = email_part.split(':', 1)
+        
+        return {
+            'username': username.strip(),
+            'password': password.strip(),
+            'email': email.strip(),
+            'email_password': email_password.strip(),
+            'cookies_raw': cookies_raw.strip(),
+            'format': 'instaccountsmanager'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error parsing InstAccountsManager format: {e}")
+        raise
+
+def parse_instagram_cookies_from_headers(cookies_raw: str) -> List[Dict[str, Any]]:
+    """Parse Instagram cookies from the InstAccountsManager header format."""
+    cookies = []
+    
+    # This format contains HTTP headers, we need to extract cookies
+    # Look for Authorization, IG-U-DS-USER-ID, etc.
+    
+    # Split by semicolon and process each part
+    parts = cookies_raw.split(';')
+    
+    for part in parts:
+        part = part.strip()
+        
+        # Handle Authorization header
+        if part.startswith('Authorization='):
+            auth_value = part.replace('Authorization=', '')
+            cookies.append({
+                'name': 'Authorization',
+                'value': auth_value,
+                'domain': '.instagram.com',
+                'path': '/',
+                'secure': True,
+                'httpOnly': True,
+                'sameSite': 'Lax',
+                'expires': int(time.time() + 365 * 24 * 60 * 60)
+            })
+        
+        # Handle other IG headers as cookies
+        elif part.startswith('IG-'):
+            if '=' in part:
+                name, value = part.split('=', 1)
+                cookies.append({
+                    'name': name,
+                    'value': value,
+                    'domain': '.instagram.com',
+                    'path': '/',
+                    'secure': True,
+                    'httpOnly': False,
+                    'sameSite': 'Lax',
+                    'expires': int(time.time() + 365 * 24 * 60 * 60)
+                })
+        
+        # Handle X-MID
+        elif part.startswith('X-MID='):
+            value = part.replace('X-MID=', '')
+            cookies.append({
+                'name': 'mid',
+                'value': value,
+                'domain': '.instagram.com',
+                'path': '/',
+                'secure': True,
+                'httpOnly': False,
+                'sameSite': 'Lax',
+                'expires': int(time.time() + 365 * 24 * 60 * 60)
+            })
+        
+        # Handle X-IG-WWW-Claim
+        elif part.startswith('X-IG-WWW-Claim='):
+            value = part.replace('X-IG-WWW-Claim=', '')
+            cookies.append({
+                'name': 'ig_www_claim',
+                'value': value,
+                'domain': '.instagram.com',
+                'path': '/',
+                'secure': True,
+                'httpOnly': False,
+                'sameSite': 'Lax',
+                'expires': int(time.time() + 365 * 24 * 60 * 60)
+            })
+    
+    return cookies
+
 def parse_instagram_cookies(cookies_raw: str) -> List[Dict[str, Any]]:
     """Parse Instagram cookies from the raw cookie string."""
     cookies = []

@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev accounts-status accounts-setup accounts-rotate accounts-reset accounts-warmup check-cookies import-cookies monitor-cookies
+.PHONY: help build up down logs restart shell clean setup-2fa dev accounts-status accounts-setup accounts-rotate accounts-reset accounts-warmup check-cookies import-cookies format-instmanager import-instmanager create-preauth monitor-cookies
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -41,7 +41,7 @@ test-health: ## Test the health check
 	docker-compose exec instagram-video-bot python -m src.instagram_video_bot.utils.health_check
 
 test-totp: ## Test TOTP code generation
-	docker-compose run --rm --entrypoint python instagram-video-bot -m src.instagram_video_bot.test_totp
+	docker-compose run --rm --entrypoint python instagram-video-bot -m src.instagram_video_bot.test_totp 
 
 # Account Management Commands
 accounts-status: ## Show status of all Instagram accounts
@@ -71,6 +71,15 @@ check-cookies: ## Check if Instagram cookies are valid
 
 import-cookies: ## Import cookies from account.txt (single account mode)
 	docker-compose run --rm --entrypoint python instagram-video-bot /app/import_cookies.py
+
+format-instmanager: ## Format raw InstAccountsManager accounts (run on host)
+	python3 format_instmanager_accounts.py
+
+import-instmanager: ## Import InstAccountsManager format accounts from instmanager_accounts.txt
+	docker-compose run --rm --entrypoint python instagram-video-bot /app/import_cookies_instmanager.py
+
+create-preauth: ## Create accounts_preauth.txt from imported cookie files
+	docker-compose run --rm --entrypoint sh instagram-video-bot -c "ls /app/cookies/*_cookies.txt | sed 's/\/app\/cookies\///g' | sed 's/_cookies.txt//g' > /app/accounts_preauth.txt && echo 'Created accounts_preauth.txt with:' && cat /app/accounts_preauth.txt"
 
 # Monitoring Commands
 monitor-cookies: ## Start cookie health monitoring

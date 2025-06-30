@@ -22,6 +22,7 @@ class Account:
     last_used: Optional[datetime] = None
     is_banned: bool = False
     cookies_file: Optional[Path] = None
+    pre_authenticated: bool = False  # For accounts with existing cookies
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -31,7 +32,8 @@ class Account:
             'totp_secret': self.totp_secret,
             'last_used': self.last_used.isoformat() if self.last_used else None,
             'is_banned': self.is_banned,
-            'cookies_file': str(self.cookies_file) if self.cookies_file else None
+            'cookies_file': str(self.cookies_file) if self.cookies_file else None,
+            'pre_authenticated': self.pre_authenticated
         }
     
     @classmethod
@@ -39,11 +41,12 @@ class Account:
         """Create from dictionary."""
         return cls(
             username=data['username'],
-            password=data['password'],
-            totp_secret=data['totp_secret'],
+            password=data.get('password', ''),
+            totp_secret=data.get('totp_secret', ''),
             last_used=datetime.fromisoformat(data['last_used']) if data.get('last_used') else None,
             is_banned=data.get('is_banned', False),
-            cookies_file=Path(data['cookies_file']) if data.get('cookies_file') else None
+            cookies_file=Path(data['cookies_file']) if data.get('cookies_file') else None,
+            pre_authenticated=data.get('pre_authenticated', False)
         )
 
 class AccountManager:
@@ -75,15 +78,35 @@ class AccountManager:
                 if not line or line.startswith('#'):
                     continue
                 
-                # Parse account format: username|password|totp_secret
-                parts = line.split('|')
-                if len(parts) >= 3:
-                    account = Account(
-                        username=parts[0].strip(),
-                        password=parts[1].strip(),
-                        totp_secret=parts[2].strip()
-                    )
-                    self.accounts.append(account)
+                # Check if this is a pre-authenticated account (username only)
+                if '|' not in line:
+                    # Pre-authenticated account - just username
+                    username = line.strip()
+                    cookies_file = self.cookies_dir / f"{username}_cookies.txt"
+                    
+                    if cookies_file.exists():
+                        account = Account(
+                            username=username,
+                            password='',  # Not needed for pre-auth
+                            totp_secret='',  # Not needed for pre-auth
+                            pre_authenticated=True,
+                            cookies_file=cookies_file
+                        )
+                        self.accounts.append(account)
+                        logger.info(f"Loaded pre-authenticated account: {username}")
+                    else:
+                        logger.warning(f"Pre-auth account {username} missing cookies file: {cookies_file}")
+                else:
+                    # Traditional format: username|password|totp_secret
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        account = Account(
+                            username=parts[0].strip(),
+                            password=parts[1].strip(),
+                            totp_secret=parts[2].strip(),
+                            pre_authenticated=False
+                        )
+                        self.accounts.append(account)
         
         logger.info(f"Loaded {len(self.accounts)} accounts")
     
@@ -102,7 +125,9 @@ class AccountManager:
                     if account.username == saved_account['username']:
                         account.last_used = datetime.fromisoformat(saved_account['last_used']) if saved_account.get('last_used') else None
                         account.is_banned = saved_account.get('is_banned', False)
-                        account.cookies_file = Path(saved_account['cookies_file']) if saved_account.get('cookies_file') else None
+                        if saved_account.get('cookies_file'):
+                            account.cookies_file = Path(saved_account['cookies_file'])
+                        account.pre_authenticated = saved_account.get('pre_authenticated', False)
                         break
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
@@ -124,7 +149,7 @@ class AccountManager:
         """Get the next available account using rotation."""
         available_accounts = [
             acc for acc in self.accounts 
-            if not acc.is_banned
+            if not acc.is_banned and (acc.pre_authenticated or (acc.password and acc.totp_secret))
         ]
         
         if not available_accounts:
@@ -151,9 +176,23 @@ class AccountManager:
         return selected
     
     def setup_account(self, account: Account) -> bool:
-        """Setup an account by logging in and saving cookies."""
+        """Setup an account by logging in and saving cookies or using existing cookies."""
         logger.info(f"Setting up account: {account.username}")
         
+        # For pre-authenticated accounts, just validate existing cookies
+        if account.pre_authenticated:
+            if account.cookies_file and account.cookies_file.exists():
+                logger.info(f"Using existing cookies for pre-authenticated account: {account.username}")
+                settings.COOKIES_FILE = account.cookies_file
+                account.last_used = datetime.now()
+                self.current_account = account
+                self._save_state()
+                return True
+            else:
+                logger.error(f"Pre-authenticated account {account.username} missing cookies file")
+                return False
+        
+        # Traditional account setup with login
         # Update environment variables for login
         import os
         os.environ['IG_USERNAME'] = account.username
@@ -238,9 +277,23 @@ class AccountManager:
 # Global account manager instance
 account_manager: Optional[AccountManager] = None
 
-def get_account_manager() -> AccountManager:
-    """Get or create the global account manager instance."""
+def get_account_manager() -> Optional[AccountManager]:
+    """Get account manager if available."""
     global account_manager
+    
     if account_manager is None:
-        account_manager = AccountManager()
+        # Check for pre-authenticated accounts first
+        preauth_file = Path('accounts_preauth.txt')
+        accounts_file = Path('accounts.txt')
+        
+        if preauth_file.exists():
+            account_manager = AccountManager(accounts_file=preauth_file)
+            logger.info("Using pre-authenticated accounts")
+        elif accounts_file.exists():
+            account_manager = AccountManager(accounts_file=accounts_file)
+            logger.info("Using traditional accounts with login")
+        else:
+            logger.info("No accounts file found - using single account mode")
+            return None
+    
     return account_manager 

@@ -42,6 +42,12 @@ make check-cookies
 # Import cookies (single account mode)
 make import-cookies
 
+# Import InstAccountsManager format accounts
+make import-instmanager
+
+# Create pre-auth accounts file from imported cookies
+make create-preauth
+
 # Monitor cookie health
 make monitor-cookies
 ```
@@ -58,7 +64,35 @@ make setup-2fa      # Setup 2FA
 
 ## Typical Workflows
 
-### Initial Setup with Multiple Accounts
+### Setup with InstAccountsManager Format (NEW!)
+
+```bash
+# 1. Create raw_accounts.txt with your full account data
+# (copy-paste from your provider)
+
+# 2. Format accounts to correct format
+make format-instmanager
+
+# 3. Build Docker image
+make build
+
+# 4. Import all accounts and extract cookies
+make import-instmanager
+
+# 5. Create pre-auth accounts file
+make create-preauth
+
+# 6. Start the bot (will auto-detect accounts_preauth.txt)
+make up
+
+# 7. Check status
+make accounts-status
+
+# 8. Monitor logs
+make logs
+```
+
+### Initial Setup with Multiple Accounts (Traditional)
 
 ```bash
 # 1. Create accounts.txt file
