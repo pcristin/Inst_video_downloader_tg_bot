@@ -57,7 +57,7 @@ def import_instmanager_account(account_line: str, username: str) -> bool:
 
 def main():
     """Main function to import multiple accounts."""
-    accounts_file = Path('instmanager_accounts.txt')
+    accounts_file = Path('/app/instmanager_accounts.txt')
     
     if not accounts_file.exists():
         print("❌ instmanager_accounts.txt file not found!")
