@@ -17,7 +17,6 @@ services:
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
-      - COOKIES_FILE=/app/cookies/instagram_cookies.txt
       # Additional environment variables for container
       - TZ=UTC
     # Health check

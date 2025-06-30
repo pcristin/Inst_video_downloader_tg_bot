@@ -47,11 +47,11 @@ def main() -> None:
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         
         # Check for account management
-        if Path('accounts.txt').exists():
-            logger.info("Found accounts.txt - using multi-account mode")
-            from .utils.account_manager import get_account_manager
-            
-            manager = get_account_manager()
+        from .utils.account_manager import get_account_manager
+        
+        manager = get_account_manager()
+        if manager:
+            logger.info("Using multi-account mode")
             status = manager.get_status()
             
             logger.info(f"Loaded {status['total_accounts']} accounts ({status['available_accounts']} available)")
