@@ -163,31 +163,30 @@ class VideoDownloader:
         # Get fresh options for each download
         ydl_opts = self._get_ydl_opts()
         ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
-        
+
         # Log the user agent being used
         logger.info(f"Using User-Agent: {ydl_opts['http_headers']['User-Agent'][:50]}...")
 
         try:
             with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    raise DownloadError("Failed to extract video info")
+                    info = ydl.extract_info(url, download=True)
+                    if info is None:
+                        raise DownloadError("Failed to extract video info")
 
-                video_path = Path(ydl.prepare_filename(info))
-                if not video_path.exists():
-                    raise DownloadError(f"Video file not found at {video_path}")
+                    video_path = Path(ydl.prepare_filename(info))
+                    if not video_path.exists():
+                        raise DownloadError(f"Video file not found at {video_path}")
 
-                logger.info(f"Video downloaded successfully to {video_path}")
+                    logger.info(f"Video downloaded successfully to {video_path}")
                 
                 # Update last download time
-                self.last_download_time = time.time()
-                
-                return VideoInfo(
+            self.last_download_time = time.time()
+            return VideoInfo(
                     file_path=video_path,
                     title=info.get('title', ''),
                     duration=info.get('duration'),
                     description=info.get('description')
-                )
+                    )
         except Exception as e:
             error_str = str(e).lower()
             
