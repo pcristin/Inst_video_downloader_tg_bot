@@ -12,10 +12,8 @@ services:
       - ./cookies:/app/cookies
       # Mount logs directory (optional)
       - ./logs:/app/logs
-      # Mount accounts file for multi-account management
-      - ./accounts.txt:/app/accounts.txt
-      # Mount accounts state file for persistence
-      - ./accounts_state.json:/app/accounts_state.json
+      # Mount accounts_preauth file for pre-authenticated accounts
+      - ./accounts_preauth.txt:/app/accounts_preauth.txt
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
