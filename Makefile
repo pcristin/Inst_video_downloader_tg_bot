@@ -111,21 +111,29 @@ warmup-batch: ## Warm up multiple accounts with delays (usage: make warmup-batch
 
 warmup-available: ## Warm up all available (non-banned) accounts with 4 hour delays
 	@echo "🔥 Starting batch warmup of available accounts..."
-	@accounts=$$(docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "✅" | awk -F'|' '{print $$2}' | tr -d ' ' | head -3); \
-	if [ -z "$$accounts" ]; then \
+	@docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "✅" | awk -F'|' '{print $$2}' | tr -d ' ' | head -3 > /tmp/available_accounts.txt
+	@if [ ! -s /tmp/available_accounts.txt ]; then \
 		echo "❌ No available accounts found"; \
+		rm -f /tmp/available_accounts.txt; \
 		exit 1; \
-	fi; \
-	make warmup-batch ACCOUNTS="$$accounts" DELAY=14400
+	fi
+	@accounts=$$(cat /tmp/available_accounts.txt | tr '\n' ' ' | sed 's/ $$//'); \
+	rm -f /tmp/available_accounts.txt; \
+	echo "Found accounts: $$accounts"; \
+	$(MAKE) warmup-batch ACCOUNTS="$$accounts" DELAY=14400
 
 warmup-banned: ## Warm up all banned accounts to potentially restore them (usage: make warmup-banned)
 	@echo "🔥 Starting warmup of banned accounts..."
-	@accounts=$$(docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "❌" | awk -F'|' '{print $$2}' | tr -d ' '); \
-	if [ -z "$$accounts" ]; then \
+	@docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "❌" | awk -F'|' '{print $$2}' | tr -d ' ' > /tmp/banned_accounts.txt
+	@if [ ! -s /tmp/banned_accounts.txt ]; then \
 		echo "✅ No banned accounts found"; \
+		rm -f /tmp/banned_accounts.txt; \
 		exit 0; \
-	fi; \
-	make warmup-batch ACCOUNTS="$$accounts" DELAY=7200
+	fi
+	@accounts=$$(cat /tmp/banned_accounts.txt | tr '\n' ' ' | sed 's/ $$//'); \
+	rm -f /tmp/banned_accounts.txt; \
+	echo "Found banned accounts: $$accounts"; \
+	$(MAKE) warmup-batch ACCOUNTS="$$accounts" DELAY=7200
 
 warmup-help: ## Show warmup command examples
 	@echo "🔥 Account Warmup Commands:"
