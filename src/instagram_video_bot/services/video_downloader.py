@@ -102,8 +102,6 @@ class VideoDownloader:
             'max_sleep_interval': 5,  # Max 5 seconds
             'sleep_interval_subtitles': 1,
             
-            # Don't download too fast
-            'ratelimit': 1000000,  # 1MB/s max download speed
             
             # Retry options
             'retries': 3,
