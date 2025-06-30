@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # Paths - with Docker support
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
     TEMP_DIR: Path = Path(os.getenv('TEMP_DIR', BASE_DIR / "temp"))
-    COOKIES_FILE: Path = Path(os.getenv('COOKIES_FILE', BASE_DIR / "instagram_cookies.txt"))
+    COOKIES_FILE: Path = Path(os.getenv('COOKIES_FILE', BASE_DIR / "cookies" / "instagram_cookies.txt"))
     
     # Video processing settings
     VIDEO_WIDTH: int = 320
