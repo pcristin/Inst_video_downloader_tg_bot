@@ -47,9 +47,9 @@ def main() -> None:
         settings.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         
         # Check for account management
-            from .utils.account_manager import get_account_manager
-            
-            manager = get_account_manager()
+        from .utils.account_manager import get_account_manager
+        
+        manager = get_account_manager()
         if manager:
             logger.info("Using multi-account mode")
             status = manager.get_status()
