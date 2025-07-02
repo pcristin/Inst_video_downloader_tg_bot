@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import random
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -128,7 +129,7 @@ class VideoDownloader:
         
         return opts
 
-    def _enforce_rate_limit(self):
+    async def _enforce_rate_limit(self):
         """Enforce rate limiting between downloads."""
         current_time = time.time()
         time_since_last = current_time - self.last_download_time
@@ -136,11 +137,11 @@ class VideoDownloader:
         if time_since_last < self.min_delay_between_downloads:
             sleep_time = self.min_delay_between_downloads - time_since_last
             logger.info(f"Rate limiting: sleeping for {sleep_time:.1f} seconds")
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
         
         self.last_download_time = time.time()
 
-    def download_video(self, url: str, retry_on_auth_error: bool = True) -> Tuple[str, Dict[str, Any]]:
+    async def download_video(self, url: str, retry_on_auth_error: bool = True) -> VideoInfo:
         """
         Download Instagram video from URL.
         
@@ -149,12 +150,12 @@ class VideoDownloader:
             retry_on_auth_error: Whether to retry with account rotation on auth errors
             
         Returns:
-            Tuple of (video_file_path, video_info)
+            VideoInfo object containing file path and metadata
             
         Raises:
             VideoDownloadError: If download fails
         """
-        self._enforce_rate_limit()
+        await self._enforce_rate_limit()
         
         # Get current account for proxy assignment
         account_manager = get_account_manager()
@@ -175,41 +176,53 @@ class VideoDownloader:
         })
         
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Extract info first
-                logger.info(f"Extracting video info from: {url}")
-                info = ydl.extract_info(url, download=False)
-                
-                if not info:
-                    raise VideoDownloadError("Could not extract video information")
-                
-                # Download the video
-                logger.info("Downloading video...")
-                ydl.download([url])
-                
-                # Find the actual downloaded file
-                video_file = None
-                temp_dir = Path(temp_filename).parent
-                base_name = Path(temp_filename).stem
-                
-                for file_path in temp_dir.glob(f"{base_name}.*"):
-                    if file_path.suffix in ['.mp4', '.webm', '.mkv']:
-                        video_file = str(file_path)
-                        break
-                
-                if not video_file or not Path(video_file).exists():
-                    raise VideoDownloadError("Downloaded video file not found")
-                
-                # Update account usage on successful download
-                if account_manager and current_account:
-                    from datetime import datetime
-                    current_account.last_used = datetime.now()
-                    account_manager._save_state()
-                    logger.info(f"Updated usage for account: {account_name}")
-                
-                logger.info(f"Video downloaded successfully: {video_file}")
-                
-                return video_file, info
+            # Run yt-dlp operations in thread pool to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            
+            def _download_sync():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    # Extract info first
+                    logger.info(f"Extracting video info from: {url}")
+                    info = ydl.extract_info(url, download=False)
+                    
+                    if not info:
+                        raise VideoDownloadError("Could not extract video information")
+                    
+                    # Download the video
+                    logger.info("Downloading video...")
+                    ydl.download([url])
+                    return info
+            
+            info = await loop.run_in_executor(None, _download_sync)
+            
+            # Find the actual downloaded file
+            video_file = None
+            temp_dir = Path(temp_filename).parent
+            base_name = Path(temp_filename).stem
+            
+            for file_path in temp_dir.glob(f"{base_name}.*"):
+                if file_path.suffix in ['.mp4', '.webm', '.mkv']:
+                    video_file = str(file_path)
+                    break
+            
+            if not video_file or not Path(video_file).exists():
+                raise VideoDownloadError("Downloaded video file not found")
+            
+            # Update account usage on successful download
+            if account_manager and current_account:
+                from datetime import datetime
+                current_account.last_used = datetime.now()
+                account_manager._save_state()
+                logger.info(f"Updated usage for account: {account_name}")
+            
+            logger.info(f"Video downloaded successfully: {video_file}")
+            
+            return VideoInfo(
+                file_path=Path(video_file),
+                title=info.get('title', 'Instagram Video'),
+                duration=info.get('duration'),
+                description=info.get('description')
+            )
                 
         except yt_dlp.DownloadError as e:
             error_msg = str(e).lower()
@@ -230,10 +243,10 @@ class VideoDownloader:
                     # Add delay between account switches to appear more human
                     delay = random.uniform(10, 20)
                     logger.info(f"Waiting {delay:.1f} seconds before retry...")
-                    time.sleep(delay)
+                    await asyncio.sleep(delay)
                     
                     # Retry with new account (recursive call with retry disabled to avoid loops)
-                    return self.download_video(url, retry_on_auth_error=False)
+                    return await self.download_video(url, retry_on_auth_error=False)
                 else:
                     raise VideoDownloadError(f"Authentication failed: {e}")
             else:
