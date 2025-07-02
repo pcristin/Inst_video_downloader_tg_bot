@@ -58,10 +58,7 @@ class TelegramBot:
             )
 
             # Download the video
-            video_info = await self.video_downloader.download_video(
-                url=url,
-                output_dir=settings.TEMP_DIR
-            )
+            video_info = await self.video_downloader.download_video(url=url)
 
             # Send the video
             with open(video_info.file_path, 'rb') as video_file:
