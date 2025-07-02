@@ -189,10 +189,17 @@ class VideoDownloader:
                 "cookies",
                 "locked behind the login page"
             ]):
-                await self._handle_auth_error()
-                raise AuthenticationError(
-                    "Instagram authentication failed. Please check account status."
-                )
+                # Try to handle auth error and retry once
+                if await self._handle_auth_error():
+                    # Add delay before retry to avoid rapid account switching
+                    logger.info("Waiting before retrying with rotated account...")
+                    await asyncio.sleep(random.uniform(10, 20))
+                    logger.info("Retrying download with rotated account...")
+                    return await self.download_video(url, output_dir)
+                else:
+                    raise AuthenticationError(
+                        "Instagram authentication failed. All accounts exhausted."
+                    )
             
             # Check for rate limiting
             if "rate-limit" in error_str or "too many requests" in error_str:
@@ -204,8 +211,12 @@ class VideoDownloader:
             logger.error(f"Download failed: {str(e)}")
             raise DownloadError(f"Download failed: {str(e)}")
     
-    async def _handle_auth_error(self) -> None:
-        """Handle authentication errors by trying account rotation."""
+    async def _handle_auth_error(self) -> bool:
+        """Handle authentication errors by trying account rotation.
+        
+        Returns:
+            bool: True if account rotation was successful, False otherwise
+        """
         manager = get_account_manager()
         
         if manager and manager.current_account:
@@ -215,7 +226,10 @@ class VideoDownloader:
             # Try rotating to a new account
             if manager.rotate_account():
                 logger.info("Successfully rotated to a new account")
+                return True
             else:
                 logger.error("No accounts available for rotation")
+                return False
         else:
-            logger.warning("No account manager available for rotation") 
+            logger.warning("No account manager available for rotation")
+            return False 
