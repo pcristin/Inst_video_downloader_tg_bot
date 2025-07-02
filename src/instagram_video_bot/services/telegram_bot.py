@@ -59,6 +59,16 @@ class TelegramBot:
 
             # Download the video
             video_info = await self.video_downloader.download_video(url=url)
+            
+            # Verify file exists and has content
+            if not video_info.file_path.exists():
+                raise VideoDownloadError(f"Video file not found at {video_info.file_path}")
+            
+            file_size = video_info.file_path.stat().st_size
+            logger.info(f"Sending video file: {video_info.file_path} ({file_size} bytes)")
+            
+            if file_size == 0:
+                raise VideoDownloadError("Video file is empty")
 
             # Send the video
             with open(video_info.file_path, 'rb') as video_file:
