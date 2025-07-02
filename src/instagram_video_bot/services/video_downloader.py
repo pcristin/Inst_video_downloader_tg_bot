@@ -78,13 +78,12 @@ class VideoDownloader:
                 cookies_file = account_cookies
         
         opts = {
-            'format': 'best',
+            'format': 'best[ext=mp4]/best',
             'cookiefile': str(cookies_file),
-            'verbose': False,
-            'no_warnings': True,
-            'quiet': True,
+            'verbose': True,  # Enable verbose for debugging
+            'no_warnings': False,
+            'quiet': False,
             'no_color': True,
-            'recode_video': 'mp4',
             
             # Proxy configuration
             'proxy': proxy,
@@ -108,23 +107,8 @@ class VideoDownloader:
             'retries': 3,
             'retry_sleep': 5,
             
-            # Video processing options
-            'ffmpeg_args': [
-                '-vf', (
-                    'format=yuv420p,'
-                    f'scale={settings.VIDEO_WIDTH}:{settings.VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,'
-                    f'pad={settings.VIDEO_WIDTH}:{settings.VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2,'
-                    'setsar=1'
-                ),
-                '-c:v', 'libx264',
-                '-profile:v', 'baseline',
-                '-level', '3.0',
-                '-preset', 'medium',
-                '-crf', settings.VIDEO_CRF,
-                '-c:a', 'aac',
-                '-b:a', settings.VIDEO_BITRATE,
-                '-movflags', '+faststart'
-            ],
+            # Disable post-processing for now to avoid empty files
+            'postprocessors': [],
         }
         
         return opts
@@ -208,6 +192,14 @@ class VideoDownloader:
             if not video_file or not Path(video_file).exists():
                 raise VideoDownloadError("Downloaded video file not found")
             
+            # Check file size
+            video_path = Path(video_file)
+            file_size = video_path.stat().st_size
+            logger.info(f"Downloaded file size: {file_size} bytes")
+            
+            if file_size == 0:
+                raise VideoDownloadError("Downloaded video file is empty")
+            
             # Update account usage on successful download
             if account_manager and current_account:
                 from datetime import datetime
@@ -215,7 +207,7 @@ class VideoDownloader:
                 account_manager._save_state()
                 logger.info(f"Updated usage for account: {account_name}")
             
-            logger.info(f"Video downloaded successfully: {video_file}")
+            logger.info(f"Video downloaded successfully: {video_file} ({file_size} bytes)")
             
             return VideoInfo(
                 file_path=Path(video_file),
