@@ -4,6 +4,7 @@ import logging
 import random
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -85,6 +86,10 @@ class VideoDownloader:
             'quiet': False,
             'no_color': True,
             
+            # Force overwrite to avoid "already downloaded" issues
+            'overwrites': True,
+            'nooverwrites': False,
+            
             # Proxy configuration
             'proxy': proxy,
             
@@ -152,8 +157,12 @@ class VideoDownloader:
         ydl_opts = self._get_ydl_opts(account_name)
         
         # Create temporary file for download
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', dir=settings.TEMP_DIR) as temp_file:
-            temp_filename = temp_file.name
+        import uuid
+        temp_filename = str(Path(settings.TEMP_DIR) / f"video_{uuid.uuid4().hex}.mp4")
+        
+        # Clean up any existing file with same name
+        if Path(temp_filename).exists():
+            Path(temp_filename).unlink()
         
         ydl_opts.update({
             'outtmpl': temp_filename.replace('.mp4', '.%(ext)s'),
@@ -179,17 +188,25 @@ class VideoDownloader:
             
             info = await loop.run_in_executor(None, _download_sync)
             
+            # Wait a bit to ensure file is written
+            await asyncio.sleep(0.5)
+            
             # Find the actual downloaded file
             video_file = None
             temp_dir = Path(temp_filename).parent
             base_name = Path(temp_filename).stem
             
-            for file_path in temp_dir.glob(f"{base_name}.*"):
-                if file_path.suffix in ['.mp4', '.webm', '.mkv']:
-                    video_file = str(file_path)
+            # Look for the downloaded file with various extensions
+            for ext in ['.mp4', '.webm', '.mkv', '.m4a']:
+                potential_file = Path(temp_dir) / f"{base_name}{ext}"
+                if potential_file.exists():
+                    video_file = str(potential_file)
                     break
             
-            if not video_file or not Path(video_file).exists():
+            if not video_file:
+                # List all files in temp dir for debugging
+                logger.error(f"Expected file pattern: {base_name}.*")
+                logger.error(f"Files in temp dir: {list(temp_dir.glob('*'))}")
                 raise VideoDownloadError("Downloaded video file not found")
             
             # Check file size
