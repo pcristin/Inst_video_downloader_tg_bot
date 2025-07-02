@@ -2,6 +2,8 @@
 """Check if Instagram cookies are still valid."""
 import sys
 import requests
+import base64
+import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -29,9 +31,37 @@ def parse_cookies_file(cookies_file: Path) -> dict:
     
     return cookies
 
+def extract_sessionid_from_jwt(auth_token: str) -> str:
+    """Extract sessionid from Instagram JWT Authorization token."""
+    try:
+        # Instagram JWT format: "Bearer IGT:2:base64_payload"
+        if not auth_token.startswith('Bearer IGT:2:'):
+            return ""
+        
+        # Extract base64 payload
+        jwt_payload = auth_token.replace('Bearer IGT:2:', '')
+        
+        # Decode base64
+        decoded = base64.b64decode(jwt_payload + '==').decode('utf-8')
+        
+        # Parse JSON
+        data = json.loads(decoded)
+        
+        # Extract sessionid
+        return data.get('sessionid', '')
+        
+    except Exception:
+        return ""
+
 def check_instagram_session(cookies: dict, account_name: str = "") -> bool:
     """Check if Instagram session is valid."""
-    if not cookies.get('sessionid'):
+    # Check for modern auth format (Authorization Bearer + IG-U-DS-USER-ID)
+    has_modern_auth = 'Authorization' in cookies and 'IG-U-DS-USER-ID' in cookies
+    
+    # Check for legacy auth format (sessionid + ds_user_id)
+    has_legacy_auth = 'sessionid' in cookies
+    
+    if not (has_modern_auth or has_legacy_auth):
         return False
     
     headers = {
@@ -41,6 +71,10 @@ def check_instagram_session(cookies: dict, account_name: str = "") -> bool:
         'Accept-Encoding': 'gzip, deflate',
         'Connection': 'keep-alive',
     }
+    
+    # Add Authorization header if we have modern auth
+    if has_modern_auth:
+        headers['Authorization'] = cookies['Authorization']
     
     try:
         # Try to access Instagram's main page
@@ -112,6 +146,9 @@ def check_single_account(username: str, cookie_file: Path) -> Dict[str, any]:
         'has_sessionid': False,
         'has_csrftoken': False,
         'has_ds_user_id': False,
+        'has_authorization': False,
+        'has_ig_user_id': False,
+        'auth_format': 'none',
         'session_valid': False
     }
     
@@ -122,13 +159,29 @@ def check_single_account(username: str, cookie_file: Path) -> Dict[str, any]:
     cookies = parse_cookies_file(cookie_file)
     result['cookie_count'] = len(cookies)
     
-    # Check important cookies
+    # Check for modern Instagram auth format
+    result['has_authorization'] = 'Authorization' in cookies
+    result['has_ig_user_id'] = 'IG-U-DS-USER-ID' in cookies
+    
+    # Check for legacy auth format
     result['has_sessionid'] = 'sessionid' in cookies
     result['has_csrftoken'] = 'csrftoken' in cookies
     result['has_ds_user_id'] = 'ds_user_id' in cookies
     
-    # Test session if we have the required cookies
-    if result['has_sessionid']:
+    # Determine auth format
+    if result['has_authorization'] and result['has_ig_user_id']:
+        result['auth_format'] = 'modern'
+        # Extract sessionid from JWT for verification
+        if result['has_authorization']:
+            sessionid = extract_sessionid_from_jwt(cookies['Authorization'])
+            result['extracted_sessionid'] = bool(sessionid)
+    elif result['has_sessionid']:
+        result['auth_format'] = 'legacy'
+    else:
+        result['auth_format'] = 'none'
+    
+    # Test session if we have valid auth
+    if result['auth_format'] != 'none':
         result['session_valid'] = check_instagram_session(cookies, username)
     
     return result
@@ -170,23 +223,32 @@ def main():
         
         print(f"  📊 Found {result['cookie_count']} cookies")
         
-        # Show important cookies
-        status_sessionid = "✅" if result['has_sessionid'] else "❌"
-        status_csrf = "✅" if result['has_csrftoken'] else "❌"
-        status_userid = "✅" if result['has_ds_user_id'] else "❌"
+        # Show auth format and status
+        if result['auth_format'] == 'modern':
+            print(f"  🆕 Modern Instagram auth format")
+            print(f"  ✅ Authorization Bearer token")
+            print(f"  ✅ IG-U-DS-USER-ID: {result['has_ig_user_id']}")
+            if result.get('extracted_sessionid'):
+                print(f"  ✅ SessionID found in JWT token")
+        elif result['auth_format'] == 'legacy':
+            print(f"  🔄 Legacy Instagram auth format")
+            status_sessionid = "✅" if result['has_sessionid'] else "❌"
+            status_csrf = "✅" if result['has_csrftoken'] else "❌"
+            status_userid = "✅" if result['has_ds_user_id'] else "❌"
+            print(f"  {status_sessionid} sessionid")
+            print(f"  {status_csrf} csrftoken") 
+            print(f"  {status_userid} ds_user_id")
+        else:
+            print(f"  ❌ No valid authentication format found")
         
-        print(f"  {status_sessionid} sessionid")
-        print(f"  {status_csrf} csrftoken") 
-        print(f"  {status_userid} ds_user_id")
-        
-        if result['has_sessionid']:
+        if result['auth_format'] != 'none':
             if result['session_valid']:
                 print(f"  ✅ Session is valid")
                 valid_accounts += 1
             else:
                 print(f"  ❌ Session is expired/invalid")
         else:
-            print(f"  ❌ No sessionid - cannot test session")
+            print(f"  ❌ Cannot test session - no auth cookies")
         
         if len(account_files) > 1:
             print()
