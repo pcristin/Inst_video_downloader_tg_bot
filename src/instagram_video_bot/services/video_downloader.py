@@ -160,9 +160,17 @@ class VideoDownloader:
                 logger.info(f"Video downloaded successfully: {video_path}")
                 
                 # Update last download time
-                self.last_download_time = time.time()
-                
-                return VideoInfo(
+            self.last_download_time = time.time()
+            
+            # Update account usage tracking
+            manager = get_account_manager()
+            if manager and manager.current_account:
+                from datetime import datetime
+                manager.current_account.last_used = datetime.now()
+                manager._save_state()
+                logger.info(f"Updated usage tracking for account: {manager.current_account.username}")
+            
+            return VideoInfo(
                     file_path=video_path,
                     title=info.get('title', ''),
                     duration=info.get('duration'),
