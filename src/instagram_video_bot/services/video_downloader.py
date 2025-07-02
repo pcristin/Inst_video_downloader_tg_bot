@@ -4,13 +4,14 @@ import logging
 import random
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 
-from yt_dlp import YoutubeDL
+import yt_dlp
 
 from ..config.settings import settings
-from ..utils.account_manager import get_account_manager
+from ..utils.account_manager import account_manager
+from ..utils.proxy_manager import get_proxy_for_account
 
 logger = logging.getLogger(__name__)
 
@@ -49,21 +50,35 @@ class VideoDownloader:
         self.last_download_time = 0
         self.min_delay_between_downloads = 5  # Minimum 5 seconds between downloads
         
-    def _get_ydl_opts(self) -> Dict[str, Any]:
-        """Get yt-dlp options with realistic headers."""
+    def _get_ydl_opts(self, account_name: Optional[str] = None) -> Dict[str, Any]:
+        """Get yt-dlp options with realistic headers and account-specific proxy."""
         user_agent = random.choice(self.user_agents)
         
-        # Build proxy string if configured
+        # Get proxy for the specific account
         proxy = None
-        if settings.PROXY_HOST and settings.PROXY_PORT:
-            if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
-                proxy = f'http://{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@{settings.PROXY_HOST}:{settings.PROXY_PORT}'
-            else:
-                proxy = f'http://{settings.PROXY_HOST}:{settings.PROXY_PORT}'
+        if account_name:
+            proxy_config = get_proxy_for_account(account_name)
+            if proxy_config:
+                proxy = proxy_config.url
+                logger.info(f"Using proxy for {account_name}: {proxy_config.host}:{proxy_config.port}")
+        else:
+            # Fallback to legacy single proxy config if no account specified
+            if settings.PROXY_HOST and settings.PROXY_PORT:
+                if settings.PROXY_USERNAME and settings.PROXY_PASSWORD:
+                    proxy = f'http://{settings.PROXY_USERNAME}:{settings.PROXY_PASSWORD}@{settings.PROXY_HOST}:{settings.PROXY_PORT}'
+                else:
+                    proxy = f'http://{settings.PROXY_HOST}:{settings.PROXY_PORT}'
+        
+        # Get cookies file for the account
+        cookies_file = settings.COOKIES_FILE
+        if account_name:
+            account_cookies = Path(settings.COOKIES_FILE.parent / f"{account_name}_cookies.txt")
+            if account_cookies.exists():
+                cookies_file = account_cookies
         
         opts = {
             'format': 'best',
-            'cookiefile': str(settings.COOKIES_FILE),
+            'cookiefile': str(cookies_file),
             'verbose': False,
             'no_warnings': True,
             'quiet': True,
@@ -113,123 +128,158 @@ class VideoDownloader:
         
         return opts
 
-    async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
-        """
-        Download a video from Instagram.
-        
-        Args:
-            url: Instagram video URL
-            output_dir: Directory to save the video
-        
-        Returns:
-            VideoInfo object containing downloaded video information
-        
-        Raises:
-            AuthenticationError: If Instagram authentication fails
-            DownloadError: If video download fails
-        """
-        # Basic rate limiting
+    def _enforce_rate_limit(self):
+        """Enforce rate limiting between downloads."""
         current_time = time.time()
         time_since_last = current_time - self.last_download_time
         
         if time_since_last < self.min_delay_between_downloads:
-            delay = self.min_delay_between_downloads - time_since_last
-            logger.info(f"Rate limiting: waiting {delay:.1f} seconds")
-            await asyncio.sleep(delay)
+            sleep_time = self.min_delay_between_downloads - time_since_last
+            logger.info(f"Rate limiting: sleeping for {sleep_time:.1f} seconds")
+            time.sleep(sleep_time)
         
-        # Add small random delay
-        random_delay = random.uniform(1, 3)
-        await asyncio.sleep(random_delay)
+        self.last_download_time = time.time()
+
+    def download_video(self, url: str, retry_on_auth_error: bool = True) -> Tuple[str, Dict[str, Any]]:
+        """
+        Download Instagram video from URL.
         
-        # Get download options
-        ydl_opts = self._get_ydl_opts()
-        ydl_opts['outtmpl'] = str(output_dir / '%(title)s.%(ext)s')
-
-        logger.info(f"Downloading video from: {url}")
-
+        Args:
+            url: Instagram video URL
+            retry_on_auth_error: Whether to retry with account rotation on auth errors
+            
+        Returns:
+            Tuple of (video_file_path, video_info)
+            
+        Raises:
+            VideoDownloadError: If download fails
+        """
+        self._enforce_rate_limit()
+        
+        # Get current account for proxy assignment
+        current_account = account_manager.get_current_account()
+        account_name = current_account.get('username') if current_account else None
+        
+        if account_name:
+            logger.info(f"Downloading with account: {account_name}")
+        
+        ydl_opts = self._get_ydl_opts(account_name)
+        
+        # Create temporary file for download
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4', dir=settings.TEMP_DIR) as temp_file:
+            temp_filename = temp_file.name
+        
+        ydl_opts.update({
+            'outtmpl': temp_filename.replace('.mp4', '.%(ext)s'),
+        })
+        
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    raise DownloadError("Failed to extract video info")
-
-                video_path = Path(ydl.prepare_filename(info))
-                if not video_path.exists():
-                    raise DownloadError(f"Video file not found at {video_path}")
-
-                logger.info(f"Video downloaded successfully: {video_path}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Extract info first
+                logger.info(f"Extracting video info from: {url}")
+                info = ydl.extract_info(url, download=False)
                 
-                # Update last download time
-            self.last_download_time = time.time()
-            
-            # Update account usage tracking
-            manager = get_account_manager()
-            if manager and manager.current_account:
-                from datetime import datetime
-                manager.current_account.last_used = datetime.now()
-                manager._save_state()
-                logger.info(f"Updated usage tracking for account: {manager.current_account.username}")
-            
-            return VideoInfo(
-                    file_path=video_path,
-                    title=info.get('title', ''),
-                    duration=info.get('duration'),
-                    description=info.get('description')
-                )
+                if not info:
+                    raise VideoDownloadError("Could not extract video information")
                 
-        except Exception as e:
-            error_str = str(e).lower()
+                # Download the video
+                logger.info("Downloading video...")
+                ydl.download([url])
+                
+                # Find the actual downloaded file
+                video_file = None
+                temp_dir = Path(temp_filename).parent
+                base_name = Path(temp_filename).stem
+                
+                for file_path in temp_dir.glob(f"{base_name}.*"):
+                    if file_path.suffix in ['.mp4', '.webm', '.mkv']:
+                        video_file = str(file_path)
+                        break
+                
+                if not video_file or not Path(video_file).exists():
+                    raise VideoDownloadError("Downloaded video file not found")
+                
+                # Update account usage on successful download
+                if account_name:
+                    account_manager.update_account_usage(account_name)
+                    logger.info(f"Updated usage for account: {account_name}")
+                
+                logger.info(f"Video downloaded successfully: {video_file}")
+                
+                return video_file, info
+                
+        except yt_dlp.DownloadError as e:
+            error_msg = str(e).lower()
             
             # Check for authentication errors
-            if any(phrase in error_str for phrase in [
-                "login required", 
-                "rate-limit reached", 
-                "no csrf token",
-                "authentication failed",
-                "cookies",
-                "locked behind the login page"
+            if any(keyword in error_msg for keyword in [
+                'login', 'cookies', 'authentication', 'unauthorized', 
+                'forbidden', 'private', 'not available', 'age-gated'
             ]):
-                # Try to handle auth error and retry once
-                if await self._handle_auth_error():
-                    # Add delay before retry to avoid rapid account switching
-                    logger.info("Waiting before retrying with rotated account...")
-                    await asyncio.sleep(random.uniform(10, 20))
-                    logger.info("Retrying download with rotated account...")
-                    return await self.download_video(url, output_dir)
+                logger.warning(f"Authentication error detected: {e}")
+                
+                if retry_on_auth_error and account_name:
+                    logger.info("Attempting to rotate account and retry...")
+                    
+                    # Mark current account as having issues and rotate
+                    account_manager.handle_authentication_error(account_name)
+                    
+                    # Add delay between account switches to appear more human
+                    delay = random.uniform(10, 20)
+                    logger.info(f"Waiting {delay:.1f} seconds before retry...")
+                    time.sleep(delay)
+                    
+                    # Retry with new account (recursive call with retry disabled to avoid loops)
+                    return self.download_video(url, retry_on_auth_error=False)
                 else:
-                    raise AuthenticationError(
-                        "Instagram authentication failed. All accounts exhausted."
-                    )
-            
-            # Check for rate limiting
-            if "rate-limit" in error_str or "too many requests" in error_str:
-                raise DownloadError(
-                    "Instagram rate limit reached. Please wait and try again."
-                )
-            
-            # Generic download error
-            logger.error(f"Download failed: {str(e)}")
-            raise DownloadError(f"Download failed: {str(e)}")
-    
-    async def _handle_auth_error(self) -> bool:
-        """Handle authentication errors by trying account rotation.
-        
-        Returns:
-            bool: True if account rotation was successful, False otherwise
-        """
-        manager = get_account_manager()
-        
-        if manager and manager.current_account:
-            logger.warning(f"Account {manager.current_account.username} seems to have issues")
-            manager.mark_account_banned(manager.current_account)
-            
-            # Try rotating to a new account
-            if manager.rotate_account():
-                logger.info("Successfully rotated to a new account")
-                return True
+                    raise VideoDownloadError(f"Authentication failed: {e}")
             else:
-                logger.error("No accounts available for rotation")
-                return False
-        else:
-            logger.warning("No account manager available for rotation")
-            return False 
+                # Other download errors
+                raise VideoDownloadError(f"Download failed: {e}")
+                
+        except Exception as e:
+            # Clean up temp file on error
+            try:
+                if Path(temp_filename).exists():
+                    Path(temp_filename).unlink()
+            except:
+                pass
+            
+            raise VideoDownloadError(f"Unexpected error during download: {e}")
+
+    def get_video_info(self, url: str) -> Dict[str, Any]:
+        """
+        Get video information without downloading.
+        
+        Args:
+            url: Instagram video URL
+            
+        Returns:
+            Dictionary containing video metadata
+            
+        Raises:
+            VideoDownloadError: If info extraction fails
+        """
+        # Get current account for proxy assignment
+        current_account = account_manager.get_current_account()
+        account_name = current_account.get('username') if current_account else None
+        
+        ydl_opts = self._get_ydl_opts(account_name)
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logger.info(f"Extracting video info from: {url}")
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    raise VideoDownloadError("Could not extract video information")
+                
+                return info
+                
+        except yt_dlp.DownloadError as e:
+            raise VideoDownloadError(f"Failed to get video info: {e}")
+        except Exception as e:
+            raise VideoDownloadError(f"Unexpected error getting video info: {e}")
+
+# Create a global instance
+video_downloader = VideoDownloader() 
