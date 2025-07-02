@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import yt_dlp
 
 from ..config.settings import settings
-from ..utils.account_manager import account_manager
+from ..utils.account_manager import get_account_manager
 from ..utils.proxy_manager import get_proxy_for_account
 
 logger = logging.getLogger(__name__)
@@ -157,8 +157,9 @@ class VideoDownloader:
         self._enforce_rate_limit()
         
         # Get current account for proxy assignment
-        current_account = account_manager.get_current_account()
-        account_name = current_account.get('username') if current_account else None
+        account_manager = get_account_manager()
+        current_account = account_manager.current_account if account_manager else None
+        account_name = current_account.username if current_account else None
         
         if account_name:
             logger.info(f"Downloading with account: {account_name}")
@@ -200,8 +201,10 @@ class VideoDownloader:
                     raise VideoDownloadError("Downloaded video file not found")
                 
                 # Update account usage on successful download
-                if account_name:
-                    account_manager.update_account_usage(account_name)
+                if account_manager and current_account:
+                    from datetime import datetime
+                    current_account.last_used = datetime.now()
+                    account_manager._save_state()
                     logger.info(f"Updated usage for account: {account_name}")
                 
                 logger.info(f"Video downloaded successfully: {video_file}")
@@ -218,11 +221,11 @@ class VideoDownloader:
             ]):
                 logger.warning(f"Authentication error detected: {e}")
                 
-                if retry_on_auth_error and account_name:
+                if retry_on_auth_error and account_manager and current_account:
                     logger.info("Attempting to rotate account and retry...")
                     
                     # Mark current account as having issues and rotate
-                    account_manager.handle_authentication_error(account_name)
+                    account_manager.mark_account_banned(current_account)
                     
                     # Add delay between account switches to appear more human
                     delay = random.uniform(10, 20)
@@ -261,8 +264,9 @@ class VideoDownloader:
             VideoDownloadError: If info extraction fails
         """
         # Get current account for proxy assignment
-        current_account = account_manager.get_current_account()
-        account_name = current_account.get('username') if current_account else None
+        account_manager = get_account_manager()
+        current_account = account_manager.current_account if account_manager else None
+        account_name = current_account.username if current_account else None
         
         ydl_opts = self._get_ydl_opts(account_name)
         
