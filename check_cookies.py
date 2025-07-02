@@ -3,13 +3,13 @@
 import sys
 import requests
 from pathlib import Path
+from typing import Dict, List, Tuple
 
 def parse_cookies_file(cookies_file: Path) -> dict:
     """Parse Netscape format cookies file."""
     cookies = {}
     
     if not cookies_file.exists():
-        print(f"❌ Cookies file not found: {cookies_file}")
         return cookies
     
     try:
@@ -25,18 +25,17 @@ def parse_cookies_file(cookies_file: Path) -> dict:
                     if 'instagram.com' in domain:
                         cookies[name] = value
     except Exception as e:
-        print(f"❌ Error reading cookies file: {e}")
+        print(f"❌ Error reading {cookies_file}: {e}")
     
     return cookies
 
-def check_instagram_session(cookies: dict) -> bool:
+def check_instagram_session(cookies: dict, account_name: str = "") -> bool:
     """Check if Instagram session is valid."""
     if not cookies.get('sessionid'):
-        print("❌ No sessionid cookie found")
         return False
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip, deflate',
@@ -58,63 +57,164 @@ def check_instagram_session(cookies: dict) -> bool:
             
             # Look for signs we're logged in
             if 'logged_in":true' in content or '"is_logged_in":true' in content:
-                print("✅ Cookies are valid - logged in successfully")
                 return True
             elif 'login' in content and 'password' in content:
-                print("❌ Cookies are invalid - redirected to login page")
                 return False
             else:
-                print("⚠️  Cookies status unclear - might be rate limited")
+                # Status unclear - might be rate limited
                 return False
         else:
-            print(f"❌ HTTP {response.status_code} - cookies might be invalid")
             return False
             
     except Exception as e:
-        print(f"❌ Error checking cookies: {e}")
+        if account_name:
+            print(f"⚠️  Error checking {account_name}: {e}")
         return False
+
+def get_account_cookie_files() -> List[Tuple[str, Path]]:
+    """Get list of account cookie files."""
+    # Check if running in Docker
+    if Path('/.dockerenv').exists():
+        cookies_dir = Path('/app/cookies')
+        preauth_file = Path('/app/accounts_preauth.txt')
+    else:
+        cookies_dir = Path('cookies')
+        preauth_file = Path('accounts_preauth.txt')
+    
+    account_files = []
+    
+    # Check if we're in multi-account mode
+    if preauth_file.exists():
+        # Multi-account mode - check individual account files
+        try:
+            with open(preauth_file, 'r') as f:
+                for line in f:
+                    username = line.strip()
+                    if username and not username.startswith('#'):
+                        cookie_file = cookies_dir / f"{username}_cookies.txt"
+                        account_files.append((username, cookie_file))
+        except Exception as e:
+            print(f"❌ Error reading {preauth_file}: {e}")
+    else:
+        # Single account mode - check the main cookies file
+        cookie_file = cookies_dir / 'instagram_cookies.txt'
+        account_files.append(("main", cookie_file))
+    
+    return account_files
+
+def check_single_account(username: str, cookie_file: Path) -> Dict[str, any]:
+    """Check a single account's cookies."""
+    result = {
+        'username': username,
+        'cookie_file': cookie_file,
+        'exists': False,
+        'cookie_count': 0,
+        'has_sessionid': False,
+        'has_csrftoken': False,
+        'has_ds_user_id': False,
+        'session_valid': False
+    }
+    
+    if not cookie_file.exists():
+        return result
+    
+    result['exists'] = True
+    cookies = parse_cookies_file(cookie_file)
+    result['cookie_count'] = len(cookies)
+    
+    # Check important cookies
+    result['has_sessionid'] = 'sessionid' in cookies
+    result['has_csrftoken'] = 'csrftoken' in cookies
+    result['has_ds_user_id'] = 'ds_user_id' in cookies
+    
+    # Test session if we have the required cookies
+    if result['has_sessionid']:
+        result['session_valid'] = check_instagram_session(cookies, username)
+    
+    return result
 
 def main():
     """Main function."""
-    # Check if running in Docker
-    if Path('/.dockerenv').exists():
-        cookies_file = Path('/app/cookies/instagram_cookies.txt')
-    else:
-        cookies_file = Path('cookies/instagram_cookies.txt')
+    print("🔍 Instagram Cookie Checker")
+    print("=" * 50)
     
-    print(f"🔍 Checking cookies in: {cookies_file}")
+    account_files = get_account_cookie_files()
     
-    cookies = parse_cookies_file(cookies_file)
-    
-    if not cookies:
-        print("❌ No valid cookies found")
-        print("\n💡 To fix this:")
-        print("1. Update your account.txt with fresh account data")
-        print("2. Run: python3 import_cookies.py")
+    if not account_files:
+        print("❌ No account files found")
+        print("\n💡 Make sure you have either:")
+        print("- accounts_preauth.txt (multi-account mode)")
+        print("- cookies/instagram_cookies.txt (single-account mode)")
         sys.exit(1)
     
-    print(f"📊 Found {len(cookies)} Instagram cookies")
-    
-    # Show important cookies
-    important_cookies = ['sessionid', 'csrftoken', 'ds_user_id']
-    for cookie_name in important_cookies:
-        if cookie_name in cookies:
-            value = cookies[cookie_name]
-            print(f"  ✓ {cookie_name}: {value[:20]}...")
-        else:
-            print(f"  ❌ {cookie_name}: missing")
-    
-    print("\n🔍 Testing session validity...")
-    
-    if check_instagram_session(cookies):
-        print("\n✅ Cookies are working! Bot should be able to download videos.")
+    if len(account_files) == 1 and account_files[0][0] == "main":
+        print("📱 Single Account Mode")
     else:
-        print("\n❌ Cookies are expired or invalid!")
+        print(f"📱 Multi-Account Mode ({len(account_files)} accounts)")
+    
+    print()
+    
+    all_results = []
+    valid_accounts = 0
+    
+    for username, cookie_file in account_files:
+        result = check_single_account(username, cookie_file)
+        all_results.append(result)
+        
+        if len(account_files) > 1:
+            print(f"🔍 Checking: {username}")
+        
+        if not result['exists']:
+            print(f"  ❌ Cookie file not found: {cookie_file}")
+            continue
+        
+        print(f"  📊 Found {result['cookie_count']} cookies")
+        
+        # Show important cookies
+        status_sessionid = "✅" if result['has_sessionid'] else "❌"
+        status_csrf = "✅" if result['has_csrftoken'] else "❌"
+        status_userid = "✅" if result['has_ds_user_id'] else "❌"
+        
+        print(f"  {status_sessionid} sessionid")
+        print(f"  {status_csrf} csrftoken") 
+        print(f"  {status_userid} ds_user_id")
+        
+        if result['has_sessionid']:
+            if result['session_valid']:
+                print(f"  ✅ Session is valid")
+                valid_accounts += 1
+            else:
+                print(f"  ❌ Session is expired/invalid")
+        else:
+            print(f"  ❌ No sessionid - cannot test session")
+        
+        if len(account_files) > 1:
+            print()
+    
+    # Summary
+    print("=" * 50)
+    if len(account_files) > 1:
+        print(f"📊 Summary: {valid_accounts}/{len(account_files)} accounts have valid sessions")
+        
+        if valid_accounts == 0:
+            print("\n❌ No accounts have valid sessions!")
+        elif valid_accounts < len(account_files):
+            print(f"\n⚠️  {len(account_files) - valid_accounts} accounts need fresh cookies")
+        else:
+            print("\n✅ All accounts have valid sessions!")
+    else:
+        result = all_results[0]
+        if result['session_valid']:
+            print("\n✅ Cookies are working! Bot should be able to download videos.")
+        else:
+            print("\n❌ Cookies are expired or invalid!")
+    
+    if valid_accounts == 0:
         print("\n💡 To fix this:")
-        print("1. Get fresh account data")
-        print("2. Update account.txt")
-        print("3. Run: python3 import_cookies.py")
-        print("4. Restart your bot")
+        print("1. Get fresh cookies from InstAccountsManager")
+        print("2. Run: make import-instmanager")
+        print("3. Restart your bot")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
