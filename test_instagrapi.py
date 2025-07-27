@@ -19,7 +19,11 @@ async def test_instagram_client():
     """Test the Instagram client functionality."""
     try:
         # Create client
-        client = InstagramClient(settings.IG_USERNAME, settings.IG_PASSWORD)
+        client = InstagramClient(
+            username=settings.IG_USERNAME, 
+            password=settings.IG_PASSWORD,
+            totp_secret=settings.TOTP_SECRET
+        )
         
         # Test login
         logger.info("Testing Instagram login...")
