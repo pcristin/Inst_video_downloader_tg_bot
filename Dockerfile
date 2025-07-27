@@ -46,3 +46,6 @@ RUN mkdir -p temp sessions && \
 
 # Switch to non-root user
 USER botuser
+
+# Set the default command
+CMD ["python", "-m", "src.instagram_video_bot"]
