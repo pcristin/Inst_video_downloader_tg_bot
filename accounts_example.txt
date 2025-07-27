@@ -1,0 +1,28 @@
+# Example accounts.txt for Instagram Video Downloader Bot
+# Format: username|password|totp_secret
+# Each line represents one account
+# Proxies are automatically assigned from PROXIES in .env file
+
+# Example accounts (replace with your actual 40 accounts):
+user1_example|password123|ABCD1234EFGH5678IJKL
+user2_example|password456|MNOP5678QRST9012UVWX
+user3_example|password789|YZAB3456CDEF7890GHIJ
+user4_example|password321|KLMN9012OPQR3456STUV
+user5_example|password654|WXYZ7890ABCD1234EFGH
+user6_example|password987|IJKL5678MNOP9012QRST
+user7_example|password147|UVWX3456YZAB7890CDEF
+user8_example|password258|GHIJ1234KLMN5678OPQR
+user9_example|password369|STUV9012WXYZ3456ABCD
+user10_example|password741|EFGH7890IJKL1234MNOP
+
+# Add your remaining 30 accounts here...
+# user11_example|password852|QRST5678UVWX9012YZAB
+# user12_example|password963|CDEF3456GHIJ7890KLMN
+# ... continue for all 40 accounts
+
+# Notes:
+# - Each account will be automatically assigned one of your 10 proxies
+# - Proxy assignment is round-robin: account 1 → proxy 1, account 2 → proxy 2, etc.
+# - When you reach account 11, it will use proxy 1 again
+# - Sessions are automatically saved in sessions/ directory
+# - No need to manually manage cookies anymore! 

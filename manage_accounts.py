@@ -9,7 +9,6 @@ from tabulate import tabulate
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.instagram_video_bot.utils.account_manager import get_account_manager
-from src.instagram_video_bot.utils.instagram_auth import refresh_instagram_cookies
 
 def show_status():
     """Show status of all accounts."""
@@ -24,19 +23,21 @@ def show_status():
     print(f"Current: {status['current_account'] or 'None'}")
     
     # Create table of accounts
-    headers = ["Username", "Status", "Last Used", "Has Cookies"]
+    headers = ["Username", "Status", "Proxy", "Last Used", "Has Session"]
     rows = []
     
     for acc in status['accounts']:
         status_emoji = "❌" if acc['is_banned'] else "✅"
-        has_cookies = "Yes" if acc['has_cookies'] else "No"
+        has_session = "Yes" if acc['has_session'] else "No"
         last_used = acc['last_used'] or "Never"
+        proxy = acc.get('proxy', 'None')
         
         rows.append([
             acc['username'],
             status_emoji,
+            proxy,
             last_used,
-            has_cookies
+            has_session
         ])
     
     print("\n" + tabulate(rows, headers=headers, tablefmt="grid"))
@@ -168,23 +169,21 @@ def main():
         parser.print_help()
         return
     
-    # Check if accounts files exist
-    preauth_file = Path('accounts_preauth.txt')
+    # Check if accounts file exists
     accounts_file = Path('accounts.txt')
     
-    if not preauth_file.exists() and not accounts_file.exists():
+    if not accounts_file.exists():
         print("❌ No accounts file found!")
-        print("\nCreate one of these files:")
-        print("1. accounts_preauth.txt (for pre-authenticated accounts)")
-        print("   Format: one username per line")
-        print("   Example:")
-        print("   ms.stevenbaker682510")
-        print("   6118patriciaser.173")
-        print()
-        print("2. accounts.txt (for traditional accounts)")
+        print("\nCreate accounts.txt with the following format:")
         print("   Format: username|password|totp_secret")
         print("   Example:")
         print("   samosirarlene|@encore05|4NPFTMJUVP7NPXPZC3MDZ26SVZTW5GUL")
+        print("   john_doe|mypassword123|ABCD1234EFGH5678IJKL")
+        print()
+        print("💡 Tips:")
+        print("   - Each line represents one account")
+        print("   - Proxies are automatically assigned from PROXIES in .env")
+        print("   - Sessions are stored in sessions/ directory")
         sys.exit(1)
     
     # Execute command
