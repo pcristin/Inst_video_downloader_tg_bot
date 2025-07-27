@@ -38,13 +38,6 @@ COPY src/ ./src/
 # Copy management scripts (instagrapi-based)
 COPY manage_accounts.py test_instagrapi.py ./
 
-# Copy example configuration files
-COPY accounts_example.txt env_example_multi_proxy.txt INSTAGRAPI_MIGRATION.md ./
-
-# Copy entrypoint script
-COPY docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh
-
 # Create necessary directories and set permissions
 # temp: for video downloads
 # sessions: for instagrapi session persistence
