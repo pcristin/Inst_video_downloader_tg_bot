@@ -52,8 +52,8 @@ IG_USERNAME=your_instagram_username  # For single account mode
 IG_PASSWORD=your_instagram_password  # For single account mode
 TOTP_SECRET=your_2fa_secret_if_enabled  # Optional
 
-# For multi-account with 10 proxies (comma-separated):
-PROXIES=http://user1:pass1@proxy1.com:8080,http://user2:pass2@proxy2.com:8080,http://user3:pass3@proxy3.com:8080,http://user4:pass4@proxy4.com:8080,http://user5:pass5@proxy5.com:8080,http://user6:pass6@proxy6.com:8080,http://user7:pass7@proxy7.com:8080,http://user8:pass8@proxy8.com:8080,http://user9:pass9@proxy9.com:8080,http://user10:pass10@proxy10.com:8080
+# For multi-account with 10 proxies (comma-separated, http:// added automatically):
+PROXIES=user1:pass1@proxy1.com:8080,user2:pass2@proxy2.com:8080,user3:pass3@proxy3.com:8080,user4:pass4@proxy4.com:8080,user5:pass5@proxy5.com:8080,user6:pass6@proxy6.com:8080,user7:pass7@proxy7.com:8080,user8:pass8@proxy8.com:8080,user9:pass9@proxy9.com:8080,user10:pass10@proxy10.com:8080
 ```
 
 ### 3. Multi-Account Setup
