@@ -86,9 +86,14 @@ class AccountManager:
                     # Format: username|password|totp_secret
                     parts = line.split('|')
                     if len(parts) >= 3:
-                        username = parts[0].strip()
-                        password = parts[1].strip()
-                        totp_secret = parts[2].strip()
+                        username = parts[0].strip() if parts[0] else ""
+                        password = parts[1].strip() if parts[1] else ""
+                        totp_secret = parts[2].strip() if parts[2] else ""
+                        
+                        # Skip accounts with missing essential data
+                        if not username or not password:
+                            logger.warning(f"Skipping account on line {line_num}: missing username or password")
+                            continue
                         
                         # Assign proxy (round-robin through available proxies)
                         proxy = None
@@ -191,12 +196,13 @@ class AccountManager:
         try:
             from ..services.instagram_client import InstagramClient
             
-            # Create Instagram client with account's proxy
+            # Create Instagram client with account's proxy and TOTP secret
             client = InstagramClient(
                 username=account.username,
                 password=account.password,
                 session_file=account.session_file,
-                proxy=account.proxy
+                proxy=account.proxy,
+                totp_secret=account.totp_secret
             )
             
             # Attempt login

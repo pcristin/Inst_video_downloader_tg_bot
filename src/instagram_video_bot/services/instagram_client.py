@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 class InstagramClient:
     """Instagram client wrapper using instagrapi."""
     
-    def __init__(self, username: str, password: str, session_file: Optional[Path] = None, proxy: Optional[str] = None):
+    def __init__(self, username: str, password: str, session_file: Optional[Path] = None, proxy: Optional[str] = None, totp_secret: Optional[str] = None):
         self.username = username
         self.password = password
         self.proxy = proxy
+        self.totp_secret = totp_secret
         self.session_file = session_file or settings.BASE_DIR / "sessions" / f"{username}.json"
         self.client = Client()
         self._setup_proxy()
@@ -71,9 +72,9 @@ class InstagramClient:
             
             # Handle 2FA if needed
             verification_code = None
-            if settings.TOTP_SECRET:
+            if self.totp_secret and self.totp_secret.strip():
                 import pyotp
-                totp = pyotp.TOTP(settings.TOTP_SECRET)
+                totp = pyotp.TOTP(self.totp_secret.strip())
                 verification_code = totp.now()
                 logger.info("Using TOTP for 2FA")
             
