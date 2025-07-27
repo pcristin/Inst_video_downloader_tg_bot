@@ -2,6 +2,7 @@
 """Main entry point for the Instagram Video Downloader Bot."""
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -31,8 +32,8 @@ def check_environment() -> None:
         missing_vars.append("BOT_TOKEN")
     
     # Check if accounts.txt exists for multi-account mode
-    accounts_file = Path("/app/accounts.txt")
-    if not accounts_file.exists():
+    accounts_file_path = "/app/accounts.txt"
+    if not os.path.exists(accounts_file_path):
         # Single account mode - require IG_USERNAME and IG_PASSWORD
         for var in ["IG_USERNAME", "IG_PASSWORD"]:
             if not getattr(settings, var):
