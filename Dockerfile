@@ -42,7 +42,7 @@ COPY manage_accounts.py test_instagrapi.py ./
 # temp: for video downloads
 # sessions: for instagrapi session persistence
 RUN mkdir -p temp sessions && \
-    chown -R botuser:botuser /app
+    chown -R botuser:botuser /app/temp /app/sessions /app
 
 # Switch to non-root user
 USER botuser
