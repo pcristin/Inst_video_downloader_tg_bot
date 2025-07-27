@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     PROXY_PASSWORD: Optional[str] = None
     
     # Multiple proxy support (format: proxy1,proxy2,proxy3...)
-    # Each proxy format: http://user:pass@host:port or http://host:port
+    # Each proxy format: user:pass@host:port or host:port
     PROXIES: Optional[str] = None
     
     # Paths - simplified
@@ -63,7 +63,16 @@ class Settings(BaseSettings):
         """Get list of proxies from PROXIES setting."""
         if not self.PROXIES:
             return []
-        return [proxy.strip() for proxy in self.PROXIES.split(',') if proxy.strip()]
+        
+        proxies = []
+        for proxy in self.PROXIES.split(','):
+            proxy = proxy.strip()
+            if proxy:
+                # Add http:// prefix if not present
+                if not proxy.startswith(('http://', 'https://', 'socks5://')):
+                    proxy = f'http://{proxy}'
+                proxies.append(proxy)
+        return proxies
     
     def get_single_proxy(self) -> Optional[str]:
         """Get single proxy from old-style settings (backward compatibility)."""
