@@ -3,6 +3,7 @@
 
 import logging
 import sys
+from pathlib import Path
 
 from .config.settings import settings
 from .services.telegram_bot import TelegramBot
@@ -30,7 +31,7 @@ def check_environment() -> None:
         missing_vars.append("BOT_TOKEN")
     
     # Check if accounts.txt exists for multi-account mode
-    accounts_file = settings.BASE_DIR / "accounts.txt"
+    accounts_file = Path("/app/accounts.txt")
     if not accounts_file.exists():
         # Single account mode - require IG_USERNAME and IG_PASSWORD
         for var in ["IG_USERNAME", "IG_PASSWORD"]:
