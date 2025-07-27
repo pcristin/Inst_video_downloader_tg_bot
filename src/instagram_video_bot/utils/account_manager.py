@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ..config.settings import settings
-from .instagram_auth import refresh_instagram_cookies_sync
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +17,10 @@ class Account:
     username: str
     password: str = ""
     totp_secret: str = ""
+    proxy: Optional[str] = None
     last_used: Optional[datetime] = None
     is_banned: bool = False
-    cookies_file: Optional[Path] = None
-    pre_authenticated: bool = False
+    session_file: Optional[Path] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -29,10 +28,10 @@ class Account:
             'username': self.username,
             'password': self.password,
             'totp_secret': self.totp_secret,
+            'proxy': self.proxy,
             'last_used': self.last_used.isoformat() if self.last_used else None,
             'is_banned': self.is_banned,
-            'cookies_file': str(self.cookies_file) if self.cookies_file else None,
-            'pre_authenticated': self.pre_authenticated
+            'session_file': str(self.session_file) if self.session_file else None
         }
     
     @classmethod
@@ -42,10 +41,10 @@ class Account:
             username=data['username'],
             password=data.get('password', ''),
             totp_secret=data.get('totp_secret', ''),
+            proxy=data.get('proxy'),
             last_used=datetime.fromisoformat(data['last_used']) if data.get('last_used') else None,
             is_banned=data.get('is_banned', False),
-            cookies_file=Path(data['cookies_file']) if data.get('cookies_file') else None,
-            pre_authenticated=data.get('pre_authenticated', False)
+            session_file=Path(data['session_file']) if data.get('session_file') else None
         )
 
 class AccountManager:
@@ -58,8 +57,13 @@ class AccountManager:
         self.state_file = state_file
         self.accounts: List[Account] = []
         self.current_account: Optional[Account] = None
-        self.cookies_dir = Path('cookies')
-        self.cookies_dir.mkdir(exist_ok=True)
+        self.sessions_dir = Path('sessions')
+        self.sessions_dir.mkdir(exist_ok=True)
+        
+        # Get available proxies
+        self.proxies = settings.get_proxy_list()
+        if self.proxies:
+            logger.info(f"Loaded {len(self.proxies)} proxies for rotation")
         
         self._load_accounts()
         self._load_state()
@@ -79,36 +83,34 @@ class AccountManager:
                     continue
                 
                 try:
-                    if '|' not in line:
-                        # Pre-authenticated account (username only)
-                        username = line.strip()
-                        cookies_file = self.cookies_dir / f"{username}_cookies.txt"
+                    # Format: username|password|totp_secret
+                    parts = line.split('|')
+                    if len(parts) >= 3:
+                        username = parts[0].strip()
+                        password = parts[1].strip()
+                        totp_secret = parts[2].strip()
                         
-                        if cookies_file.exists():
-                            account = Account(
-                                username=username,
-                                pre_authenticated=True,
-                                cookies_file=cookies_file
-                            )
-                            self.accounts.append(account)
-                            logger.info(f"Loaded pre-auth account: {username}")
-                        else:
-                            logger.warning(f"Pre-auth account {username} missing cookies: {cookies_file}")
+                        # Assign proxy (round-robin through available proxies)
+                        proxy = None
+                        if self.proxies:
+                            proxy_index = (len(self.accounts)) % len(self.proxies)
+                            proxy = self.proxies[proxy_index]
+                        
+                        # Set session file path
+                        session_file = self.sessions_dir / f"{username}.json"
+                        
+                        account = Account(
+                            username=username,
+                            password=password,
+                            totp_secret=totp_secret,
+                            proxy=proxy,
+                            session_file=session_file
+                        )
+                        self.accounts.append(account)
+                        logger.info(f"Loaded account: {username} with proxy: {proxy or 'None'}")
                     else:
-                        # Standard format: username|password|totp_secret
-                        parts = line.split('|')
-                        if len(parts) >= 3:
-                            account = Account(
-                                username=parts[0].strip(),
-                                password=parts[1].strip(),
-                                totp_secret=parts[2].strip(),
-                                pre_authenticated=False
-                            )
-                            self.accounts.append(account)
-                            logger.info(f"Loaded account: {account.username}")
-                        else:
-                            logger.warning(f"Invalid format on line {line_num}: {line}")
-                            
+                        logger.warning(f"Invalid format on line {line_num}: Expected username|password|totp_secret")
+                        
                 except Exception as e:
                     logger.error(f"Error parsing line {line_num}: {e}")
         
@@ -129,8 +131,11 @@ class AccountManager:
                     if account.username == saved_account['username']:
                         account.last_used = datetime.fromisoformat(saved_account['last_used']) if saved_account.get('last_used') else None
                         account.is_banned = saved_account.get('is_banned', False)
-                        if saved_account.get('cookies_file'):
-                            account.cookies_file = Path(saved_account['cookies_file'])
+                        # Update proxy if changed
+                        if saved_account.get('proxy'):
+                            account.proxy = saved_account['proxy']
+                        if saved_account.get('session_file'):
+                            account.session_file = Path(saved_account['session_file'])
                         break
                         
         except Exception as e:
@@ -154,7 +159,7 @@ class AccountManager:
         """Get list of available (non-banned) accounts."""
         return [
             acc for acc in self.accounts 
-            if not acc.is_banned and (acc.pre_authenticated or (acc.password and acc.totp_secret))
+            if not acc.is_banned and acc.password and acc.totp_secret
         ]
     
     def get_next_account(self) -> Optional[Account]:
@@ -180,49 +185,30 @@ class AccountManager:
         return available[0]
     
     def setup_account(self, account: Account) -> bool:
-        """Setup an account for use."""
+        """Setup an account for use with instagrapi."""
         logger.info(f"Setting up account: {account.username}")
         
         try:
-            if account.pre_authenticated:
-                # Use existing cookies
-                if account.cookies_file and account.cookies_file.exists():
-                    settings.COOKIES_FILE = account.cookies_file
-                    self.current_account = account
-                    account.last_used = datetime.now()
-                    self._save_state()
-                    logger.info(f"Using pre-auth account: {account.username}")
-                    return True
-                else:
-                    logger.error(f"Pre-auth account {account.username} missing cookies")
-                    return False
+            from ..services.instagram_client import InstagramClient
+            
+            # Create Instagram client with account's proxy
+            client = InstagramClient(
+                username=account.username,
+                password=account.password,
+                session_file=account.session_file,
+                proxy=account.proxy
+            )
+            
+            # Attempt login
+            if client.login():
+                account.last_used = datetime.now()
+                self.current_account = account
+                self._save_state()
+                logger.info(f"Successfully logged in: {account.username} with proxy: {account.proxy or 'None'}")
+                return True
             else:
-                # Login and generate cookies
-                import os
-                os.environ['IG_USERNAME'] = account.username
-                os.environ['IG_PASSWORD'] = account.password
-                os.environ['TOTP_SECRET'] = account.totp_secret
-                
-                # Update settings
-                settings.IG_USERNAME = account.username
-                settings.IG_PASSWORD = account.password
-                settings.TOTP_SECRET = account.totp_secret
-                
-                # Set cookies file path
-                cookies_file = self.cookies_dir / f"{account.username}_cookies.txt"
-                settings.COOKIES_FILE = cookies_file
-                
-                # Attempt login
-                if refresh_instagram_cookies_sync():
-                    account.cookies_file = cookies_file
-                    account.last_used = datetime.now()
-                    self.current_account = account
-                    self._save_state()
-                    logger.info(f"Successfully logged in: {account.username}")
-                    return True
-                else:
-                    logger.error(f"Failed to login: {account.username}")
-                    return False
+                logger.error(f"Failed to login: {account.username}")
+                return False
                     
         except Exception as e:
             logger.error(f"Error setting up account {account.username}: {e}")
@@ -281,9 +267,9 @@ class AccountManager:
                 {
                     'username': acc.username,
                     'is_banned': acc.is_banned,
-                    'pre_authenticated': acc.pre_authenticated,
+                    'proxy': acc.proxy or 'None',
                     'last_used': acc.last_used.isoformat() if acc.last_used else None,
-                    'has_cookies': acc.cookies_file and acc.cookies_file.exists() if acc.cookies_file else False
+                    'has_session': acc.session_file and acc.session_file.exists() if acc.session_file else False
                 }
                 for acc in self.accounts
             ]
@@ -297,16 +283,11 @@ def get_account_manager() -> Optional[AccountManager]:
     global _account_manager
     
     if _account_manager is None:
-        # Check for different account file formats
-        preauth_file = Path('accounts_preauth.txt')
-        standard_file = Path('accounts.txt')
+        accounts_file = Path('accounts.txt')
         
-        if preauth_file.exists():
-            _account_manager = AccountManager(accounts_file=preauth_file)
-            logger.info("Using pre-authenticated accounts")
-        elif standard_file.exists():
-            _account_manager = AccountManager(accounts_file=standard_file)
-            logger.info("Using standard account format")
+        if accounts_file.exists():
+            _account_manager = AccountManager(accounts_file=accounts_file)
+            logger.info("Using multi-account mode with instagrapi")
         else:
             logger.info("No accounts file found - using single account mode")
             return None

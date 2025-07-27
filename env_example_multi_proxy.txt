@@ -1,0 +1,37 @@
+# Instagram Video Downloader Bot - Multi-Proxy Configuration
+# Copy this to .env and fill in your actual values
+
+# Telegram Bot Token (get from @BotFather)
+BOT_TOKEN=your_telegram_bot_token_here
+
+# Instagram Account Credentials (for single account mode)
+IG_USERNAME=your_instagram_username
+IG_PASSWORD=your_instagram_password
+
+# Optional: Two-Factor Authentication Secret (if you have 2FA enabled)
+# TOTP_SECRET=your_2fa_secret_here
+
+# Multiple Proxy Configuration (comma-separated)
+# Format: http://user:pass@host:port or http://host:port
+# Example with 10 proxies:
+PROXIES=http://user1:pass1@proxy1.com:8080,http://user2:pass2@proxy2.com:8080,http://user3:pass3@proxy3.com:8080,http://user4:pass4@proxy4.com:8080,http://user5:pass5@proxy5.com:8080,http://user6:pass6@proxy6.com:8080,http://user7:pass7@proxy7.com:8080,http://user8:pass8@proxy8.com:8080,http://user9:pass9@proxy9.com:8080,http://user10:pass10@proxy10.com:8080
+
+# Alternative single proxy (for backward compatibility)
+# PROXY_HOST=proxy.example.com
+# PROXY_PORT=8080
+# PROXY_USERNAME=proxy_user
+# PROXY_PASSWORD=proxy_pass
+
+# Optional: Custom paths (usually not needed)
+# TEMP_DIR=/custom/temp/path
+
+# Optional: Development mode
+# DEV_MODE=true
+
+# Optional: Logging level (DEBUG, INFO, WARNING, ERROR)
+# LOG_LEVEL=INFO
+
+# How proxy assignment works:
+# - Accounts are assigned proxies in round-robin fashion
+# - Account 1 gets proxy 1, Account 2 gets proxy 2, ..., Account 11 gets proxy 1 again
+# - This ensures even distribution across your 10 proxies 

@@ -8,12 +8,12 @@ services:
     volumes:
       # Mount temp directory for video downloads
       - ./temp:/app/temp
-      # Mount cookies directory to persist authentication
-      - ./cookies:/app/cookies
+      # Mount sessions directory to persist instagrapi sessions
+      - ./sessions:/app/sessions
       # Mount logs directory (optional)
       - ./logs:/app/logs
-      # Mount accounts_preauth file for pre-authenticated accounts
-      - ./accounts_preauth.txt:/app/accounts_preauth.txt
+      # Mount accounts file for multi-account support
+      - ./accounts.txt:/app/accounts.txt
       # Mount accounts state file to persist banned/usage status
       - ./accounts_state.json:/app/accounts_state.json
     environment:
