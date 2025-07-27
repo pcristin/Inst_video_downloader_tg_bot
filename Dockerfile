@@ -1,3 +1,7 @@
+# Instagram Video Downloader Bot - instagrapi version
+# Lightweight Docker image using instagrapi for Instagram API access
+# No browser automation required - direct API communication
+
 # Use Python 3.11 slim image as base
 FROM python:3.11-slim
 
@@ -8,41 +12,12 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies (minimal for instagrapi)
 RUN apt-get update && apt-get install -y \
-    # FFmpeg for video processing
-    ffmpeg \
-    # Dependencies for Playwright
-    wget \
-    gnupg \
-    ca-certificates \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libatspi2.0-0 \
-    libcairo2 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libglib2.0-0 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libpango-1.0-0 \
-    libx11-6 \
-    libxcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    libxss1 \
-    xdg-utils \
-    # Additional utilities
+    # Basic utilities
     curl \
+    wget \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -60,22 +35,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY src/ ./src/
 
-# Copy management scripts
-COPY manage_accounts.py check_cookies.py monitor_cookies.py refresh_cookies.py warmup_account.py import_cookies.py import_cookies_instmanager.py test_proxies.py ./
+# Copy management scripts (instagrapi-based)
+COPY manage_accounts.py test_instagrapi.py ./
+
+# Copy example configuration files
+COPY accounts_example.txt env_example_multi_proxy.txt INSTAGRAPI_MIGRATION.md ./
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
 
 # Create necessary directories and set permissions
-RUN mkdir -p temp && \
+# temp: for video downloads
+# sessions: for instagrapi session persistence
+RUN mkdir -p temp sessions && \
     chown -R botuser:botuser /app
 
 # Switch to non-root user
 USER botuser
-
-# Install Playwright browsers as the botuser
-RUN playwright install chromium
-
-# Set the entrypoint
-ENTRYPOINT ["/app/docker-entrypoint.sh"] 
