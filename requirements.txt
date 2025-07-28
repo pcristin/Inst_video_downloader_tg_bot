@@ -1,6 +1,6 @@
 # Core dependencies
 python-telegram-bot
-instagrapi
+instagrapi>=2.1.5
 pydantic
 pydantic-settings
 python-dotenv

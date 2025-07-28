@@ -82,21 +82,16 @@ class VideoDownloader:
         try:
             client = self._get_client()
             
-            # Get media info first
+            # Get media info first for metadata (title, duration, etc.)
             media_info = client.get_media_info(url)
             if not media_info:
                 raise DownloadError("Failed to get media information")
             
-            # Determine if this is a video, photo, or carousel
-            if media_info['is_video']:
-                # Download video
-                file_path = client.download_video(url, output_dir)
-            else:
-                # Download photo (or first item if carousel)
-                file_path = client.download_photo(url, output_dir)
+            # Always attempt video download (since we only handle videos/reels)
+            file_path = client.download_video(url, output_dir)
             
             if not file_path:
-                raise DownloadError("Failed to download media")
+                raise DownloadError("Failed to download video")
             
             self.last_download_time = time.time()
             
