@@ -105,7 +105,7 @@ class InstagramClient:
         return False
     
     def download_video(self, url: str, output_dir: Path) -> Optional[Path]:
-        """Download video using instagrapi."""
+        """Download video using instagrapi with validation error handling."""
         try:
             # Extract media PK from URL
             media_pk = self.client.media_pk_from_url(url)
@@ -122,22 +122,75 @@ class InstagramClient:
                 # Log the specific error for debugging
                 logger.warning(f"Standard video download failed: {download_error}")
                 
-                # If standard download fails, try alternative approach
-                # Sometimes the download methods work even when info methods fail
+                # If standard download fails due to validation, try to get raw video URL
                 try:
-                    # Try downloading by URL directly (some methods support this)
-                    video_path = self.client.video_download_by_url(
-                        url=url, 
-                        folder=output_dir
-                    )
-                    logger.info(f"Video downloaded via URL method: {video_path}")
-                    return video_path
-                except Exception as url_download_error:
-                    logger.error(f"Both download methods failed: {url_download_error}")
-                    raise download_error  # Re-raise the original error
+                    # Get raw media data without Pydantic validation
+                    video_url = self._get_video_url_raw(media_pk)
+                    if video_url:
+                        # Download using the direct video URL
+                        video_path = self.client.video_download_by_url(
+                            video_url, 
+                            folder=output_dir,
+                            filename=f"video_{media_pk}"
+                        )
+                        logger.info(f"Video downloaded via raw URL method: {video_path}")
+                        return video_path
+                    else:
+                        raise Exception("Could not extract video URL from raw data")
+                        
+                except Exception as raw_download_error:
+                    logger.warning(f"Raw URL download failed: {raw_download_error}")
+                    
+                    # Final fallback: try clip download methods for reels
+                    try:
+                        video_path = self.client.clip_download(media_pk, folder=output_dir)
+                        logger.info(f"Video downloaded via clip method: {video_path}")
+                        return video_path
+                    except Exception as clip_error:
+                        logger.error(f"All download methods failed. Last error: {clip_error}")
+                        raise download_error  # Re-raise the original error
                     
         except Exception as e:
             logger.error(f"Video download failed: {e}")
+            return None
+    
+    def _get_video_url_raw(self, media_pk: int) -> Optional[str]:
+        """Get video URL from raw API data, bypassing Pydantic validation."""
+        try:
+            # Make direct API call to get raw media info
+            url = f"https://i.instagram.com/api/v1/media/{media_pk}/info/"
+            response = self.client.private_request(url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Navigate through the response to find video URL
+                items = data.get('items', [])
+                if items:
+                    item = items[0]
+                    
+                    # Try different video URL fields
+                    video_versions = item.get('video_versions', [])
+                    if video_versions:
+                        # Get the highest quality version (usually first)
+                        return video_versions[0].get('url')
+                    
+                    # For clips/reels, try clips metadata
+                    clips_metadata = item.get('clips_metadata', {})
+                    if clips_metadata:
+                        clips_video_versions = clips_metadata.get('video_versions', [])
+                        if clips_video_versions:
+                            return clips_video_versions[0].get('url')
+                    
+                    # Fallback: try other video URL fields
+                    if item.get('video_url'):
+                        return item.get('video_url')
+                        
+            logger.warning("Could not find video URL in raw response")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Failed to get raw video URL: {e}")
             return None
 
     def get_media_info(self, url: str) -> Optional[dict]:
