@@ -58,7 +58,7 @@ class TelegramBot:
             )
 
             # Download the video
-            video_info = await self.video_downloader.download_video(url=url)
+            video_info = await self.video_downloader.download_video(url=url, output_dir=settings.TEMP_DIR)
             
             # Verify file exists and has content
             if not video_info.file_path.exists():
