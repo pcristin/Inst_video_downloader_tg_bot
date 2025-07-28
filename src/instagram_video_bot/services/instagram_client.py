@@ -159,15 +159,17 @@ class InstagramClient:
         try:
             # Make direct API call to get raw media info using proper endpoint
             endpoint = f"media/{media_pk}/info/"
-            response = self.client.private_request(endpoint)
+            data = self.client.private_request(endpoint)
             
-            if response.status_code == 200:
-                data = response.json()
-                
+            # Debug: log the keys we get back
+            logger.debug(f"Raw API response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+            
+            if isinstance(data, dict) and 'items' in data:
                 # Navigate through the response to find video URL
                 items = data.get('items', [])
                 if items:
                     item = items[0]
+                    logger.debug(f"Item keys: {list(item.keys())}")
                     
                     # Try different video URL fields
                     video_versions = item.get('video_versions', [])
@@ -180,6 +182,7 @@ class InstagramClient:
                     # For clips/reels, try clips metadata
                     clips_metadata = item.get('clips_metadata', {})
                     if clips_metadata:
+                        logger.debug(f"clips_metadata keys: {list(clips_metadata.keys())}")
                         clips_video_versions = clips_metadata.get('video_versions', [])
                         if clips_video_versions:
                             video_url = clips_video_versions[0].get('url')
@@ -192,15 +195,23 @@ class InstagramClient:
                         logger.info(f"Found video URL in video_url field: {video_url[:100]}...")
                         return video_url
                         
-                logger.warning("Could not find video URL in raw response")
-                logger.debug(f"Available keys in item: {list(items[0].keys()) if items else 'No items'}")
-                return None
+                    # Debug: log all available keys in the item
+                    logger.warning(f"Could not find video URL. Available item keys: {list(item.keys())}")
+                    
+                    # Additional debug: check if there are video-related fields
+                    video_keys = [k for k in item.keys() if 'video' in k.lower()]
+                    logger.debug(f"Video-related keys found: {video_keys}")
+                    
+                else:
+                    logger.warning("No items found in API response")
             else:
-                logger.warning(f"API request failed with status {response.status_code}")
-                return None
+                logger.warning(f"Unexpected API response format: {type(data)}")
+                
+            return None
                 
         except Exception as e:
             logger.warning(f"Failed to get raw video URL: {e}")
+            logger.debug(f"Exception details: {e}", exc_info=True)
             return None
 
     def get_media_info(self, url: str) -> Optional[dict]:
@@ -269,3 +280,102 @@ class InstagramClient:
         except Exception as e:
             logger.error(f"Failed to get media info: {e}")
             return None 
+
+    def _download_without_metadata(self, media_pk: int, output_dir: Path) -> Optional[Path]:
+        """Try to download by constructing direct video URLs or using external tools."""
+        try:
+            # First, try constructing common Instagram video URL patterns
+            # These are educated guesses based on Instagram's CDN structure
+            possible_urls = [
+                f"https://scontent.cdninstagram.com/v/t50.{media_pk}.mp4",
+                f"https://scontent-ams4-1.cdninstagram.com/v/t50.{media_pk}.mp4",
+                f"https://instagram.fams4-1.fna.fbcdn.net/v/t50.{media_pk}.mp4",
+            ]
+            
+            for i, test_url in enumerate(possible_urls):
+                try:
+                    logger.info(f"Trying constructed URL {i+1}/{len(possible_urls)}: {test_url[:80]}...")
+                    video_path = self._download_video_manually(test_url, media_pk, output_dir)
+                    if video_path and video_path.exists() and video_path.stat().st_size > 1000:  # At least 1KB
+                        return video_path
+                except Exception:
+                    continue
+            
+            # If constructed URLs don't work, try yt-dlp as external fallback
+            logger.info("Trying external download with yt-dlp...")
+            video_path = self._download_with_ytdlp(media_pk, output_dir)
+            if video_path:
+                return video_path
+                    
+            logger.warning("No download methods worked")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Download without metadata failed: {e}")
+            return None
+    
+    def _download_with_ytdlp(self, media_pk: int, output_dir: Path) -> Optional[Path]:
+        """Try downloading with yt-dlp as a final fallback."""
+        try:
+            import subprocess
+            import json
+            
+            # Construct Instagram URL from media PK
+            # We need to reverse-engineer the shortcode from PK
+            # This is a simplified approach - in reality, the conversion is more complex
+            instagram_url = f"https://www.instagram.com/p/{self._pk_to_shortcode(media_pk)}/"
+            
+            logger.info(f"Trying yt-dlp download from: {instagram_url}")
+            
+            # Use yt-dlp to download
+            output_template = str(output_dir / f"video_{media_pk}.%(ext)s")
+            
+            cmd = [
+                "yt-dlp",
+                "--no-warnings",
+                "--extract-flat",
+                "--print", "url",
+                instagram_url
+            ]
+            
+            # First, try to get the direct URL
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                video_url = result.stdout.strip()
+                logger.info(f"yt-dlp found video URL: {video_url[:100]}...")
+                
+                # Download the video manually using the URL
+                return self._download_video_manually(video_url, media_pk, output_dir)
+            else:
+                logger.warning(f"yt-dlp failed: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("yt-dlp timed out")
+            return None
+        except ImportError:
+            logger.warning("subprocess not available")
+            return None
+        except FileNotFoundError:
+            logger.warning("yt-dlp not installed")
+            return None
+        except Exception as e:
+            logger.warning(f"yt-dlp download failed: {e}")
+            return None
+    
+    def _pk_to_shortcode(self, media_pk: int) -> str:
+        """Convert media PK to Instagram shortcode (simplified version)."""
+        # This is a simplified base64-like conversion
+        # The actual Instagram algorithm is more complex
+        import string
+        
+        alphabet = string.ascii_letters + string.digits + '-_'
+        shortcode = ''
+        
+        while media_pk > 0:
+            remainder = media_pk % 64
+            shortcode = alphabet[remainder] + shortcode
+            media_pk = media_pk // 64
+            
+        return shortcode or 'A' 
