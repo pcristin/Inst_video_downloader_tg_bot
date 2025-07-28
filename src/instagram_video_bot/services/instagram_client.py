@@ -157,9 +157,9 @@ class InstagramClient:
     def _get_video_url_raw(self, media_pk: int) -> Optional[str]:
         """Get video URL from raw API data, bypassing Pydantic validation."""
         try:
-            # Make direct API call to get raw media info
-            url = f"https://i.instagram.com/api/v1/media/{media_pk}/info/"
-            response = self.client.private_request(url)
+            # Make direct API call to get raw media info using proper endpoint
+            endpoint = f"media/{media_pk}/info/"
+            response = self.client.private_request(endpoint)
             
             if response.status_code == 200:
                 data = response.json()
@@ -173,22 +173,32 @@ class InstagramClient:
                     video_versions = item.get('video_versions', [])
                     if video_versions:
                         # Get the highest quality version (usually first)
-                        return video_versions[0].get('url')
+                        video_url = video_versions[0].get('url')
+                        logger.info(f"Found video URL in video_versions: {video_url[:100]}...")
+                        return video_url
                     
                     # For clips/reels, try clips metadata
                     clips_metadata = item.get('clips_metadata', {})
                     if clips_metadata:
                         clips_video_versions = clips_metadata.get('video_versions', [])
                         if clips_video_versions:
-                            return clips_video_versions[0].get('url')
+                            video_url = clips_video_versions[0].get('url')
+                            logger.info(f"Found video URL in clips_metadata: {video_url[:100]}...")
+                            return video_url
                     
                     # Fallback: try other video URL fields
                     if item.get('video_url'):
-                        return item.get('video_url')
+                        video_url = item.get('video_url')
+                        logger.info(f"Found video URL in video_url field: {video_url[:100]}...")
+                        return video_url
                         
-            logger.warning("Could not find video URL in raw response")
-            return None
-            
+                logger.warning("Could not find video URL in raw response")
+                logger.debug(f"Available keys in item: {list(items[0].keys()) if items else 'No items'}")
+                return None
+            else:
+                logger.warning(f"API request failed with status {response.status_code}")
+                return None
+                
         except Exception as e:
             logger.warning(f"Failed to get raw video URL: {e}")
             return None
