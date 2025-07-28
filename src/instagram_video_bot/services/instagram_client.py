@@ -113,46 +113,96 @@ class InstagramClient:
             
             # Download video directly
             output_dir.mkdir(parents=True, exist_ok=True)
-            video_path = self.client.video_download(media_pk, folder=output_dir)
             
-            logger.info(f"Video downloaded: {video_path}")
-            return video_path
-            
+            try:
+                video_path = self.client.video_download(media_pk, folder=output_dir)
+                logger.info(f"Video downloaded: {video_path}")
+                return video_path
+            except Exception as download_error:
+                # Log the specific error for debugging
+                logger.warning(f"Standard video download failed: {download_error}")
+                
+                # If standard download fails, try alternative approach
+                # Sometimes the download methods work even when info methods fail
+                try:
+                    # Try downloading by URL directly (some methods support this)
+                    video_path = self.client.video_download_by_url(
+                        url=url, 
+                        folder=output_dir
+                    )
+                    logger.info(f"Video downloaded via URL method: {video_path}")
+                    return video_path
+                except Exception as url_download_error:
+                    logger.error(f"Both download methods failed: {url_download_error}")
+                    raise download_error  # Re-raise the original error
+                    
         except Exception as e:
             logger.error(f"Video download failed: {e}")
             return None
-    
-    def download_photo(self, url: str, output_dir: Path) -> Optional[Path]:
-        """Download photo using instagrapi."""
-        try:
-            # Extract media PK from URL
-            media_pk = self.client.media_pk_from_url(url)
-            logger.info(f"Extracted media PK: {media_pk}")
-            
-            # Download photo directly
-            output_dir.mkdir(parents=True, exist_ok=True)
-            photo_path = self.client.photo_download(media_pk, folder=output_dir)
-            
-            logger.info(f"Photo downloaded: {photo_path}")
-            return photo_path
-            
-        except Exception as e:
-            logger.error(f"Photo download failed: {e}")
-            return None
-    
+
     def get_media_info(self, url: str) -> Optional[dict]:
-        """Get media information."""
+        """Get media information for video/reel content."""
         try:
             media_pk = self.client.media_pk_from_url(url)
-            media_info = self.client.media_info(media_pk)
-            return {
-                'title': media_info.caption_text or '',
-                'duration': getattr(media_info, 'video_duration', 0),
-                'user': media_info.user.username,
-                'pk': media_pk,
-                'media_type': media_info.media_type,  # 1 = photo, 2 = video, 8 = carousel
-                'is_video': media_info.media_type == 2
-            }
+            
+            # Try different methods in order of preference
+            # 1. Try the standard media_info first
+            try:
+                media_info = self.client.media_info(media_pk)
+                return {
+                    'title': media_info.caption_text or '',
+                    'duration': getattr(media_info, 'video_duration', 0),
+                    'user': media_info.user.username,
+                    'pk': media_pk
+                }
+            except Exception as validation_error:
+                logger.warning(f"Standard media_info failed (likely Pydantic validation): {validation_error}")
+                
+                # 2. Try GraphQL API directly
+                try:
+                    media_info = self.client.media_info_gql(media_pk)
+                    return {
+                        'title': media_info.caption_text or '',
+                        'duration': getattr(media_info, 'video_duration', 0),
+                        'user': media_info.user.username,
+                        'pk': media_pk
+                    }
+                except Exception as gql_error:
+                    logger.warning(f"GraphQL media_info failed: {gql_error}")
+                    
+                    # 3. Try mobile API directly
+                    try:
+                        media_info = self.client.media_info_v1(media_pk)
+                        return {
+                            'title': media_info.caption_text or '',
+                            'duration': getattr(media_info, 'video_duration', 0),
+                            'user': media_info.user.username,
+                            'pk': media_pk
+                        }
+                    except Exception as v1_error:
+                        logger.warning(f"Mobile API media_info failed: {v1_error}")
+                        
+                        # 4. Last resort: Use oEmbed for basic info
+                        try:
+                            oembed_info = self.client.media_oembed(url)
+                            return {
+                                'title': getattr(oembed_info, 'title', '') or '',
+                                'duration': 0,
+                                'user': getattr(oembed_info, 'author_name', '') or 'unknown',
+                                'pk': media_pk
+                            }
+                        except Exception as oembed_error:
+                            logger.warning(f"oEmbed fallback failed: {oembed_error}")
+                            
+                            # 5. Final fallback - minimal info for download attempt
+                            logger.info("Using minimal fallback info")
+                            return {
+                                'title': '',
+                                'duration': 0,
+                                'user': 'unknown',
+                                'pk': media_pk
+                            }
+                            
         except Exception as e:
             logger.error(f"Failed to get media info: {e}")
             return None 
