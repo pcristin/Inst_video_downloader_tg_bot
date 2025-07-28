@@ -33,19 +33,11 @@ def check_environment() -> None:
     
     # Check if accounts.txt exists for multi-account mode
     accounts_file_path = "/app/accounts.txt"
-    file_exists = os.path.exists(accounts_file_path)
-    logger = logging.getLogger(__name__)
-    logger.info(f"Checking for accounts file at: {accounts_file_path}")
-    logger.info(f"File exists: {file_exists}")
-    
-    if not file_exists:
-        logger.info("Using single account mode - requiring IG_USERNAME and IG_PASSWORD")
+    if not os.path.exists(accounts_file_path):
         # Single account mode - require IG_USERNAME and IG_PASSWORD
         for var in ["IG_USERNAME", "IG_PASSWORD"]:
             if not getattr(settings, var):
                 missing_vars.append(var)
-    else:
-        logger.info("Using multi-account mode - accounts.txt found")
 
     if missing_vars:
         raise ValueError(
