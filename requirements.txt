@@ -1,9 +1,10 @@
 # Core dependencies
 python-telegram-bot
-instagrapi>=2.1.5
+instagrapi
 pydantic
 pydantic-settings
 python-dotenv
+yt-dlp
 
 # Utilities (keep these)
 pyotp  # Still useful for 2FA
