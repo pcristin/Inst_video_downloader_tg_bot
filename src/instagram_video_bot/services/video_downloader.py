@@ -88,7 +88,7 @@ class VideoDownloader:
                 raise DownloadError("Failed to get media information")
             
             # Always attempt video download (since we only handle videos/reels)
-                file_path = client.download_video(url, output_dir)
+            file_path = client.download_video(url, output_dir)
             
             if not file_path:
                 raise DownloadError("Failed to download video")
