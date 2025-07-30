@@ -36,7 +36,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 
 # Copy management scripts (instagrapi-based)
-COPY manage_accounts.py test_instagrapi.py ./
+COPY manage_accounts.py ./
 
 # Create necessary directories and set permissions
 # temp: for video downloads
