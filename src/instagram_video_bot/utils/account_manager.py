@@ -13,14 +13,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Account:
-    """Instagram account data."""
+    """Represents an Instagram account with its configuration."""
     username: str
-    password: str = ""
+    password: str
     totp_secret: str = ""
     proxy: Optional[str] = None
-    last_used: Optional[datetime] = None
-    is_banned: bool = False
     session_file: Optional[Path] = None
+    is_banned: bool = False
+    ban_reason: Optional[str] = None  # Reason for being marked unavailable
+    banned_at: Optional[datetime] = None  # When the account was banned
+    last_used: Optional[datetime] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -29,23 +31,33 @@ class Account:
             'password': self.password,
             'totp_secret': self.totp_secret,
             'proxy': self.proxy,
-            'last_used': self.last_used.isoformat() if self.last_used else None,
+            'session_file': str(self.session_file) if self.session_file else None,
             'is_banned': self.is_banned,
-            'session_file': str(self.session_file) if self.session_file else None
+            'ban_reason': self.ban_reason,
+            'banned_at': self.banned_at.isoformat() if self.banned_at else None,
+            'last_used': self.last_used.isoformat() if self.last_used else None,
         }
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Account':
-        """Create from dictionary."""
-        return cls(
+        """Create from dictionary (for JSON deserialization)."""
+        account = cls(
             username=data['username'],
-            password=data.get('password', ''),
+            password=data['password'],
             totp_secret=data.get('totp_secret', ''),
             proxy=data.get('proxy'),
-            last_used=datetime.fromisoformat(data['last_used']) if data.get('last_used') else None,
+            session_file=Path(data['session_file']) if data.get('session_file') else None,
             is_banned=data.get('is_banned', False),
-            session_file=Path(data['session_file']) if data.get('session_file') else None
+            ban_reason=data.get('ban_reason'),
         )
+        
+        # Parse datetime fields
+        if data.get('banned_at'):
+            account.banned_at = datetime.fromisoformat(data['banned_at'])
+        if data.get('last_used'):
+            account.last_used = datetime.fromisoformat(data['last_used'])
+            
+        return account
 
 class AccountManager:
     """Manages multiple Instagram accounts with rotation and health tracking."""
@@ -65,7 +77,7 @@ class AccountManager:
         if self.proxies:
             logger.info(f"Loaded {len(self.proxies)} proxies for rotation")
         
-        self._load_accounts()
+        # Load accounts and state
         self._load_state()
     
     def _load_accounts(self) -> None:
@@ -124,11 +136,15 @@ class AccountManager:
     def _load_state(self) -> None:
         """Load account state from JSON file."""
         if not self.state_file.exists():
+            self._load_accounts()  # Load accounts from file if no state exists
             return
         
         try:
             with open(self.state_file, 'r') as f:
                 state = json.load(f)
+            
+            # First load accounts from file
+            self._load_accounts()
             
             # Update accounts with saved state
             for saved_account in state.get('accounts', []):
@@ -136,15 +152,17 @@ class AccountManager:
                     if account.username == saved_account['username']:
                         account.last_used = datetime.fromisoformat(saved_account['last_used']) if saved_account.get('last_used') else None
                         account.is_banned = saved_account.get('is_banned', False)
+                        account.ban_reason = saved_account.get('ban_reason')
+                        account.banned_at = datetime.fromisoformat(saved_account['banned_at']) if saved_account.get('banned_at') else None
                         # Update proxy if changed
                         if saved_account.get('proxy'):
                             account.proxy = saved_account['proxy']
-                        if saved_account.get('session_file'):
-                            account.session_file = Path(saved_account['session_file'])
                         break
                         
         except Exception as e:
             logger.error(f"Failed to load state: {e}")
+            # Fallback to loading accounts from file
+            self._load_accounts()
     
     def _save_state(self) -> None:
         """Save account state to JSON file."""
@@ -214,11 +232,71 @@ class AccountManager:
                 return True
             else:
                 logger.error(f"Failed to login: {account.username}")
+                # Mark account as temporarily unavailable due to login failure
+                self._mark_account_temporarily_unavailable(account, "login_failed")
                 return False
                     
         except Exception as e:
+            error_str = str(e).lower()
             logger.error(f"Error setting up account {account.username}: {e}")
+            
+            # Handle specific Instagram errors
+            if 'challenge_required' in error_str:
+                logger.warning(f"Account {account.username} requires challenge - marking as temporarily unavailable")
+                self._mark_account_temporarily_unavailable(account, "challenge_required")
+            elif 'login_required' in error_str or 'authentication' in error_str:
+                logger.warning(f"Account {account.username} has authentication issues - marking as temporarily unavailable")
+                self._mark_account_temporarily_unavailable(account, "auth_failed")
+            elif 'rate' in error_str or 'limit' in error_str:
+                logger.warning(f"Account {account.username} is rate limited - marking as temporarily unavailable")
+                self._mark_account_temporarily_unavailable(account, "rate_limited")
+            else:
+                logger.warning(f"Account {account.username} failed with unknown error - marking as temporarily unavailable")
+                self._mark_account_temporarily_unavailable(account, "unknown_error")
+            
             return False
+    
+    def _mark_account_temporarily_unavailable(self, account: Account, reason: str) -> None:
+        """Mark an account as temporarily unavailable with a reason."""
+        account.is_banned = True
+        account.ban_reason = reason  # Store the reason
+        account.banned_at = datetime.now()  # Store when it was banned
+        logger.warning(f"Account {account.username} marked as unavailable: {reason}")
+        self._save_state()
+    
+    def rotate_account(self) -> bool:
+        """Rotate to the next available account, trying multiple accounts if needed."""
+        max_attempts = min(5, len(self.accounts))  # Try up to 5 accounts or all available
+        attempts = 0
+        
+        while attempts < max_attempts:
+            attempts += 1
+            next_account = self.get_next_account()
+            
+            if not next_account:
+                if attempts == 1:
+                    logger.error("No accounts available for rotation")
+                else:
+                    logger.error(f"No more accounts available after {attempts-1} failed attempts")
+                return False
+            
+            if next_account == self.current_account:
+                logger.info("Already using the best available account")
+                return True
+            
+            logger.info(f"Rotating from {self.current_account.username if self.current_account else 'None'} to {next_account.username} (attempt {attempts})")
+            
+            # Try to setup the account
+            if self.setup_account(next_account):
+                logger.info(f"Successfully rotated to account: {next_account.username}")
+                return True
+            else:
+                logger.warning(f"Failed to setup account {next_account.username}, trying next account...")
+                # The account is already marked as unavailable by setup_account()
+                continue
+        
+        logger.error(f"Failed to setup any account after {attempts} attempts")
+        return False
     
     def mark_account_banned(self, account: Account) -> None:
         """Mark an account as banned and try to rotate."""
@@ -232,31 +310,37 @@ class AccountManager:
         else:
             logger.error("No accounts available after marking as banned")
     
-    def rotate_account(self) -> bool:
-        """Rotate to the next available account."""
-        next_account = self.get_next_account()
-        
-        if not next_account:
-            logger.error("No accounts available for rotation")
-            return False
-        
-        if next_account == self.current_account:
-            logger.info("Already using the best available account")
-            return True
-        
-        logger.info(f"Rotating from {self.current_account.username if self.current_account else 'None'} to {next_account.username}")
-        return self.setup_account(next_account)
-    
     def reset_banned_accounts(self) -> None:
         """Reset banned status for all accounts."""
         reset_count = 0
         for account in self.accounts:
             if account.is_banned:
                 account.is_banned = False
+                account.ban_reason = None
+                account.banned_at = None
                 reset_count += 1
         
         self._save_state()
         logger.info(f"Reset {reset_count} banned accounts")
+    
+    def reset_old_banned_accounts(self, hours: int = 24) -> None:
+        """Reset accounts that have been banned for more than the specified hours."""
+        reset_count = 0
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        
+        for account in self.accounts:
+            if account.is_banned and account.banned_at and account.banned_at < cutoff_time:
+                logger.info(f"Resetting account {account.username} (banned {hours}+ hours ago for: {account.ban_reason})")
+                account.is_banned = False
+                account.ban_reason = None
+                account.banned_at = None
+                reset_count += 1
+        
+        if reset_count > 0:
+            self._save_state()
+            logger.info(f"Reset {reset_count} accounts that were banned for more than {hours} hours")
+        else:
+            logger.info(f"No accounts to reset (banned for more than {hours} hours)")
     
     def get_status(self) -> Dict[str, Any]:
         """Get status of all accounts."""
@@ -273,6 +357,8 @@ class AccountManager:
                 {
                     'username': acc.username,
                     'is_banned': acc.is_banned,
+                    'ban_reason': acc.ban_reason,
+                    'banned_at': acc.banned_at.isoformat() if acc.banned_at else None,
                     'proxy': acc.proxy or 'None',
                     'last_used': acc.last_used.isoformat() if acc.last_used else None,
                     'has_session': acc.session_file and acc.session_file.exists() if acc.session_file else False
@@ -280,6 +366,29 @@ class AccountManager:
                 for acc in self.accounts
             ]
         }
+
+    def get_detailed_status(self) -> str:
+        """Get a detailed status report for debugging."""
+        status = self.get_status()
+        
+        report = [
+            f"Account Status Summary:",
+            f"  Total: {status['total_accounts']}",
+            f"  Available: {status['available_accounts']}",
+            f"  Banned: {status['banned_accounts']}",
+            f"  Current: {status['current_account'] or 'None'}",
+            "",
+            "Detailed Account List:"
+        ]
+        
+        for acc_info in status['accounts']:
+            status_icon = "❌" if acc_info['is_banned'] else "✅"
+            ban_info = f" ({acc_info['ban_reason']})" if acc_info['ban_reason'] else ""
+            last_used = acc_info['last_used'][:19] if acc_info['last_used'] else "Never"
+            
+            report.append(f"  {status_icon} {acc_info['username']}: Last used: {last_used}{ban_info}")
+        
+        return "\n".join(report)
 
 # Global instance
 _account_manager: Optional[AccountManager] = None

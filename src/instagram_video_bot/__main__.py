@@ -60,6 +60,11 @@ def main() -> None:
         manager = get_account_manager()
         if manager:
             logger.info("Using multi-account mode")
+            
+            # Reset accounts that have been banned for more than 6 hours
+            # This allows recovery from temporary challenges/rate limits
+            manager.reset_old_banned_accounts(hours=6)
+            
             status = manager.get_status()
             logger.info(f"Loaded {status['total_accounts']} accounts ({status['available_accounts']} available)")
 
@@ -69,9 +74,13 @@ def main() -> None:
                         logger.info(f"Using account: {manager.current_account.username}")
                 else:
                     logger.error("Failed to setup any account")
+                    logger.info("Account status:")
+                    logger.info(manager.get_detailed_status())
                     sys.exit(1)
             else:
                 logger.error("No available accounts!")
+                logger.info("Account status:")
+                logger.info(manager.get_detailed_status())
                 sys.exit(1)
         else:
             logger.info("Using single account mode")

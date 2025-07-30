@@ -1,202 +1,142 @@
 #!/usr/bin/env python3
-"""Manage multiple Instagram accounts."""
+"""Account management script for Instagram video downloader bot."""
+
+import argparse
+import logging
 import sys
-import asyncio
 from pathlib import Path
-from tabulate import tabulate
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from src.instagram_video_bot.utils.account_manager import get_account_manager
+from instagram_video_bot.utils.account_manager import get_account_manager
 
-def show_status():
-    """Show status of all accounts."""
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+def status_command():
+    """Show account status."""
     manager = get_account_manager()
-    status = manager.get_status()
-    
-    print("\n📊 Account Status")
-    print("=" * 50)
-    print(f"Total accounts: {status['total_accounts']}")
-    print(f"Available: {status['available_accounts']}")
-    print(f"Banned: {status['banned_accounts']}")
-    print(f"Current: {status['current_account'] or 'None'}")
-    
-    # Create table of accounts
-    headers = ["Username", "Status", "Proxy", "Last Used", "Has Session"]
-    rows = []
-    
-    for acc in status['accounts']:
-        status_emoji = "❌" if acc['is_banned'] else "✅"
-        has_session = "Yes" if acc['has_session'] else "No"
-        last_used = acc['last_used'] or "Never"
-        proxy = acc.get('proxy', 'None')
-        
-        rows.append([
-            acc['username'],
-            status_emoji,
-            proxy,
-            last_used,
-            has_session
-        ])
-    
-    print("\n" + tabulate(rows, headers=headers, tablefmt="grid"))
-
-def setup_all_accounts():
-    """Setup all accounts by logging in and generating cookies."""
-    manager = get_account_manager()
-    
-    print("\n🔧 Setting up all accounts")
-    print("=" * 50)
-    
-    success_count = 0
-    
-    for i, account in enumerate(manager.accounts):
-        if account.is_banned:
-            print(f"\n[{i+1}/{len(manager.accounts)}] Skipping banned account: {account.username}")
-            continue
-            
-        print(f"\n[{i+1}/{len(manager.accounts)}] Setting up: {account.username}")
-        
-        if manager.setup_account(account):
-            success_count += 1
-            print(f"✅ Success: {account.username}")
-            
-            # Wait between accounts to avoid detection
-            if i < len(manager.accounts) - 1:
-                print("⏳ Waiting 30 seconds before next account...")
-                import time
-                time.sleep(30)
-        else:
-            print(f"❌ Failed: {account.username}")
-    
-    print(f"\n✅ Successfully setup {success_count}/{len(manager.accounts)} accounts")
-
-def rotate_account():
-    """Manually rotate to next account."""
-    manager = get_account_manager()
-    
-    print("\n🔄 Rotating account")
-    print("=" * 50)
-    
-    current = manager.current_account
-    if current:
-        print(f"Current account: {current.username}")
-    
-    if manager.rotate_account():
-        print(f"✅ Rotated to: {manager.current_account.username}")
-    else:
-        print("❌ Failed to rotate account")
-
-def reset_banned(username: str = None):
-    """Reset banned status for account(s)."""
-    manager = get_account_manager()
-    
-    if username:
-        # Reset specific account
-        for account in manager.accounts:
-            if account.username == username:
-                account.is_banned = False
-                manager._save_state()
-                print(f"✅ Reset banned status for: {username}")
-                return
-        print(f"❌ Account not found: {username}")
-    else:
-        # Reset all accounts
-        for account in manager.accounts:
-            account.is_banned = False
-        manager._save_state()
-        print(f"✅ Reset banned status for all accounts")
-
-def warmup_account(username: str = None):
-    """Warm up specific account or current account."""
-    import subprocess
-    
-    manager = get_account_manager()
-    
-    if username:
-        # Find and setup specific account
-        for account in manager.accounts:
-            if account.username == username:
-                if not manager.setup_account(account):
-                    print(f"❌ Failed to setup account: {username}")
-                    return
-                break
-        else:
-            print(f"❌ Account not found: {username}")
-            return
-    elif not manager.current_account:
-        print("❌ No current account set. Use 'setup' first.")
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
         return
     
-    print(f"🔥 Warming up account: {manager.current_account.username}")
+    print(manager.get_detailed_status())
+
+def setup_command():
+    """Setup all accounts (login and create sessions)."""
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
     
-    # Run warmup script
-    result = subprocess.run([sys.executable, 'warmup_account.py'])
+    available = manager.get_available_accounts()
+    logger.info(f"Attempting to setup {len(available)} available accounts...")
     
-    if result.returncode == 0:
-        print("✅ Warmup completed successfully")
+    success_count = 0
+    for account in available:
+        logger.info(f"Setting up account: {account.username}")
+        if manager.setup_account(account):
+            success_count += 1
+            logger.info(f"✅ Successfully setup: {account.username}")
+        else:
+            logger.error(f"❌ Failed to setup: {account.username}")
+    
+    logger.info(f"Setup complete: {success_count}/{len(available)} accounts successful")
+    print("\nFinal status:")
+    print(manager.get_detailed_status())
+
+def rotate_command():
+    """Rotate to next account."""
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
+    
+    logger.info("Rotating to next available account...")
+    if manager.rotate_account():
+        if manager.current_account:
+            logger.info(f"✅ Now using account: {manager.current_account.username}")
+        else:
+            logger.warning("⚠️ Rotation successful but no current account set")
     else:
-        print("❌ Warmup failed")
+        logger.error("❌ Failed to rotate to any account")
+    
+    print("\nCurrent status:")
+    print(manager.get_detailed_status())
+
+def reset_command():
+    """Reset banned accounts."""
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
+    
+    logger.info("Resetting all banned accounts...")
+    manager.reset_banned_accounts()
+    logger.info("✅ All banned accounts have been reset")
+    
+    print("\nStatus after reset:")
+    print(manager.get_detailed_status())
+
+def reset_old_command():
+    """Reset accounts banned for more than specified hours."""
+    parser = argparse.ArgumentParser(description="Reset old banned accounts")
+    parser.add_argument("--hours", type=int, default=24, help="Reset accounts banned for more than this many hours (default: 24)")
+    
+    # Parse just the --hours argument from remaining argv
+    remaining_args = [arg for arg in sys.argv[2:] if arg.startswith('--hours') or (sys.argv[sys.argv.index(arg)-1] == '--hours' if '--hours' in sys.argv else False)]
+    if '--hours' in sys.argv:
+        try:
+            hours_index = sys.argv.index('--hours')
+            if hours_index + 1 < len(sys.argv):
+                hours = int(sys.argv[hours_index + 1])
+            else:
+                hours = 24
+        except (ValueError, IndexError):
+            hours = 24
+    else:
+        hours = 24
+    
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
+    
+    logger.info(f"Resetting accounts banned for more than {hours} hours...")
+    manager.reset_old_banned_accounts(hours=hours)
+    
+    print("\nStatus after reset:")
+    print(manager.get_detailed_status())
 
 def main():
-    """Main function."""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Manage Instagram accounts")
-    subparsers = parser.add_subparsers(dest='command', help='Commands')
-    
-    # Status command
-    subparsers.add_parser('status', help='Show account status')
-    
-    # Setup command
-    subparsers.add_parser('setup', help='Setup all accounts')
-    
-    # Rotate command
-    subparsers.add_parser('rotate', help='Rotate to next account')
-    
-    # Reset command
-    reset_parser = subparsers.add_parser('reset', help='Reset banned status')
-    reset_parser.add_argument('username', nargs='?', help='Username to reset (all if not specified)')
-    
-    # Warmup command
-    warmup_parser = subparsers.add_parser('warmup', help='Warm up account')
-    warmup_parser.add_argument('username', nargs='?', help='Username to warm up (current if not specified)')
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Manage Instagram bot accounts")
+    parser.add_argument(
+        "command",
+        choices=["status", "setup", "rotate", "reset", "reset-old"],
+        help="Command to execute"
+    )
+    parser.add_argument("--hours", type=int, default=24, help="Hours for reset-old command (default: 24)")
     
     args = parser.parse_args()
     
-    if not args.command:
-        parser.print_help()
-        return
-    
-    # Check if accounts file exists
-    accounts_file = Path('accounts.txt')
-    
-    if not accounts_file.exists():
-        print("❌ No accounts file found!")
-        print("\nCreate accounts.txt with the following format:")
-        print("   Format: username|password|totp_secret")
-        print("   Example:")
-        print("   samosirarlene|@encore05|4NPFTMJUVP7NPXPZC3MDZ26SVZTW5GUL")
-        print("   john_doe|mypassword123|ABCD1234EFGH5678IJKL")
-        print()
-        print("💡 Tips:")
-        print("   - Each line represents one account")
-        print("   - Proxies are automatically assigned from PROXIES in .env")
-        print("   - Sessions are stored in sessions/ directory")
+    try:
+        if args.command == "status":
+            status_command()
+        elif args.command == "setup":
+            setup_command()
+        elif args.command == "rotate":
+            rotate_command()
+        elif args.command == "reset":
+            reset_command()
+        elif args.command == "reset-old":
+            reset_old_command()
+    except KeyboardInterrupt:
+        logger.info("Operation cancelled by user")
+    except Exception as e:
+        logger.error(f"Error: {e}")
         sys.exit(1)
-    
-    # Execute command
-    if args.command == 'status':
-        show_status()
-    elif args.command == 'setup':
-        setup_all_accounts()
-    elif args.command == 'rotate':
-        rotate_account()
-    elif args.command == 'reset':
-        reset_banned(args.username)
-    elif args.command == 'warmup':
-        warmup_account(args.username)
 
 if __name__ == "__main__":
     main() 
