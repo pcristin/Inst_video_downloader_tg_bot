@@ -119,35 +119,53 @@ class InstagramClient:
                 logger.info(f"Video downloaded: {video_path}")
                 return video_path
             except Exception as download_error:
-                # Log the specific error for debugging
+                error_str = str(download_error).lower()
+                
+                # Check if this is a session expiration issue
+                if 'login_required' in error_str or '403' in error_str:
+                    logger.warning("Session expired during download, attempting re-login...")
+                    if self._relogin():
+                        # Retry download after successful re-login
+                        try:
+                            video_path = self.client.video_download(media_pk, folder=output_dir)
+                            logger.info(f"Video downloaded after re-login: {video_path}")
+                            return video_path
+                        except Exception:
+                            logger.warning("Download still failed after re-login, trying fallbacks...")
+                
                 logger.warning(f"Standard video download failed: {download_error}")
                 
                 # If standard download fails due to validation, try to get raw video URL
                 try:
-                    # Get raw media data without Pydantic validation
                     video_url = self._get_video_url_raw(media_pk)
                     if video_url:
-                        # Download using the direct video URL
-                        video_path = self.client.video_download_by_url(
-                            video_url, 
-                            folder=output_dir,
-                            filename=f"video_{media_pk}"
-                        )
-                        logger.info(f"Video downloaded via raw URL method: {video_path}")
-                        return video_path
-                    else:
-                        raise Exception("Could not extract video URL from raw data")
-                        
+                        # Download manually using requests
+                        video_path = self._download_video_manually(video_url, media_pk, output_dir)
+                        if video_path:
+                            logger.info(f"Video downloaded via manual method: {video_path}")
+                            return video_path
+                    
+                    logger.warning("Could not get video URL, trying alternative methods...")
+                    
                 except Exception as raw_download_error:
                     logger.warning(f"Raw URL download failed: {raw_download_error}")
+                
+                # Final fallback: try clip download methods for reels
+                try:
+                    video_path = self.client.clip_download(media_pk, folder=output_dir)
+                    logger.info(f"Video downloaded via clip method: {video_path}")
+                    return video_path
+                except Exception as clip_error:
+                    logger.warning(f"Clip download also failed: {clip_error}")
                     
-                    # Final fallback: try clip download methods for reels
+                    # Last resort: try to download without metadata
                     try:
-                        video_path = self.client.clip_download(media_pk, folder=output_dir)
-                        logger.info(f"Video downloaded via clip method: {video_path}")
-                        return video_path
-                    except Exception as clip_error:
-                        logger.error(f"All download methods failed. Last error: {clip_error}")
+                        video_path = self._download_without_metadata(media_pk, output_dir)
+                        if video_path:
+                            logger.info(f"Video downloaded without metadata: {video_path}")
+                            return video_path
+                    except Exception as final_error:
+                        logger.error(f"All download methods failed. Last error: {final_error}")
                         raise download_error  # Re-raise the original error
                     
         except Exception as e:
@@ -160,6 +178,16 @@ class InstagramClient:
             # Make direct API call to get raw media info using proper endpoint
             endpoint = f"media/{media_pk}/info/"
             data = self.client.private_request(endpoint)
+            
+            # Check if we got a login_required error
+            if isinstance(data, dict) and data.get('message') == 'login_required':
+                logger.warning("Session expired during raw video URL extraction, attempting re-login...")
+                if self._relogin():
+                    # Retry after successful re-login
+                    data = self.client.private_request(endpoint)
+                else:
+                    logger.warning("Re-login failed, cannot get raw video URL")
+                    return None
             
             # Debug: log the keys we get back
             logger.debug(f"Raw API response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
@@ -206,10 +234,23 @@ class InstagramClient:
                     logger.warning("No items found in API response")
             else:
                 logger.warning(f"Unexpected API response format: {type(data)}")
+                if isinstance(data, dict):
+                    logger.debug(f"Response keys: {list(data.keys())}")
                 
             return None
                 
         except Exception as e:
+            error_str = str(e).lower()
+            if 'login_required' in error_str or '403' in error_str:
+                logger.warning("Session expired in raw URL extraction, attempting re-login...")
+                if self._relogin():
+                    # Retry the whole method after re-login
+                    try:
+                        return self._get_video_url_raw(media_pk)
+                    except Exception as retry_error:
+                        logger.warning(f"Raw URL extraction still failed after re-login: {retry_error}")
+                        return None
+            
             logger.warning(f"Failed to get raw video URL: {e}")
             logger.debug(f"Exception details: {e}", exc_info=True)
             return None
@@ -230,6 +271,22 @@ class InstagramClient:
                     'pk': media_pk
                 }
             except Exception as validation_error:
+                error_str = str(validation_error).lower()
+                if 'login_required' in error_str or '403' in error_str:
+                    logger.warning("Session expired, attempting re-login...")
+                    if self._relogin():
+                        # Retry after successful re-login
+                        try:
+                            media_info = self.client.media_info(media_pk)
+                            return {
+                                'title': media_info.caption_text or '',
+                                'duration': getattr(media_info, 'video_duration', 0),
+                                'user': media_info.user.username,
+                                'pk': media_pk
+                            }
+                        except Exception:
+                            pass  # Continue to fallbacks
+                    
                 logger.warning(f"Standard media_info failed (likely Pydantic validation): {validation_error}")
                 
                 # 2. Try GraphQL API directly
@@ -256,15 +313,16 @@ class InstagramClient:
                     except Exception as v1_error:
                         logger.warning(f"Mobile API media_info failed: {v1_error}")
                         
-                        # 4. Last resort: Use oEmbed for basic info
+                        # 4. Last resort: Use oEmbed for basic info (with validation fix)
                         try:
-                            oembed_info = self.client.media_oembed(url)
-                            return {
-                                'title': getattr(oembed_info, 'title', '') or '',
-                                'duration': 0,
-                                'user': getattr(oembed_info, 'author_name', '') or 'unknown',
-                                'pk': media_pk
-                            }
+                            oembed_data = self._get_oembed_safe(url)
+                            if oembed_data:
+                                return {
+                                    'title': oembed_data.get('title', ''),
+                                    'duration': 0,
+                                    'user': oembed_data.get('author_name', 'unknown'),
+                                    'pk': media_pk
+                                }
                         except Exception as oembed_error:
                             logger.warning(f"oEmbed fallback failed: {oembed_error}")
                             
@@ -279,8 +337,62 @@ class InstagramClient:
                             
         except Exception as e:
             logger.error(f"Failed to get media info: {e}")
-            return None 
-
+            return None
+    
+    def _relogin(self) -> bool:
+        """Attempt to re-login when session expires."""
+        try:
+            logger.info("Attempting to re-login due to session expiration...")
+            
+            # Clear current session
+            self.client.set_settings({})
+            
+            # Fresh login
+            verification_code = None
+            if self.totp_secret and self.totp_secret.strip():
+                import pyotp
+                totp = pyotp.TOTP(self.totp_secret.strip())
+                verification_code = totp.now()
+                logger.info("Using TOTP for 2FA re-login")
+            
+            success = self.client.login(
+                self.username, 
+                self.password, 
+                verification_code=verification_code
+            )
+            
+            if success:
+                # Save new session
+                self.session_file.parent.mkdir(parents=True, exist_ok=True)
+                self.client.dump_settings(self.session_file)
+                logger.info(f"Re-login successful, session saved")
+                return True
+            else:
+                logger.error("Re-login failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Re-login failed: {e}")
+            return False
+    
+    def _get_oembed_safe(self, url: str) -> Optional[dict]:
+        """Get oEmbed data with safe handling of missing fields."""
+        try:
+            # Make direct API call to avoid Pydantic validation
+            endpoint = f"oembed/?url={url}"
+            data = self.client.private_request(endpoint)
+            
+            if isinstance(data, dict):
+                # Return raw dictionary, letting caller handle missing fields
+                return data
+            else:
+                logger.warning(f"Unexpected oEmbed response format: {type(data)}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Safe oEmbed request failed: {e}")
+            return None
+    
     def _download_without_metadata(self, media_pk: int, output_dir: Path) -> Optional[Path]:
         """Try to download by constructing direct video URLs or using external tools."""
         try:
