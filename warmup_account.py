@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-gh"""Warm up Instagram account to avoid detection."""
+"""Warm up Instagram account to avoid detection."""
 import asyncio
 import argparse
 import random
