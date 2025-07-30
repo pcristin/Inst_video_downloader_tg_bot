@@ -115,6 +115,12 @@ class InstagramClient:
             # Download video directly
             output_dir.mkdir(parents=True, exist_ok=True)
             
+            # First, try yt-dlp as it's more reliable for reels
+            video_path = self._download_with_ytdlp_first(url, media_pk, output_dir)
+            if video_path:
+                logger.info(f"Video downloaded via yt-dlp: {video_path}")
+                return video_path
+            
             try:
                 # Try the standard video_download without folder first (like in the example)
                 video_path = self.client.video_download(media_pk)
@@ -142,51 +148,15 @@ class InstagramClient:
                 
                 logger.warning(f"Standard video download failed: {download_error}")
                 
-                # If standard download fails due to validation, try direct download
-                try:
-                    # First try to get media info without Pydantic validation
-                    media_dict = self._get_media_dict_raw(media_pk)
-                    if media_dict:
-                        # Try clip_download_by_url if it's a reel/clip
-                        if media_dict.get('media_type') == 2 and media_dict.get('product_type') == 'clips':
-                            try:
-                                video_path = self.client.clip_download_by_url(url, folder=output_dir)
-                                logger.info(f"Video downloaded via clip_download_by_url: {video_path}")
-                                return video_path
-                            except Exception as clip_url_error:
-                                logger.warning(f"clip_download_by_url failed: {clip_url_error}")
-                    
-                    # Try to get raw video URL and download manually
-                    video_url = self._get_video_url_raw(media_pk)
-                    if video_url:
-                        # Download manually using requests
-                        video_path = self._download_video_manually(video_url, media_pk, output_dir)
-                        if video_path:
-                            logger.info(f"Video downloaded via manual method: {video_path}")
-                            return video_path
-                    
-                    logger.warning("Could not get video URL, trying alternative methods...")
-                    
-                except Exception as raw_download_error:
-                    logger.warning(f"Raw URL download failed: {raw_download_error}")
-                
-                # Final fallback: try clip download methods for reels
-                try:
-                    video_path = self.client.clip_download(media_pk, folder=output_dir)
-                    logger.info(f"Video downloaded via clip method: {video_path}")
+                # If standard download fails, use yt-dlp as fallback
+                logger.warning("Standard download failed, using yt-dlp fallback...")
+                video_path = self._download_with_ytdlp_first(url, media_pk, output_dir)
+                if video_path:
+                    logger.info(f"Video downloaded via yt-dlp fallback: {video_path}")
                     return video_path
-                except Exception as clip_error:
-                    logger.warning(f"Clip download also failed: {clip_error}")
-                    
-                    # Last resort: try to download without metadata
-                    try:
-                        video_path = self._download_without_metadata(media_pk, output_dir)
-                        if video_path:
-                            logger.info(f"Video downloaded without metadata: {video_path}")
-                            return video_path
-                    except Exception as final_error:
-                        logger.error(f"All download methods failed. Last error: {final_error}")
-                        raise download_error  # Re-raise the original error
+                
+                logger.error(f"All download methods failed")
+                raise download_error  # Re-raise the original error
                     
         except Exception as e:
             logger.error(f"Video download failed: {e}")
@@ -466,6 +436,60 @@ class InstagramClient:
             
         except Exception as e:
             logger.warning(f"Download without metadata failed: {e}")
+            return None
+    
+    def _download_with_ytdlp_first(self, url: str, media_pk: int, output_dir: Path) -> Optional[Path]:
+        """Try downloading with yt-dlp using the original URL."""
+        try:
+            import subprocess
+            
+            logger.info(f"Trying yt-dlp download from original URL: {url}")
+            
+            # Use yt-dlp to download directly
+            output_file = output_dir / f"video_{media_pk}.mp4"
+            
+            cmd = [
+                "yt-dlp",
+                "--no-warnings",
+                "-o", str(output_file),
+                "--no-playlist",
+                "--format", "best[ext=mp4]/best",
+                "--quiet",
+                "--no-check-certificate",
+                "--user-agent", self.client.user_agent,
+                url
+            ]
+            
+            # Add proxy if available
+            if self.proxy:
+                cmd.extend(["--proxy", self.proxy])
+            
+            # Add cookies if available
+            if hasattr(self.client, 'cookie_jar') and self.client.cookie_jar:
+                cookie_string = "; ".join([f"{k}={v}" for k, v in self.client.cookie_jar.items()])
+                cmd.extend(["--add-header", f"Cookie: {cookie_string}"])
+            
+            # Run yt-dlp
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 1000:
+                logger.info(f"yt-dlp successfully downloaded video: {output_file}")
+                return output_file
+            else:
+                if result.stderr:
+                    logger.warning(f"yt-dlp failed: {result.stderr}")
+                if output_file.exists():
+                    output_file.unlink()
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("yt-dlp timed out")
+            return None
+        except FileNotFoundError:
+            logger.warning("yt-dlp not installed")
+            return None
+        except Exception as e:
+            logger.warning(f"yt-dlp download failed: {e}")
             return None
     
     def _download_with_ytdlp(self, media_pk: int, output_dir: Path) -> Optional[Path]:
