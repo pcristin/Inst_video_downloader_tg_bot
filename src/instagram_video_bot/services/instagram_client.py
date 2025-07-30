@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import requests
 from instagrapi import Client
 from instagrapi.exceptions import (
     LoginRequired, 
@@ -108,7 +109,7 @@ class InstagramClient:
         """Download video using instagrapi with validation error handling."""
         try:
             # Extract media PK from URL
-            media_pk = self.client.media_pk_from_url(url)
+            media_pk = int(self.client.media_pk_from_url(url))
             logger.info(f"Extracted media PK: {media_pk}")
             
             # Download video directly
@@ -258,7 +259,7 @@ class InstagramClient:
     def get_media_info(self, url: str) -> Optional[dict]:
         """Get media information for video/reel content."""
         try:
-            media_pk = self.client.media_pk_from_url(url)
+            media_pk = int(self.client.media_pk_from_url(url))
             
             # Try different methods in order of preference
             # 1. Try the standard media_info first
@@ -455,10 +456,14 @@ class InstagramClient:
             
             if result.returncode == 0 and result.stdout.strip():
                 video_url = result.stdout.strip()
-                logger.info(f"yt-dlp found video URL: {video_url[:100]}...")
-                
-                # Download the video manually using the URL
-                return self._download_video_manually(video_url, media_pk, output_dir)
+                # Ensure video_url is a string and safely slice it
+                if isinstance(video_url, str) and video_url:
+                    logger.info(f"yt-dlp found video URL: {video_url[:100]}...")
+                    # Download the video manually using the URL
+                    return self._download_video_manually(video_url, media_pk, output_dir)
+                else:
+                    logger.warning(f"Invalid video URL from yt-dlp: {type(video_url)}")
+                    return None
             else:
                 logger.warning(f"yt-dlp failed: {result.stderr}")
                 return None
@@ -482,6 +487,16 @@ class InstagramClient:
         # The actual Instagram algorithm is more complex
         import string
         
+        # Ensure media_pk is an integer
+        try:
+            media_pk = int(media_pk)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid media_pk type: {type(media_pk)}, value: {media_pk}")
+            return 'A'
+        
+        if media_pk <= 0:
+            return 'A'
+        
         alphabet = string.ascii_letters + string.digits + '-_'
         shortcode = ''
         
@@ -490,4 +505,64 @@ class InstagramClient:
             shortcode = alphabet[remainder] + shortcode
             media_pk = media_pk // 64
             
-        return shortcode or 'A' 
+        return shortcode or 'A'
+    
+    def _download_video_manually(self, video_url: str, media_pk: int, output_dir: Path) -> Optional[Path]:
+        """Download video manually using requests, bypassing instagrapi."""
+        try:
+            import requests
+            
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_file = output_dir / f"video_{media_pk}.mp4"
+            
+            logger.info(f"Manually downloading video from: {video_url[:100]}...")
+            
+            # Use the same headers and session as the Instagram client
+            headers = {
+                'User-Agent': self.client.user_agent,
+                'Accept': 'video/mp4,application/json',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            # Use the client's session if available to maintain cookies/auth
+            session = getattr(self.client, 'private', None)
+            if session:
+                response = session.get(video_url, headers=headers, stream=True, timeout=30)
+            else:
+                response = requests.get(video_url, headers=headers, stream=True, timeout=30, 
+                                      proxies={'http': self.proxy, 'https': self.proxy} if self.proxy else None)
+            
+            response.raise_for_status()
+            
+            # Check if we got video content
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('video/'):
+                logger.warning(f"Unexpected content type: {content_type}")
+            
+            # Download the video
+            with open(output_file, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Verify the download
+            if output_file.exists() and output_file.stat().st_size > 1000:  # At least 1KB
+                logger.info(f"Successfully downloaded video: {output_file}")
+                return output_file
+            else:
+                logger.warning("Downloaded file is too small or doesn't exist")
+                if output_file.exists():
+                    output_file.unlink()
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Manual video download failed: {e}")
+            if 'output_file' in locals() and output_file.exists():
+                try:
+                    output_file.unlink()
+                except:
+                    pass
+            return None 
