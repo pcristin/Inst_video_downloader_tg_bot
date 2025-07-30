@@ -116,9 +116,15 @@ class InstagramClient:
             output_dir.mkdir(parents=True, exist_ok=True)
             
             try:
-                video_path = self.client.video_download(media_pk, folder=output_dir)
-                logger.info(f"Video downloaded: {video_path}")
-                return video_path
+                # Try the standard video_download without folder first (like in the example)
+                video_path = self.client.video_download(media_pk)
+                if video_path and video_path.exists():
+                    # Move to output directory
+                    import shutil
+                    final_path = output_dir / video_path.name
+                    shutil.move(str(video_path), str(final_path))
+                    logger.info(f"Video downloaded: {final_path}")
+                    return final_path
             except Exception as download_error:
                 error_str = str(download_error).lower()
                 
@@ -136,8 +142,21 @@ class InstagramClient:
                 
                 logger.warning(f"Standard video download failed: {download_error}")
                 
-                # If standard download fails due to validation, try to get raw video URL
+                # If standard download fails due to validation, try direct download
                 try:
+                    # First try to get media info without Pydantic validation
+                    media_dict = self._get_media_dict_raw(media_pk)
+                    if media_dict:
+                        # Try clip_download_by_url if it's a reel/clip
+                        if media_dict.get('media_type') == 2 and media_dict.get('product_type') == 'clips':
+                            try:
+                                video_path = self.client.clip_download_by_url(url, folder=output_dir)
+                                logger.info(f"Video downloaded via clip_download_by_url: {video_path}")
+                                return video_path
+                            except Exception as clip_url_error:
+                                logger.warning(f"clip_download_by_url failed: {clip_url_error}")
+                    
+                    # Try to get raw video URL and download manually
                     video_url = self._get_video_url_raw(media_pk)
                     if video_url:
                         # Download manually using requests
@@ -171,6 +190,28 @@ class InstagramClient:
                     
         except Exception as e:
             logger.error(f"Video download failed: {e}")
+            return None
+    
+    def _get_media_dict_raw(self, media_pk: int) -> Optional[dict]:
+        """Get raw media dictionary from API, bypassing Pydantic validation."""
+        try:
+            endpoint = f"media/{media_pk}/info/"
+            data = self.client.private_request(endpoint)
+            
+            if isinstance(data, dict) and data.get('message') == 'login_required':
+                logger.warning("Session expired during raw media fetch, attempting re-login...")
+                if self._relogin():
+                    data = self.client.private_request(endpoint)
+                else:
+                    return None
+            
+            if isinstance(data, dict) and 'items' in data:
+                items = data.get('items', [])
+                if items:
+                    return items[0]
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get raw media dict: {e}")
             return None
     
     def _get_video_url_raw(self, media_pk: int) -> Optional[str]:
@@ -520,20 +561,24 @@ class InstagramClient:
             # Use the same headers and session as the Instagram client
             headers = {
                 'User-Agent': self.client.user_agent,
-                'Accept': 'video/mp4,application/json',
+                'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
+                'Origin': 'https://www.instagram.com',
+                'Referer': 'https://www.instagram.com/',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'same-origin',
             }
             
-            # Use the client's session if available to maintain cookies/auth
-            session = getattr(self.client, 'private', None)
-            if session:
-                response = session.get(video_url, headers=headers, stream=True, timeout=30)
-            else:
-                response = requests.get(video_url, headers=headers, stream=True, timeout=30, 
-                                      proxies={'http': self.proxy, 'https': self.proxy} if self.proxy else None)
+            # Add cookies from Instagram session
+            if hasattr(self.client, 'cookie_jar'):
+                headers['Cookie'] = '; '.join([f'{k}={v}' for k, v in self.client.cookie_jar.items()])
+            
+            # Use requests with proper proxy and headers
+            response = requests.get(video_url, headers=headers, stream=True, timeout=30, 
+                                  proxies={'http': self.proxy, 'https': self.proxy} if self.proxy else None)
             
             response.raise_for_status()
             
