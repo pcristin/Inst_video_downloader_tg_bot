@@ -1,10 +1,11 @@
 """Instagram video downloading service using instagrapi."""
 import asyncio
 import logging
+import random
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
 
 from .instagram_client import InstagramClient
 from ..config.settings import settings
@@ -39,7 +40,8 @@ class VideoDownloader:
         """Initialize the video downloader."""
         self.client: Optional[InstagramClient] = None
         self.last_download_time = 0
-        self.min_delay_between_downloads = 2  # Reduced since instagrapi is more efficient
+        self.min_delay_between_downloads = 10
+        self.random_delay_range = (1.0, 3.0)
         
     def _get_client(self) -> InstagramClient:
         """Get or create Instagram client."""
@@ -78,6 +80,11 @@ class VideoDownloader:
             delay = self.min_delay_between_downloads - time_since_last
             logger.info(f"Rate limiting: waiting {delay:.1f} seconds")
             await asyncio.sleep(delay)
+
+        if self.random_delay_range[1] > 0:
+            jitter = random.uniform(*self.random_delay_range)
+            logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
+            await asyncio.sleep(jitter)
 
         try:
             client = self._get_client()

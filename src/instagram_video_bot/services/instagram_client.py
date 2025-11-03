@@ -7,91 +7,70 @@ from typing import Optional
 import requests
 from instagrapi import Client
 from instagrapi.exceptions import (
-    LoginRequired, 
-    BadPassword, 
+    BadPassword,
     ChallengeRequired,
+    ClientError,
     FeedbackRequired,
+    LoginRequired,
     PleaseWaitFewMinutes,
-    ClientError
 )
 
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
 class InstagramClient:
     """Instagram client wrapper using instagrapi."""
-    
-    def __init__(self, username: str, password: str, session_file: Optional[Path] = None, proxy: Optional[str] = None, totp_secret: Optional[str] = None):
+
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        session_file: Optional[Path] = None,
+        proxy: Optional[str] = None,
+        totp_secret: Optional[str] = None,
+    ):
         self.username = username
         self.password = password
         self.proxy = proxy
         self.totp_secret = totp_secret
-        self.session_file = session_file or settings.BASE_DIR / "sessions" / f"{username}.json"
+        self.session_file = (
+            session_file or settings.BASE_DIR / "sessions" / f"{username}.json"
+        )
         self.client = Client()
+        self._session_settings: Optional[dict] = None
         self._setup_proxy()
-        
-    def _setup_proxy(self):
+
+    def _setup_proxy(self) -> None:
         """Configure proxy if available."""
         proxy_to_use = None
-        
-        # Use provided proxy first
+
         if self.proxy:
             proxy_to_use = self.proxy
-        # Fall back to single proxy from settings
         elif settings.get_single_proxy():
             proxy_to_use = settings.get_single_proxy()
-        
+
         if proxy_to_use:
             self.client.set_proxy(proxy_to_use)
             logger.info(f"Proxy configured: {proxy_to_use}")
-    
+
     def login(self) -> bool:
         """Login to Instagram with session persistence."""
         try:
-            # Try loading existing session first
-            if self.session_file.exists():
-                logger.info(f"Loading session from {self.session_file}")
-                session = self.client.load_settings(self.session_file)
-                if session:
-                    self.client.set_settings(session)
-                    
-                    # Test if session is still valid
-                    try:
-                        self.client.get_timeline_feed()
-                        logger.info("Session is valid")
-                        return True
-                    except LoginRequired:
-                        logger.info("Session expired, need fresh login")
-                        # Keep device UUIDs for consistency
-                        old_session = self.client.get_settings()
-                        self.client.set_settings({})
-                        self.client.set_uuids(old_session["uuids"])
-            
-            # Fresh login
+            session = self._load_session_into_client()
+            if session:
+                if self._is_session_valid():
+                    logger.info("Session is valid")
+                    return True
+                logger.info("Stored session is no longer valid, refreshing login")
+
             logger.info(f"Logging in as {self.username}")
-            
-            # Handle 2FA if needed
-            verification_code = None
-            if self.totp_secret and self.totp_secret.strip():
-                import pyotp
-                totp = pyotp.TOTP(self.totp_secret.strip())
-                verification_code = totp.now()
-                logger.info("Using TOTP for 2FA")
-            
-            success = self.client.login(
-                self.username, 
-                self.password, 
-                verification_code=verification_code
-            )
-            
+            success = self._perform_login()
             if success:
-                # Save session for future use
-                self.session_file.parent.mkdir(parents=True, exist_ok=True)
-                self.client.dump_settings(self.session_file)
                 logger.info(f"Login successful, session saved to {self.session_file}")
                 return True
-                
+
         except BadPassword:
             logger.error("Invalid username or password")
         except ChallengeRequired as e:
@@ -102,7 +81,7 @@ class InstagramClient:
             logger.error(f"Rate limited: {e}")
         except Exception as e:
             logger.error(f"Login failed: {e}")
-            
+
         return False
     
     def download_video(self, url: str, output_dir: Path) -> Optional[Path]:
@@ -355,34 +334,18 @@ class InstagramClient:
         """Attempt to re-login when session expires."""
         try:
             logger.info("Attempting to re-login due to session expiration...")
-            
-            # Clear current session
-            self.client.set_settings({})
-            
-            # Fresh login
-            verification_code = None
-            if self.totp_secret and self.totp_secret.strip():
-                import pyotp
-                totp = pyotp.TOTP(self.totp_secret.strip())
-                verification_code = totp.now()
-                logger.info("Using TOTP for 2FA re-login")
-            
-            success = self.client.login(
-                self.username, 
-                self.password, 
-                verification_code=verification_code
-            )
-            
+            session = self._load_session_into_client()
+            if not session and self._session_settings:
+                self._apply_session_to_client(self._session_settings)
+
+            success = self._perform_login()
             if success:
-                # Save new session
-                self.session_file.parent.mkdir(parents=True, exist_ok=True)
-                self.client.dump_settings(self.session_file)
-                logger.info(f"Re-login successful, session saved")
+                logger.info("Re-login successful, session refreshed")
                 return True
-            else:
-                logger.error("Re-login failed")
-                return False
-                
+
+            logger.error("Re-login failed")
+            return False
+
         except Exception as e:
             logger.error(f"Re-login failed: {e}")
             return False
@@ -635,3 +598,110 @@ class InstagramClient:
                 except:
                     pass
             return None 
+
+    def _load_session_into_client(self) -> Optional[dict]:
+        """Load and apply stored session settings."""
+        if not self.session_file.exists():
+            return None
+
+        try:
+            session = self.client.load_settings(self.session_file)
+        except Exception as exc:
+            logger.warning(f"Failed to load session settings: {exc}")
+            return None
+
+        if not session:
+            return None
+
+        self._apply_session_to_client(session)
+        self._session_settings = session
+        return session
+
+    def _apply_session_to_client(self, session: dict) -> None:
+        """Apply stored session details to the current client instance."""
+        try:
+            self.client.set_settings(session)
+        except Exception as exc:
+            logger.warning(f"Failed to apply settings directly: {exc}")
+            self.client.settings = session
+
+        uuids = session.get("uuids")
+        if uuids:
+            try:
+                self.client.set_uuids(uuids)
+            except Exception as exc:
+                logger.debug(f"Failed to set UUIDs via helper: {exc}")
+                self.client.uuid = uuids.get("uuid")
+
+        device_settings = session.get("device_settings")
+        if device_settings:
+            if hasattr(self.client, "set_device"):
+                try:
+                    self.client.set_device(device_settings)
+                except Exception:
+                    self.client.device_settings = device_settings
+            else:
+                self.client.device_settings = device_settings
+
+        authorization = session.get("authorization_data")
+        if authorization:
+            self.client.authorization_data = authorization
+
+    def _persist_session(self) -> None:
+        """Persist the current client session to disk."""
+        try:
+            settings_data = self.client.get_settings()
+            self._session_settings = settings_data
+            self.session_file.parent.mkdir(parents=True, exist_ok=True)
+            self.client.dump_settings(self.session_file)
+        except Exception as exc:
+            logger.warning(f"Failed to persist session settings: {exc}")
+
+    def _perform_login(self) -> bool:
+        """Execute login sequence and persist session."""
+        verification_code = self._generate_two_factor_code()
+
+        success = self.client.login(
+            self.username,
+            self.password,
+            verification_code=verification_code,
+        )
+
+        if success:
+            self._persist_session()
+            return True
+
+        return False
+
+    def _is_session_valid(self) -> bool:
+        """Check whether the currently loaded session is still valid."""
+        try:
+            self.client.get_timeline_feed()
+            return True
+        except LoginRequired:
+            return False
+        except PleaseWaitFewMinutes as exc:
+            logger.error(f"Rate limited while validating session: {exc}")
+            raise
+        except ClientError as exc:
+            logger.warning(f"Session validation returned client error: {exc}")
+            return False
+        except Exception as exc:
+            logger.warning(f"Session validation failed: {exc}")
+            return False
+
+    def _generate_two_factor_code(self) -> Optional[str]:
+        """Generate a TOTP code if a secret is configured."""
+        if not self.totp_secret or not self.totp_secret.strip():
+            return None
+
+        try:
+            import pyotp
+
+            totp = pyotp.TOTP(self.totp_secret.strip())
+            code = totp.now()
+            logger.info("Using TOTP for 2FA")
+            return code
+        except Exception as exc:
+            logger.warning(f"Failed to generate TOTP code: {exc}")
+            return None

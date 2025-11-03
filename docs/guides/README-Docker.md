@@ -156,6 +156,5 @@ To develop with Docker:
 ## Performance Optimization
 
 - The container is configured to run as non-root user for security
-- Playwright runs in headless mode to reduce resource usage
 - Video processing is optimized for Telegram's requirements
 - Resource limits prevent container from consuming excessive resources 

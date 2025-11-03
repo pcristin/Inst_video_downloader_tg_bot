@@ -23,15 +23,6 @@ class ProxyConfig:
             return f"http://{self.username}:{self.password}@{self.host}:{self.port}"
         return f"http://{self.host}:{self.port}"
     
-    @property
-    def playwright_config(self) -> Dict[str, str]:
-        """Get Playwright proxy configuration."""
-        config = {'server': f'http://{self.host}:{self.port}'}
-        if self.username and self.password:
-            config['username'] = self.username
-            config['password'] = self.password
-        return config
-
 class ProxyManager:
     """Manages multiple proxies and assigns them to accounts."""
     
