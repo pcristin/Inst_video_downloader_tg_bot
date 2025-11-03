@@ -1,5 +1,6 @@
 # src/instagram_video_bot/config/settings.py
 """Application settings and configuration management."""
+import logging
 import os
 from pathlib import Path
 from typing import Optional, List
@@ -63,15 +64,20 @@ class Settings(BaseSettings):
         """Get list of proxies from PROXIES setting."""
         if not self.PROXIES:
             return []
-        
-        proxies = []
-        for proxy in self.PROXIES.split(','):
-            proxy = proxy.strip()
-            if proxy:
-                # Add http:// prefix if not present
-                if not proxy.startswith(('http://', 'https://', 'socks5://')):
-                    proxy = f'http://{proxy}'
-                proxies.append(proxy)
+
+        proxies: List[str] = []
+        for raw_proxy in self.PROXIES.split(','):
+            raw_proxy = raw_proxy.strip()
+            if not raw_proxy:
+                continue
+
+            normalized = self._normalize_proxy(raw_proxy)
+            if normalized:
+                proxies.append(normalized)
+            else:
+                logging.getLogger(__name__).warning(
+                    "Skipping invalid proxy definition: %s", raw_proxy
+                )
         return proxies
     
     def get_single_proxy(self) -> Optional[str]:
@@ -81,6 +87,35 @@ class Settings(BaseSettings):
                 return f'http://{self.PROXY_USERNAME}:{self.PROXY_PASSWORD}@{self.PROXY_HOST}:{self.PROXY_PORT}'
             else:
                 return f'http://{self.PROXY_HOST}:{self.PROXY_PORT}'
+        return None
+
+    @staticmethod
+    def _normalize_proxy(proxy: str) -> Optional[str]:
+        """Normalize various proxy formats into a URL with credentials."""
+        proxy = proxy.strip()
+        if not proxy:
+            return None
+
+        scheme = "http"
+        remainder = proxy
+
+        if "://" in proxy:
+            scheme, remainder = proxy.split("://", 1)
+            scheme = scheme or "http"
+
+        if "@" in remainder:
+            # Already contains credentials separator
+            return f"{scheme}://{remainder}"
+
+        parts = remainder.split(":")
+        if len(parts) == 2:
+            host, port = parts
+            return f"{scheme}://{host}:{port}"
+
+        if len(parts) == 4:
+            host, port, username, password = parts
+            return f"{scheme}://{username}:{password}@{host}:{port}"
+
         return None
 
 settings = Settings()

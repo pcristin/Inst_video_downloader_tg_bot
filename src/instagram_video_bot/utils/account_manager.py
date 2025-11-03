@@ -138,6 +138,13 @@ class AccountManager:
         if not self.state_file.exists():
             self._load_accounts()  # Load accounts from file if no state exists
             return
+        if self.state_file.is_dir():
+            logger.error(
+                "Account state path %s is a directory. Remove or rename it so the bot can save state.",
+                self.state_file,
+            )
+            self._load_accounts()
+            return
         
         try:
             with open(self.state_file, 'r') as f:
@@ -166,6 +173,12 @@ class AccountManager:
     
     def _save_state(self) -> None:
         """Save account state to JSON file."""
+        if self.state_file.exists() and self.state_file.is_dir():
+            logger.error(
+                "Account state path %s is a directory. Skipping state save.",
+                self.state_file,
+            )
+            return
         try:
             state = {
                 'accounts': [acc.to_dict() for acc in self.accounts],
