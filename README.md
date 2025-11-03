@@ -55,8 +55,8 @@ Bot:  [Sends downloaded video with caption]
 ### Core Technologies
 - **Python 3.11+** - Main programming language
 - **python-telegram-bot** - Telegram Bot API wrapper
+- **instagrapi** - Instagram private API client
 - **yt-dlp** - Video downloading engine
-- **Playwright** - Browser automation for authentication
 - **asyncio** - Asynchronous programming
 
 ### Infrastructure & Tools
@@ -372,7 +372,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ### Third-party Licenses
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) - LGPLv3
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - Unlicense
-- [Playwright](https://github.com/microsoft/playwright-python) - Apache 2.0
+- [instagrapi](https://github.com/subzeroid/instagrapi) - MIT
 
 ## Contributing
 
@@ -430,5 +430,5 @@ This tool is for educational and personal use only. Please respect Instagram's T
 
 - [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) team
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) developers  
-- [Playwright](https://github.com/microsoft/playwright-python) team
+- [instagrapi](https://github.com/subzeroid/instagrapi) maintainers
 - All contributors and users of this project
