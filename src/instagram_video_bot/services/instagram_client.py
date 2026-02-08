@@ -20,6 +20,10 @@ from ..config.settings import settings
 logger = logging.getLogger(__name__)
 
 
+class InstagramAuthError(Exception):
+    """Raised when Instagram authentication/challenge errors are detected."""
+
+
 class InstagramClient:
     """Instagram client wrapper using instagrapi."""
 
@@ -42,6 +46,41 @@ class InstagramClient:
         self._session_settings: Optional[dict] = None
         self._setup_proxy()
 
+    def _redact_proxy(self, proxy: Optional[str]) -> str:
+        """Return proxy value with credentials removed for logging."""
+        if not proxy:
+            return "none"
+        if "@" not in proxy:
+            return proxy
+        scheme_sep = "://"
+        if scheme_sep in proxy:
+            scheme, remainder = proxy.split(scheme_sep, 1)
+            if "@" in remainder:
+                _, host_part = remainder.split("@", 1)
+                return f"{scheme}://***@{host_part}"
+        _, host_part = proxy.split("@", 1)
+        return f"***@{host_part}"
+
+    @staticmethod
+    def _classify_instagram_error(error: Exception) -> str:
+        """Classify Instagram-related failures for recovery decisions."""
+        error_str = str(error).lower()
+        if isinstance(error, ChallengeRequired) or "challenge_required" in error_str:
+            return "auth_challenge"
+        if isinstance(error, LoginRequired) or "login_required" in error_str:
+            return "auth_challenge"
+        if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
+            return "auth_challenge"
+        if isinstance(error, PleaseWaitFewMinutes) or "please wait" in error_str:
+            return "rate_limit"
+        if "rate" in error_str and "limit" in error_str:
+            return "rate_limit"
+        return "download_failed"
+
+    def _is_auth_error(self, error: Exception) -> bool:
+        """Whether this error should trigger auth recovery/rotation."""
+        return self._classify_instagram_error(error) == "auth_challenge"
+
     def _setup_proxy(self) -> None:
         """Configure proxy if available."""
         proxy_to_use = None
@@ -53,7 +92,10 @@ class InstagramClient:
 
         if proxy_to_use:
             self.client.set_proxy(proxy_to_use)
-            logger.info(f"Proxy configured: {proxy_to_use}")
+            logger.info(
+                "Proxy configured",
+                extra={"proxy": self._redact_proxy(proxy_to_use)},
+            )
 
     def login(self) -> bool:
         """Login to Instagram with session persistence."""
@@ -97,7 +139,14 @@ class InstagramClient:
             # First, try yt-dlp as it's more reliable for reels
             video_path = self._download_with_ytdlp_first(url, media_pk, output_dir)
             if video_path:
-                logger.info(f"Video downloaded via yt-dlp: {video_path}")
+                logger.info(
+                    "Video downloaded via yt-dlp",
+                    extra={
+                        "username": self.username,
+                        "proxy": self._redact_proxy(self.proxy),
+                        "failure_class": "none",
+                    },
+                )
                 return video_path
             
             try:
@@ -111,10 +160,10 @@ class InstagramClient:
                     logger.info(f"Video downloaded: {final_path}")
                     return final_path
             except Exception as download_error:
-                error_str = str(download_error).lower()
+                failure_class = self._classify_instagram_error(download_error)
                 
                 # Check if this is a session expiration issue
-                if 'login_required' in error_str or '403' in error_str:
+                if self._is_auth_error(download_error):
                     logger.warning("Session expired during download, attempting re-login...")
                     if self._relogin():
                         # Retry download after successful re-login
@@ -124,8 +173,17 @@ class InstagramClient:
                             return video_path
                         except Exception:
                             logger.warning("Download still failed after re-login, trying fallbacks...")
+                    else:
+                        raise InstagramAuthError(str(download_error)) from download_error
                 
-                logger.warning(f"Standard video download failed: {download_error}")
+                logger.warning(
+                    "Standard video download failed",
+                    extra={
+                        "username": self.username,
+                        "proxy": self._redact_proxy(self.proxy),
+                        "failure_class": failure_class,
+                    },
+                )
                 
                 # If standard download fails, use yt-dlp as fallback
                 logger.warning("Standard download failed, using yt-dlp fallback...")
@@ -137,6 +195,8 @@ class InstagramClient:
                 logger.error(f"All download methods failed")
                 raise download_error  # Re-raise the original error
                     
+        except InstagramAuthError:
+            raise
         except Exception as e:
             logger.error(f"Video download failed: {e}")
             return None
@@ -250,6 +310,12 @@ class InstagramClient:
         """Get media information for video/reel content."""
         try:
             media_pk = int(self.client.media_pk_from_url(url))
+            fallback_info = {
+                'title': '',
+                'duration': 0,
+                'user': 'unknown',
+                'pk': media_pk
+            }
             
             # Try different methods in order of preference
             # 1. Try the standard media_info first
@@ -262,8 +328,7 @@ class InstagramClient:
                     'pk': media_pk
                 }
             except Exception as validation_error:
-                error_str = str(validation_error).lower()
-                if 'login_required' in error_str or '403' in error_str:
+                if self._is_auth_error(validation_error):
                     logger.warning("Session expired, attempting re-login...")
                     if self._relogin():
                         # Retry after successful re-login
@@ -277,55 +342,43 @@ class InstagramClient:
                             }
                         except Exception:
                             pass  # Continue to fallbacks
+                    else:
+                        raise InstagramAuthError(str(validation_error)) from validation_error
                     
                 logger.warning(f"Standard media_info failed (likely Pydantic validation): {validation_error}")
-                
-                # 2. Try GraphQL API directly
-                try:
-                    media_info = self.client.media_info_gql(media_pk)
+            
+            # 2. Try mobile API directly
+            try:
+                media_info = self.client.media_info_v1(media_pk)
+                return {
+                    'title': media_info.caption_text or '',
+                    'duration': getattr(media_info, 'video_duration', 0),
+                    'user': media_info.user.username,
+                    'pk': media_pk
+                }
+            except Exception as v1_error:
+                if self._is_auth_error(v1_error):
+                    raise InstagramAuthError(str(v1_error)) from v1_error
+                logger.warning(f"Mobile API media_info failed: {v1_error}")
+            
+            # 3. Last resort: Use oEmbed for basic info (with validation fix)
+            try:
+                oembed_data = self._get_oembed_safe(url)
+                if oembed_data:
                     return {
-                        'title': media_info.caption_text or '',
-                        'duration': getattr(media_info, 'video_duration', 0),
-                        'user': media_info.user.username,
+                        'title': oembed_data.get('title', ''),
+                        'duration': 0,
+                        'user': oembed_data.get('author_name', 'unknown'),
                         'pk': media_pk
                     }
-                except Exception as gql_error:
-                    logger.warning(f"GraphQL media_info failed: {gql_error}")
-                    
-                    # 3. Try mobile API directly
-                    try:
-                        media_info = self.client.media_info_v1(media_pk)
-                        return {
-                            'title': media_info.caption_text or '',
-                            'duration': getattr(media_info, 'video_duration', 0),
-                            'user': media_info.user.username,
-                            'pk': media_pk
-                        }
-                    except Exception as v1_error:
-                        logger.warning(f"Mobile API media_info failed: {v1_error}")
-                        
-                        # 4. Last resort: Use oEmbed for basic info (with validation fix)
-                        try:
-                            oembed_data = self._get_oembed_safe(url)
-                            if oembed_data:
-                                return {
-                                    'title': oembed_data.get('title', ''),
-                                    'duration': 0,
-                                    'user': oembed_data.get('author_name', 'unknown'),
-                                    'pk': media_pk
-                                }
-                        except Exception as oembed_error:
-                            logger.warning(f"oEmbed fallback failed: {oembed_error}")
-                            
-                            # 5. Final fallback - minimal info for download attempt
-                            logger.info("Using minimal fallback info")
-                            return {
-                                'title': '',
-                                'duration': 0,
-                                'user': 'unknown',
-                                'pk': media_pk
-                            }
-                            
+            except Exception as oembed_error:
+                logger.warning(f"oEmbed fallback failed: {oembed_error}")
+
+            # 4. Final fallback - minimal info for download attempt
+            logger.info("Using minimal fallback info")
+            return fallback_info
+        except InstagramAuthError:
+            raise
         except Exception as e:
             logger.error(f"Failed to get media info: {e}")
             return None

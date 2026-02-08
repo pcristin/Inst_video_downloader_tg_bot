@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .instagram_client import InstagramClient
+from .instagram_client import InstagramAuthError, InstagramClient
 from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
@@ -42,6 +42,19 @@ class VideoDownloader:
         self.last_download_time = 0
         self.min_delay_between_downloads = 10
         self.random_delay_range = (1.0, 3.0)
+
+    @staticmethod
+    def _redact_proxy(proxy: str) -> str:
+        """Return proxy value with credentials removed for logging."""
+        if "@" not in proxy:
+            return proxy
+        if "://" in proxy:
+            scheme, remainder = proxy.split("://", 1)
+            if "@" in remainder:
+                _, host_part = remainder.split("@", 1)
+                return f"{scheme}://***@{host_part}"
+        _, host_part = proxy.split("@", 1)
+        return f"***@{host_part}"
         
     def _get_client(self) -> InstagramClient:
         """Get or create Instagram client."""
@@ -86,35 +99,100 @@ class VideoDownloader:
             logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
             await asyncio.sleep(jitter)
 
-        try:
-            client = self._get_client()
-            
-            # Get media info first for metadata (title, duration, etc.)
-            media_info = client.get_media_info(url)
-            if not media_info:
-                raise DownloadError("Failed to get media information")
-            
-            # Always attempt video download (since we only handle videos/reels)
-            file_path = client.download_video(url, output_dir)
-            
-            if not file_path:
-                raise DownloadError("Failed to download video")
-            
-            self.last_download_time = time.time()
-            
-            return VideoInfo(
-                file_path=file_path,
-                title=media_info.get('title', ''),
-                duration=media_info.get('duration'),
-                description=media_info.get('title', '')
-            )
-            
-        except AuthenticationError:
-            await self._handle_auth_error()
-            raise
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
-            raise DownloadError(f"Download failed: {str(e)}")
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            rotated = attempt == 1
+            try:
+                client = self._get_client()
+                account_name = client.username
+                proxy_value = client.proxy or settings.get_single_proxy() or "none"
+                redacted_proxy = self._redact_proxy(proxy_value)
+                logger.info(
+                    "Starting download attempt",
+                    extra={
+                        "username": account_name,
+                        "proxy": redacted_proxy,
+                        "attempt": attempt + 1,
+                        "rotated": rotated,
+                    },
+                )
+
+                # Download first; metadata is best-effort.
+                file_path = client.download_video(url, output_dir)
+                if not file_path:
+                    raise DownloadError("Failed to download video")
+
+                media_info = {'title': '', 'duration': 0}
+                try:
+                    info = client.get_media_info(url)
+                    if info:
+                        media_info = info
+                    else:
+                        logger.warning(
+                            "Metadata unavailable after download",
+                            extra={
+                                "username": account_name,
+                                "failure_class": "metadata_unavailable",
+                            },
+                        )
+                except InstagramAuthError as auth_error:
+                    # Download already succeeded; keep response path healthy.
+                    logger.warning(
+                        "Metadata failed with auth error after download",
+                        extra={
+                            "username": account_name,
+                            "failure_class": "metadata_unavailable",
+                            "error": str(auth_error),
+                        },
+                    )
+                except Exception as metadata_error:
+                    logger.warning(
+                        "Metadata lookup failed after download",
+                        extra={
+                            "username": account_name,
+                            "failure_class": "metadata_unavailable",
+                            "error": str(metadata_error),
+                        },
+                    )
+
+                self.last_download_time = time.time()
+                return VideoInfo(
+                    file_path=file_path,
+                    title=media_info.get('title', ''),
+                    duration=media_info.get('duration'),
+                    description=media_info.get('title', '')
+                )
+
+            except (InstagramAuthError, AuthenticationError) as auth_error:
+                last_error = auth_error
+                logger.warning(
+                    "Authentication-like failure during download",
+                    extra={
+                        "failure_class": "auth_challenge",
+                        "attempt": attempt + 1,
+                        "rotated": rotated,
+                        "error": str(auth_error),
+                    },
+                )
+                if attempt == 0:
+                    await self._handle_auth_error()
+                    continue
+                raise DownloadError("Authentication failed after account rotation retry") from auth_error
+            except DownloadError as download_error:
+                last_error = download_error
+                logger.error(
+                    "Download failed",
+                    extra={"failure_class": "download_failed", "error": str(download_error)},
+                )
+                raise
+            except Exception as e:
+                last_error = e
+                logger.error(f"Download failed: {e}")
+                raise DownloadError(f"Download failed: {str(e)}") from e
+
+        if last_error:
+            raise DownloadError(f"Download failed: {str(last_error)}")
+        raise DownloadError("Download failed")
     
     async def _handle_auth_error(self) -> None:
         """Handle authentication errors by trying account rotation."""
@@ -122,12 +200,19 @@ class VideoDownloader:
         
         manager = get_account_manager()
         if manager and manager.current_account:
-            logger.warning(f"Account {manager.current_account.username} seems to have issues")
+            current_username = manager.current_account.username
+            logger.warning(
+                "Account marked for rotation due to auth failure",
+                extra={"username": current_username, "failure_class": "auth_challenge"},
+            )
             manager.mark_account_banned(manager.current_account)
-            
-            # Try rotating to a new account
-            if manager.rotate_account():
-                logger.info("Successfully rotated to a new account")
+
+            # mark_account_banned already attempts rotation internally.
+            if manager.current_account and manager.current_account.username != current_username:
+                logger.info(
+                    "Successfully rotated to a new account",
+                    extra={"username": manager.current_account.username, "rotated": True},
+                )
             else:
                 logger.error("No accounts available for rotation")
         else:

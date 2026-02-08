@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import Update, Message
+from telegram.error import NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -133,6 +134,29 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Failed to send error message: {str(e)}")
 
+    async def _global_error_handler(
+        self, update: object, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle unhandled Telegram polling/runtime exceptions."""
+        error = context.error
+        if isinstance(error, NetworkError):
+            logger.warning(
+                "Transient Telegram network error",
+                extra={"failure_class": "telegram_network", "error": str(error)},
+            )
+            return
+        if isinstance(error, TelegramError):
+            logger.error(
+                "Telegram API error",
+                extra={"failure_class": "telegram_api", "error": str(error)},
+            )
+            return
+
+        logger.exception(
+            "Unhandled Telegram runtime error",
+            extra={"failure_class": "telegram_unhandled", "error": str(error)},
+        )
+
     def run(self) -> None:
         """Start the Telegram bot."""
         if not settings.BOT_TOKEN:
@@ -151,6 +175,7 @@ class TelegramBot:
                 self.handle_message
             )
         )
+        self.application.add_error_handler(self._global_error_handler)
 
         logger.info("Bot started and ready to process messages")
         self.application.run_polling() 
