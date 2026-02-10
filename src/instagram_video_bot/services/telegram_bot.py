@@ -1,10 +1,12 @@
 """Telegram bot service for handling Instagram video downloads."""
+from contextlib import ExitStack
 import re
 import logging
 from pathlib import Path
+from typing import List
 from typing import Optional
 
-from telegram import Update, Message
+from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
 from telegram.error import NetworkError, TelegramError
 from telegram.ext import (
     Application,
@@ -15,16 +17,16 @@ from telegram.ext import (
 )
 
 from ..config.settings import settings
-from .video_downloader import VideoDownloader, VideoDownloadError
+from .video_downloader import VideoDownloadError, VideoDownloader, VideoInfo
 
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
     """Telegram bot for downloading Instagram videos."""
 
-    # Instagram video/reel URL pattern
+    # Instagram URL pattern (supports posts, reels, tv, stories, share links, and ddinstagram aliases)
     INSTAGRAM_VIDEO_PATTERN = re.compile(
-        r"(https?://(?:www\.)?instagram\.com/(?:p|reel)/[^ ]+)"
+        r"(https?://(?:www\.|d\.|g\.)?(?:instagram\.com|ddinstagram\.com)/[^ ]+)"
     )
 
     def __init__(self):
@@ -52,36 +54,25 @@ class TelegramBot:
         url = match.group(1)
         logger.info(f"Processing Instagram URL: {url}")
 
+        status_message: Optional[Message] = None
+        downloaded_files: List[Path] = []
         try:
             # Inform user that download is in progress
             status_message = await update.message.reply_text(
-                "🔄 Downloading video... Please wait."
+                "🔄 Downloading media... Please wait."
             )
 
-            # Download the video
+            # Download the media
             video_info = await self.video_downloader.download_video(url=url, output_dir=settings.TEMP_DIR)
-            
-            # Verify file exists and has content
-            if not video_info.file_path.exists():
-                raise VideoDownloadError(f"Video file not found at {video_info.file_path}")
-            
-            file_size = video_info.file_path.stat().st_size
-            logger.info(f"Sending video file: {video_info.file_path} ({file_size} bytes)")
-            
-            if file_size == 0:
-                raise VideoDownloadError("Video file is empty")
+            media_items = video_info.media_items
+            if not media_items:
+                raise VideoDownloadError("No media items were downloaded")
 
-            # Send the video
-            with open(video_info.file_path, 'rb') as video_file:
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=video_file,
-                    caption=f"📹 {video_info.title}" if video_info.title else "",
-                    reply_to_message_id=update.message.message_id
-                )
+            downloaded_files = [item.file_path for item in media_items]
+            self._validate_media_files(downloaded_files)
+            await self._send_media(context, update, video_info)
 
             # Clean up
-            video_info.file_path.unlink(missing_ok=True)
             if status_message:
                 await status_message.delete()
 
@@ -98,7 +89,7 @@ class TelegramBot:
                     "⏳ Instagram rate limit reached. Please wait a few minutes and try again."
                 )
             else:
-                error_message = f"❌ Sorry, couldn't download the video: {str(e)}"
+                error_message = f"❌ Sorry, couldn't download the media: {str(e)}"
             
             logger.error(f"Download error for {url}: {str(e)}")
             await self._handle_error(update.message, status_message, error_message)
@@ -107,6 +98,8 @@ class TelegramBot:
             error_message = "❌ An unexpected error occurred. Please try again later."
             logger.exception(f"Unexpected error while processing {url}: {str(e)}")
             await self._handle_error(update.message, status_message, error_message)
+        finally:
+            self._cleanup_files(downloaded_files)
 
     async def _handle_error(
         self,
@@ -156,6 +149,67 @@ class TelegramBot:
             "Unhandled Telegram runtime error",
             extra={"failure_class": "telegram_unhandled", "error": str(error)},
         )
+
+    @staticmethod
+    def _validate_media_files(files: List[Path]) -> None:
+        """Validate that all files exist and are non-empty."""
+        for file_path in files:
+            if not file_path.exists():
+                raise VideoDownloadError(f"Media file not found at {file_path}")
+            if file_path.stat().st_size == 0:
+                raise VideoDownloadError(f"Media file is empty: {file_path}")
+
+    async def _send_media(
+        self, context: ContextTypes.DEFAULT_TYPE, update: Update, video_info: VideoInfo
+    ) -> None:
+        """Send one media item or a multi-item album based on downloader result."""
+        media_items = video_info.media_items
+        caption = video_info.title.strip()
+        caption_text = f"📹 {caption}" if caption else ""
+
+        if len(media_items) == 1:
+            media_item = media_items[0]
+            with open(media_item.file_path, "rb") as media_file:
+                if media_item.media_type == "video":
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=media_file,
+                        caption=caption_text,
+                        reply_to_message_id=update.message.message_id,
+                    )
+                else:
+                    await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=media_file,
+                        caption=caption_text,
+                        reply_to_message_id=update.message.message_id,
+                    )
+            return
+
+        with ExitStack() as stack:
+            media_group = []
+            for index, media_item in enumerate(media_items):
+                media_file = stack.enter_context(open(media_item.file_path, "rb"))
+                item_caption = caption_text if index == 0 else None
+                if media_item.media_type == "video":
+                    media_group.append(InputMediaVideo(media=media_file, caption=item_caption))
+                else:
+                    media_group.append(InputMediaPhoto(media=media_file, caption=item_caption))
+
+            await context.bot.send_media_group(
+                chat_id=update.effective_chat.id,
+                media=media_group,
+                reply_to_message_id=update.message.message_id,
+            )
+
+    @staticmethod
+    def _cleanup_files(files: List[Path]) -> None:
+        """Delete downloaded files safely."""
+        for file_path in files:
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Failed to clean up file %s: %s", file_path, exc)
 
     def run(self) -> None:
         """Start the Telegram bot."""

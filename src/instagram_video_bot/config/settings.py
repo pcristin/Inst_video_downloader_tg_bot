@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     
     # Two-factor authentication
     TOTP_SECRET: Optional[str] = None
+
+    # Fast Instagram extraction (primary path before authenticated fallback)
+    IG_FAST_METHOD_ENABLED: bool = True
+    IG_FAST_TIMEOUT_CONNECT: int = 10
+    IG_FAST_TIMEOUT_READ: int = 45
     
     # Proxy settings (single proxy for backward compatibility)
     PROXY_HOST: Optional[str] = None

@@ -125,7 +125,61 @@ class InstagramClient:
             logger.error(f"Login failed: {e}")
 
         return False
-    
+
+    def download_media(self, url: str, output_dir: Path) -> Optional[Path]:
+        """Download media by URL, including authenticated story handling."""
+        if "/stories/" in url.lower():
+            return self._download_story_media(url, output_dir)
+        return self.download_video(url, output_dir)
+
+    def _download_story_media(self, url: str, output_dir: Path) -> Optional[Path]:
+        """Download Instagram story media using authenticated instagrapi APIs."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            story_path = self.client.story_download_by_url(url, folder=output_dir)
+            if story_path and story_path.exists():
+                logger.info(f"Story downloaded: {story_path}")
+                return story_path
+        except Exception as story_error:
+            failure_class = self._classify_instagram_error(story_error)
+            if self._is_auth_error(story_error):
+                logger.warning("Session expired during story download, attempting re-login...")
+                if not self._relogin():
+                    raise InstagramAuthError(str(story_error)) from story_error
+                try:
+                    story_path = self.client.story_download_by_url(url, folder=output_dir)
+                    if story_path and story_path.exists():
+                        logger.info(f"Story downloaded after re-login: {story_path}")
+                        return story_path
+                except Exception as retry_error:
+                    if self._is_auth_error(retry_error):
+                        raise InstagramAuthError(str(retry_error)) from retry_error
+                    logger.warning(f"Story download retry failed: {retry_error}")
+
+            logger.warning(
+                "Story download by URL failed",
+                extra={
+                    "username": self.username,
+                    "proxy": self._redact_proxy(self.proxy),
+                    "failure_class": failure_class,
+                    "error": str(story_error),
+                },
+            )
+
+        try:
+            story_pk = self.client.story_pk_from_url(url)
+            if story_pk:
+                story_path = self.client.story_download(story_pk, folder=output_dir)
+                if story_path and story_path.exists():
+                    logger.info(f"Story downloaded by story_pk: {story_path}")
+                    return story_path
+        except Exception as pk_error:
+            if self._is_auth_error(pk_error):
+                raise InstagramAuthError(str(pk_error)) from pk_error
+            logger.warning(f"Story download by story_pk failed: {pk_error}")
+
+        return None
+
     def download_video(self, url: str, output_dir: Path) -> Optional[Path]:
         """Download video using instagrapi with validation error handling."""
         try:
