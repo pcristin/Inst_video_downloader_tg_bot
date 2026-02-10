@@ -3,35 +3,57 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Literal, Optional
 
 from .instagram_client import InstagramAuthError, InstagramClient
+from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
 from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class MediaItem:
+    """Represents one downloaded media file."""
+
+    file_path: Path
+    media_type: Literal["video", "photo"]
+    caption: Optional[str] = None
+    duration: Optional[float] = None
+
+
 @dataclass
 class VideoInfo:
     """Video information container."""
+
     file_path: Path
     title: str
     duration: Optional[float] = None
     description: Optional[str] = None
+    media_items: List[MediaItem] = field(default_factory=list)
+    primary_media_type: Literal["video", "photo"] = "video"
+
 
 class VideoDownloadError(Exception):
     """Base exception for video download errors."""
+
     pass
+
 
 class AuthenticationError(VideoDownloadError):
     """Raised when authentication fails."""
+
     pass
+
 
 class DownloadError(VideoDownloadError):
     """Raised when video download fails."""
+
     pass
+
 
 class VideoDownloader:
     """Service for downloading Instagram videos using instagrapi."""
@@ -42,6 +64,10 @@ class VideoDownloader:
         self.last_download_time = 0
         self.min_delay_between_downloads = 10
         self.random_delay_range = (1.0, 3.0)
+        self.fast_extractor = InstagramFastExtractor(
+            timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
+            timeout_read=settings.IG_FAST_TIMEOUT_READ,
+        )
 
     @staticmethod
     def _redact_proxy(proxy: str) -> str:
@@ -99,6 +125,23 @@ class VideoDownloader:
             logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
             await asyncio.sleep(jitter)
 
+        fast_error: Optional[Exception] = None
+        is_story_url = self._is_story_url(url)
+        if settings.IG_FAST_METHOD_ENABLED and not is_story_url:
+            try:
+                fast_result = self._download_with_fast_method(url, output_dir)
+                self.last_download_time = time.time()
+                return fast_result
+            except Exception as error:
+                fast_error = error
+                logger.warning(
+                    "Fast extractor failed, falling back to legacy method",
+                    extra={
+                        "failure_class": "fast_path_failed",
+                        "error": str(error),
+                    },
+                )
+
         last_error: Optional[Exception] = None
         for attempt in range(2):
             rotated = attempt == 1
@@ -118,11 +161,11 @@ class VideoDownloader:
                 )
 
                 # Download first; metadata is best-effort.
-                file_path = client.download_video(url, output_dir)
+                file_path = self._download_with_legacy_client(client, url, output_dir)
                 if not file_path:
                     raise DownloadError("Failed to download video")
 
-                media_info = {'title': '', 'duration': 0}
+                media_info = {"title": "", "duration": 0}
                 try:
                     info = client.get_media_info(url)
                     if info:
@@ -155,12 +198,21 @@ class VideoDownloader:
                         },
                     )
 
+                media_type = self._infer_media_type(file_path)
+                media_item = MediaItem(
+                    file_path=file_path,
+                    media_type=media_type,
+                    caption=media_info.get("title") or None,
+                    duration=media_info.get("duration"),
+                )
                 self.last_download_time = time.time()
                 return VideoInfo(
                     file_path=file_path,
-                    title=media_info.get('title', ''),
-                    duration=media_info.get('duration'),
-                    description=media_info.get('title', '')
+                    title=media_info.get("title", ""),
+                    duration=media_info.get("duration"),
+                    description=media_info.get("title", ""),
+                    media_items=[media_item],
+                    primary_media_type=media_type,
                 )
 
             except (InstagramAuthError, AuthenticationError) as auth_error:
@@ -191,13 +243,19 @@ class VideoDownloader:
                 raise DownloadError(f"Download failed: {str(e)}") from e
 
         if last_error:
+            if fast_error:
+                raise DownloadError(
+                    f"Download failed: {str(last_error)} (fast_path_error={str(fast_error)})"
+                )
             raise DownloadError(f"Download failed: {str(last_error)}")
+        if fast_error:
+            raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
-    
+
     async def _handle_auth_error(self) -> None:
         """Handle authentication errors by trying account rotation."""
         self.client = None  # Reset client
-        
+
         manager = get_account_manager()
         if manager and manager.current_account:
             current_username = manager.current_account.username
@@ -216,4 +274,62 @@ class VideoDownloader:
             else:
                 logger.error("No accounts available for rotation")
         else:
-            logger.warning("No account manager available for rotation") 
+            logger.warning("No account manager available for rotation")
+
+    def _download_with_fast_method(self, url: str, output_dir: Path) -> VideoInfo:
+        """Attempt the new fast extractor method and map result into VideoInfo."""
+        if not self.fast_extractor:
+            raise InstagramFastExtractorError("Fast extractor is not configured")
+
+        self.fast_extractor.proxy = self._get_fast_proxy()
+        result = self.fast_extractor.extract_and_download(url, output_dir)
+        if not result.media_items:
+            raise InstagramFastExtractorError("Fast extractor returned no media")
+
+        media_items = [
+            MediaItem(
+                file_path=item.file_path,
+                media_type=item.media_type,
+                caption=result.caption or None,
+                duration=item.duration,
+            )
+            for item in result.media_items
+        ]
+        primary_item = media_items[0]
+        return VideoInfo(
+            file_path=primary_item.file_path,
+            title=result.caption or "",
+            duration=primary_item.duration,
+            description=result.caption or "",
+            media_items=media_items,
+            primary_media_type=primary_item.media_type,
+        )
+
+    def _download_with_legacy_client(
+        self, client: InstagramClient, url: str, output_dir: Path
+    ) -> Optional[Path]:
+        """Download media using existing authenticated client path."""
+        if hasattr(client, "download_media"):
+            return client.download_media(url, output_dir)
+        return client.download_video(url, output_dir)
+
+    @staticmethod
+    def _infer_media_type(file_path: Path) -> Literal["video", "photo"]:
+        """Infer media type from extension for legacy downloader responses."""
+        ext = file_path.suffix.lower()
+        if ext in {".mp4", ".mov", ".mkv", ".webm"}:
+            return "video"
+        return "photo"
+
+    @staticmethod
+    def _is_story_url(url: str) -> bool:
+        """Check if URL targets Instagram stories."""
+        return "/stories/" in url.lower()
+
+    @staticmethod
+    def _get_fast_proxy() -> Optional[str]:
+        """Resolve proxy for fast extractor requests."""
+        manager = get_account_manager()
+        if manager and manager.current_account and manager.current_account.proxy:
+            return manager.current_account.proxy
+        return settings.get_single_proxy()

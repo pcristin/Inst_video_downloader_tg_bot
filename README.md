@@ -29,17 +29,19 @@ A professional Telegram bot that automatically downloads Instagram videos and re
 
 ![Bot Demo](docs/demo.gif)
 
-*Example: User sends Instagram reel URL, bot downloads and returns video*
+*Example: User sends Instagram URL, bot downloads and returns media*
 
 ```
 User: https://www.instagram.com/reel/xyz123/
-Bot:  Downloading video... Please wait.
-Bot:  [Sends downloaded video with caption]
+Bot:  Downloading media... Please wait.
+Bot:  [Sends downloaded media with caption]
 ```
 
 ## Features
 
-- **Automatic Video Downloads** - Supports Instagram posts and reels
+- **Fast Primary Downloader + Legacy Fallback** - Multi-endpoint fast extraction first, authenticated fallback second
+- **Automatic Media Downloads** - Supports Instagram posts, reels, TV, stories (fallback path), and share links
+- **Photo + Album Support** - Sends single photos and mixed carousel albums to Telegram
 - **Multi-Account Rotation** - High availability with account switching
 - **Anti-Ban Protection** - Human-like behavior and warmup strategies  
 - **Advanced Authentication** - Cookie management and 2FA support
@@ -191,8 +193,11 @@ make clean
    ```
    https://www.instagram.com/p/xyz123/
    https://www.instagram.com/reel/abc456/
+   https://www.instagram.com/tv/abc456/
+   https://www.instagram.com/share/reel/abc123/
+   https://www.instagram.com/stories/someuser/1234567890123456789/
    ```
-3. **Bot responds** with the downloaded video
+3. **Bot responds** with downloaded media (video, photo, or album)
 
 ## Tests
 
@@ -302,6 +307,9 @@ PROXY_USERNAME=proxy_user
 PROXY_PASSWORD=proxy_pass
 
 # Advanced
+IG_FAST_METHOD_ENABLED=true
+IG_FAST_TIMEOUT_CONNECT=10
+IG_FAST_TIMEOUT_READ=45
 LOG_LEVEL=INFO
 VIDEO_WIDTH=320
 VIDEO_HEIGHT=480
