@@ -73,9 +73,6 @@ dev-build: ## Build for development
 test-health: ## Test the health check
 	docker-compose exec instagram-video-bot python -m src.instagram_video_bot.utils.health_check
 
-test-totp: ## Test TOTP code generation
-	docker-compose run --rm --entrypoint python instagram-video-bot -m src.instagram_video_bot.test_totp 
-
 test-instagrapi: ## Test instagrapi integration and login
 	docker-compose run --rm --entrypoint python instagram-video-bot /app/test_instagrapi.py
 
