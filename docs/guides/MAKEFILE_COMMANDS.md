@@ -58,7 +58,6 @@ make monitor-cookies
 make dev            # Start in development mode
 make dev-build      # Build for development
 make test-health    # Test health check
-make test-totp      # Test TOTP generation
 make setup-2fa      # Setup 2FA
 ```
 
