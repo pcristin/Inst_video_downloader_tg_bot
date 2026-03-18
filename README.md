@@ -360,7 +360,6 @@ LOG_LEVEL=DEBUG make up
 make accounts-status
 
 # Test 2FA code generation
-make test-totp
 
 # Validate configuration
 make test-health
