@@ -6,9 +6,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Literal, Optional
+from urllib.parse import urlparse
 
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
+from .twitter_downloader import TwitterDownloadError, TwitterDownloader
 from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
@@ -68,6 +70,7 @@ class VideoDownloader:
             timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
             timeout_read=settings.IG_FAST_TIMEOUT_READ,
         )
+        self.twitter_downloader = TwitterDownloader(proxy=settings.get_single_proxy())
 
     @staticmethod
     def _redact_proxy(proxy: str) -> str:
@@ -110,11 +113,18 @@ class VideoDownloader:
         return self.client
 
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
-        """Download a video from Instagram using instagrapi."""
+        """Download media from supported providers."""
+        if self._is_twitter_url(url):
+            twitter_info = await self._download_twitter_media(url, output_dir)
+            self.last_download_time = time.time()
+            return twitter_info
+        if self._is_twitter_domain_url(url):
+            raise DownloadError("Unsupported Twitter/X URL")
+
         # Rate limiting
         current_time = time.time()
         time_since_last = current_time - self.last_download_time
-        
+
         if time_since_last < self.min_delay_between_downloads:
             delay = self.min_delay_between_downloads - time_since_last
             logger.info(f"Rate limiting: waiting {delay:.1f} seconds")
@@ -252,6 +262,33 @@ class VideoDownloader:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
 
+    async def _download_twitter_media(self, url: str, output_dir: Path) -> VideoInfo:
+        """Download Twitter/X media using yt-dlp."""
+        try:
+            result = await self.twitter_downloader.download_media(url, output_dir)
+        except TwitterDownloadError as error:
+            raise DownloadError(str(error)) from error
+
+        if not result.media_items:
+            raise DownloadError("Twitter/X download returned no media items")
+
+        media_items = [
+            MediaItem(
+                file_path=item.file_path,
+                media_type=item.media_type,
+                caption=result.title or None,
+            )
+            for item in result.media_items
+        ]
+        primary_item = media_items[0]
+        return VideoInfo(
+            file_path=primary_item.file_path,
+            title=result.title or "",
+            description=result.title or "",
+            media_items=media_items,
+            primary_media_type=primary_item.media_type,
+        )
+
     async def _handle_auth_error(self) -> None:
         """Handle authentication errors by trying account rotation."""
         self.client = None  # Reset client
@@ -325,6 +362,28 @@ class VideoDownloader:
     def _is_story_url(url: str) -> bool:
         """Check if URL targets Instagram stories."""
         return "/stories/" in url.lower()
+
+    @staticmethod
+    def _is_twitter_url(url: str) -> bool:
+        """Check if URL targets Twitter/X status routes."""
+        return TwitterDownloader.is_supported_url(url)
+
+    @staticmethod
+    def _is_twitter_domain_url(url: str) -> bool:
+        """Check if URL points to any Twitter/X host, regardless of path."""
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False
+        host = (parsed.hostname or "").lower()
+        return host in {
+            "twitter.com",
+            "www.twitter.com",
+            "m.twitter.com",
+            "mobile.twitter.com",
+            "x.com",
+            "www.x.com",
+        }
 
     @staticmethod
     def _get_fast_proxy() -> Optional[str]:

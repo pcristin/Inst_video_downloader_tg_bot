@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import pytest
 
@@ -8,7 +9,12 @@ from src.instagram_video_bot.services.instagram_fast_extractor import (
     FastExtractorDownloadResult,
     InstagramFastExtractorError,
 )
-from src.instagram_video_bot.services.video_downloader import DownloadError, VideoDownloader
+from src.instagram_video_bot.services.video_downloader import (
+    DownloadError,
+    MediaItem,
+    VideoDownloader,
+    VideoInfo,
+)
 
 
 class _SuccessDownloadClient:
@@ -182,3 +188,94 @@ async def test_download_fails_after_retry_on_auth_failure(monkeypatch, tmp_path)
 
     with pytest.raises(DownloadError, match="Authentication failed after account rotation retry"):
         await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_twitter_status_url_skips_instagram_sleep(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 10
+    downloader.random_delay_range = (1, 1)
+    downloader.last_download_time = time.time()
+
+    expected_path = tmp_path / "tweet.mp4"
+    expected_path.write_bytes(b"video")
+    called = {"url": None, "sleep_calls": 0}
+
+    async def _sleep(_seconds):
+        called["sleep_calls"] += 1
+        raise AssertionError("instagram sleep should not run for twitter URLs")
+
+    class _TwitterDownloaderStub:
+        async def download_media(self, url: str, _output_dir: Path) -> VideoInfo:
+            called["url"] = url
+            return VideoInfo(
+                file_path=expected_path,
+                title="tweet",
+                media_items=[MediaItem(file_path=expected_path, media_type="video")],
+                primary_media_type="video",
+            )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.asyncio.sleep", _sleep)
+    downloader.twitter_downloader = _TwitterDownloaderStub()
+    downloader._get_client = lambda: (_ for _ in ()).throw(AssertionError("instagram path should not run"))
+
+    info = await downloader.download_video("https://x.com/someuser/status/1901234567890123456", tmp_path)
+
+    assert called["url"] == "https://x.com/someuser/status/1901234567890123456"
+    assert called["sleep_calls"] == 0
+    assert info.file_path == expected_path
+    assert info.primary_media_type == "video"
+
+
+@pytest.mark.asyncio
+async def test_twitter_url_routes_to_twitter_downloader(tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+
+    expected_path = tmp_path / "tweet.mp4"
+    expected_path.write_bytes(b"video")
+    called = {"url": None}
+
+    class _TwitterDownloaderStub:
+        async def download_media(self, url: str, _output_dir: Path) -> VideoInfo:
+            called["url"] = url
+            return VideoInfo(
+                file_path=expected_path,
+                title="tweet",
+                media_items=[MediaItem(file_path=expected_path, media_type="video")],
+                primary_media_type="video",
+            )
+
+    downloader.twitter_downloader = _TwitterDownloaderStub()
+    downloader._get_client = lambda: (_ for _ in ()).throw(AssertionError("instagram path should not run"))
+
+    info = await downloader.download_video("https://x.com/someuser/status/1901234567890123456", tmp_path)
+
+    assert called["url"] == "https://x.com/someuser/status/1901234567890123456"
+    assert info.file_path == expected_path
+    assert info.primary_media_type == "video"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://m.twitter.com/someuser/status/1901234567890123456",
+        "https://mobile.twitter.com/someuser/status/1901234567890123456",
+    ],
+)
+def test_is_twitter_domain_url_recognizes_mobile_hosts(url):
+    assert VideoDownloader._is_twitter_domain_url(url)
+
+
+@pytest.mark.asyncio
+async def test_non_status_twitter_url_fails_without_instagram_fallback(tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    downloader._get_client = lambda: (_ for _ in ()).throw(
+        AssertionError("instagram path should not run")
+    )
+
+    with pytest.raises(DownloadError, match="Unsupported Twitter/X URL"):
+        await downloader.download_video("https://x.com/home", tmp_path)

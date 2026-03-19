@@ -22,11 +22,14 @@ from .video_downloader import VideoDownloadError, VideoDownloader, VideoInfo
 logger = logging.getLogger(__name__)
 
 class TelegramBot:
-    """Telegram bot for downloading Instagram videos."""
+    """Telegram bot for downloading media links."""
 
-    # Instagram URL pattern (supports posts, reels, tv, stories, share links, and ddinstagram aliases)
+    # Supported URL pattern (Instagram routes + Twitter/X status links)
     INSTAGRAM_VIDEO_PATTERN = re.compile(
-        r"(https?://(?:www\.|d\.|g\.)?(?:instagram\.com|ddinstagram\.com)/[^ ]+)"
+        r"("
+        r"https?://(?:www\.|d\.|g\.)?(?:instagram\.com|ddinstagram\.com)/[^ ]+"
+        r"|https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/\d+(?:[/?#][^\s]*)?"
+        r")"
     )
 
     def __init__(self):
@@ -36,7 +39,7 @@ class TelegramBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        Handle incoming messages and process Instagram video links.
+        Handle incoming messages and process supported media links.
         
         Args:
             update: Telegram update object
@@ -52,7 +55,7 @@ class TelegramBot:
             return
 
         url = match.group(1)
-        logger.info(f"Processing Instagram URL: {url}")
+        logger.info(f"Processing media URL: {url}")
 
         status_message: Optional[Message] = None
         downloaded_files: List[Path] = []
