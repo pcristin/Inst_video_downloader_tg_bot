@@ -9,6 +9,7 @@ from typing import List, Literal, Optional
 
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
+from .twitter_downloader import TwitterDownloadError, TwitterDownloader
 from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
@@ -68,6 +69,7 @@ class VideoDownloader:
             timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
             timeout_read=settings.IG_FAST_TIMEOUT_READ,
         )
+        self.twitter_downloader = TwitterDownloader(proxy=settings.get_single_proxy())
 
     @staticmethod
     def _redact_proxy(proxy: str) -> str:
@@ -110,7 +112,7 @@ class VideoDownloader:
         return self.client
 
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
-        """Download a video from Instagram using instagrapi."""
+        """Download media from supported providers."""
         # Rate limiting
         current_time = time.time()
         time_since_last = current_time - self.last_download_time
@@ -124,6 +126,11 @@ class VideoDownloader:
             jitter = random.uniform(*self.random_delay_range)
             logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
             await asyncio.sleep(jitter)
+
+        if self._is_twitter_url(url):
+            twitter_info = await self._download_twitter_media(url, output_dir)
+            self.last_download_time = time.time()
+            return twitter_info
 
         fast_error: Optional[Exception] = None
         is_story_url = self._is_story_url(url)
@@ -252,6 +259,33 @@ class VideoDownloader:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
 
+    async def _download_twitter_media(self, url: str, output_dir: Path) -> VideoInfo:
+        """Download Twitter/X media using yt-dlp."""
+        try:
+            result = await self.twitter_downloader.download_media(url, output_dir)
+        except TwitterDownloadError as error:
+            raise DownloadError(str(error)) from error
+
+        if not result.media_items:
+            raise DownloadError("Twitter/X download returned no media items")
+
+        media_items = [
+            MediaItem(
+                file_path=item.file_path,
+                media_type=item.media_type,
+                caption=result.title or None,
+            )
+            for item in result.media_items
+        ]
+        primary_item = media_items[0]
+        return VideoInfo(
+            file_path=primary_item.file_path,
+            title=result.title or "",
+            description=result.title or "",
+            media_items=media_items,
+            primary_media_type=primary_item.media_type,
+        )
+
     async def _handle_auth_error(self) -> None:
         """Handle authentication errors by trying account rotation."""
         self.client = None  # Reset client
@@ -325,6 +359,11 @@ class VideoDownloader:
     def _is_story_url(url: str) -> bool:
         """Check if URL targets Instagram stories."""
         return "/stories/" in url.lower()
+
+    @staticmethod
+    def _is_twitter_url(url: str) -> bool:
+        """Check if URL targets Twitter/X status routes."""
+        return TwitterDownloader.is_supported_url(url)
 
     @staticmethod
     def _get_fast_proxy() -> Optional[str]:
