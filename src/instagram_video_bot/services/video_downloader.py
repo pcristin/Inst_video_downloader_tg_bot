@@ -114,10 +114,17 @@ class VideoDownloader:
 
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
         """Download media from supported providers."""
+        if self._is_twitter_url(url):
+            twitter_info = await self._download_twitter_media(url, output_dir)
+            self.last_download_time = time.time()
+            return twitter_info
+        if self._is_twitter_domain_url(url):
+            raise DownloadError("Unsupported Twitter/X URL")
+
         # Rate limiting
         current_time = time.time()
         time_since_last = current_time - self.last_download_time
-        
+
         if time_since_last < self.min_delay_between_downloads:
             delay = self.min_delay_between_downloads - time_since_last
             logger.info(f"Rate limiting: waiting {delay:.1f} seconds")
@@ -127,13 +134,6 @@ class VideoDownloader:
             jitter = random.uniform(*self.random_delay_range)
             logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
             await asyncio.sleep(jitter)
-
-        if self._is_twitter_url(url):
-            twitter_info = await self._download_twitter_media(url, output_dir)
-            self.last_download_time = time.time()
-            return twitter_info
-        if self._is_twitter_domain_url(url):
-            raise DownloadError("Unsupported Twitter/X URL")
 
         fast_error: Optional[Exception] = None
         is_story_url = self._is_story_url(url)
@@ -376,7 +376,14 @@ class VideoDownloader:
         except Exception:
             return False
         host = (parsed.hostname or "").lower()
-        return host in {"twitter.com", "www.twitter.com", "x.com", "www.x.com"}
+        return host in {
+            "twitter.com",
+            "www.twitter.com",
+            "m.twitter.com",
+            "mobile.twitter.com",
+            "x.com",
+            "www.x.com",
+        }
 
     @staticmethod
     def _get_fast_proxy() -> Optional[str]:

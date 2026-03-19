@@ -91,7 +91,12 @@ class TwitterDownloader:
         if self.proxy:
             cmd.extend(["--proxy", self.proxy])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            raise TwitterDownloadError(
+                f"Twitter/X download timed out after {self.timeout_seconds} seconds"
+            ) from exc
         if result.returncode != 0:
             error_text = (result.stderr or result.stdout or "Unknown yt-dlp error").strip()
             raise TwitterDownloadError(f"Twitter/X download failed: {error_text}")
