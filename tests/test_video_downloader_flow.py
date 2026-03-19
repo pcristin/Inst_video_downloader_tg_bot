@@ -8,7 +8,12 @@ from src.instagram_video_bot.services.instagram_fast_extractor import (
     FastExtractorDownloadResult,
     InstagramFastExtractorError,
 )
-from src.instagram_video_bot.services.video_downloader import DownloadError, VideoDownloader
+from src.instagram_video_bot.services.video_downloader import (
+    DownloadError,
+    MediaItem,
+    VideoDownloader,
+    VideoInfo,
+)
 
 
 class _SuccessDownloadClient:
@@ -182,3 +187,33 @@ async def test_download_fails_after_retry_on_auth_failure(monkeypatch, tmp_path)
 
     with pytest.raises(DownloadError, match="Authentication failed after account rotation retry"):
         await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_twitter_url_routes_to_twitter_downloader(tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+
+    expected_path = tmp_path / "tweet.mp4"
+    expected_path.write_bytes(b"video")
+    called = {"url": None}
+
+    class _TwitterDownloaderStub:
+        async def download_media(self, url: str, _output_dir: Path) -> VideoInfo:
+            called["url"] = url
+            return VideoInfo(
+                file_path=expected_path,
+                title="tweet",
+                media_items=[MediaItem(file_path=expected_path, media_type="video")],
+                primary_media_type="video",
+            )
+
+    downloader.twitter_downloader = _TwitterDownloaderStub()
+    downloader._get_client = lambda: (_ for _ in ()).throw(AssertionError("instagram path should not run"))
+
+    info = await downloader.download_video("https://x.com/someuser/status/1901234567890123456", tmp_path)
+
+    assert called["url"] == "https://x.com/someuser/status/1901234567890123456"
+    assert info.file_path == expected_path
+    assert info.primary_media_type == "video"
