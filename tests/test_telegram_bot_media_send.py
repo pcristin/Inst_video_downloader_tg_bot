@@ -174,3 +174,27 @@ async def test_handle_message_cleans_up_temp_files(tmp_path):
 )
 def test_instagram_url_pattern_accepts_expanded_routes(url):
     assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://twitter.com/someuser/status/1901234567890123456",
+        "https://x.com/someuser/status/1901234567890123456",
+        "https://www.x.com/someuser/status/1901234567890123456",
+    ],
+)
+def test_instagram_url_pattern_accepts_twitter_routes(url):
+    assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/home",
+        "https://twitter.com/explore",
+        "https://x.com/someuser",
+    ],
+)
+def test_instagram_url_pattern_rejects_non_status_twitter_routes(url):
+    assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url) is None
