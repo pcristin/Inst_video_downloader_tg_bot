@@ -1,6 +1,12 @@
+import subprocess
+
 import pytest
 
-from src.instagram_video_bot.services.twitter_downloader import TwitterDownloader
+from src.instagram_video_bot.services import twitter_downloader
+from src.instagram_video_bot.services.twitter_downloader import (
+    TwitterDownloadError,
+    TwitterDownloader,
+)
 
 
 @pytest.mark.parametrize(
@@ -37,3 +43,19 @@ def test_collect_files_filters_non_media_sidecars(tmp_path):
     files = TwitterDownloader._collect_files(tmp_path, prefix)
 
     assert [path.suffix for path in files] == [".mp4", ".jpg"]
+
+
+def test_download_media_converts_download_timeout_to_twitter_error(tmp_path, monkeypatch):
+    downloader = TwitterDownloader(timeout_seconds=5)
+    monkeypatch.setattr(downloader, "_build_base_command", lambda: ["yt-dlp"])
+
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="yt-dlp", timeout=5)
+
+    monkeypatch.setattr(twitter_downloader.subprocess, "run", _raise_timeout)
+
+    with pytest.raises(TwitterDownloadError, match="timed out"):
+        downloader._download_media_sync(
+            "https://twitter.com/user/status/1901234567890123456",
+            tmp_path,
+        )
