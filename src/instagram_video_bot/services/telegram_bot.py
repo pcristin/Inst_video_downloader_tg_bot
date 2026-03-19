@@ -28,7 +28,7 @@ class TelegramBot:
     INSTAGRAM_VIDEO_PATTERN = re.compile(
         r"("
         r"https?://(?:www\.|d\.|g\.)?(?:instagram\.com|ddinstagram\.com)/[^ ]+"
-        r"|https?://(?:www\.)?(?:twitter\.com|x\.com)/[^ ]+"
+        r"|https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/\d+(?:[/?#][^\s]*)?"
         r")"
     )
 

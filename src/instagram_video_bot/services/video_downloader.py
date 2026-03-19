@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Literal, Optional
+from urllib.parse import urlparse
 
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
@@ -131,6 +132,8 @@ class VideoDownloader:
             twitter_info = await self._download_twitter_media(url, output_dir)
             self.last_download_time = time.time()
             return twitter_info
+        if self._is_twitter_domain_url(url):
+            raise DownloadError("Unsupported Twitter/X URL")
 
         fast_error: Optional[Exception] = None
         is_story_url = self._is_story_url(url)
@@ -364,6 +367,16 @@ class VideoDownloader:
     def _is_twitter_url(url: str) -> bool:
         """Check if URL targets Twitter/X status routes."""
         return TwitterDownloader.is_supported_url(url)
+
+    @staticmethod
+    def _is_twitter_domain_url(url: str) -> bool:
+        """Check if URL points to any Twitter/X host, regardless of path."""
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False
+        host = (parsed.hostname or "").lower()
+        return host in {"twitter.com", "www.twitter.com", "x.com", "www.x.com"}
 
     @staticmethod
     def _get_fast_proxy() -> Optional[str]:

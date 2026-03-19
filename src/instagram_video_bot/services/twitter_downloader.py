@@ -37,6 +37,18 @@ class TwitterDownloadResult:
 class TwitterDownloader:
     """Downloads public Twitter/X tweet media with yt-dlp."""
 
+    MEDIA_EXTENSIONS = {
+        ".mp4",
+        ".mov",
+        ".mkv",
+        ".webm",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+    }
+
     STATUS_URL_PATTERN = re.compile(
         r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/(?P<status_id>\d+)(?:[/?#][^\s]*)?",
         re.IGNORECASE,
@@ -129,6 +141,7 @@ class TwitterDownloader:
             for file_path in sorted(output_dir.glob(f"{prefix}_*"))
             if file_path.is_file()
             and file_path.suffix.lower() not in {".part", ".ytdl"}
+            and file_path.suffix.lower() in TwitterDownloader.MEDIA_EXTENSIONS
             and file_path.stat().st_size > 0
         ]
         return files

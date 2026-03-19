@@ -31,13 +31,9 @@ def check_environment() -> None:
     if not getattr(settings, "BOT_TOKEN"):
         missing_vars.append("BOT_TOKEN")
     
-    # Check if accounts.txt exists for multi-account mode
-    accounts_file_path = "/app/accounts.txt"
-    if not os.path.exists(accounts_file_path):
-        # Single account mode - require IG_USERNAME and IG_PASSWORD
-        for var in ["IG_USERNAME", "IG_PASSWORD"]:
-            if not getattr(settings, var):
-                missing_vars.append(var)
+    # Instagram credentials are optional at startup.
+    # This allows Twitter/X-only operation without IG_USERNAME/IG_PASSWORD.
+    # Instagram downloads will still fail at request time if credentials are absent.
 
     if missing_vars:
         raise ValueError(
