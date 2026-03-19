@@ -217,3 +217,16 @@ async def test_twitter_url_routes_to_twitter_downloader(tmp_path):
     assert called["url"] == "https://x.com/someuser/status/1901234567890123456"
     assert info.file_path == expected_path
     assert info.primary_media_type == "video"
+
+
+@pytest.mark.asyncio
+async def test_non_status_twitter_url_fails_without_instagram_fallback(tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    downloader._get_client = lambda: (_ for _ in ()).throw(
+        AssertionError("instagram path should not run")
+    )
+
+    with pytest.raises(DownloadError, match="Unsupported Twitter/X URL"):
+        await downloader.download_video("https://x.com/home", tmp_path)

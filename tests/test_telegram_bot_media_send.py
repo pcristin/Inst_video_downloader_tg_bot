@@ -186,3 +186,15 @@ def test_instagram_url_pattern_accepts_expanded_routes(url):
 )
 def test_instagram_url_pattern_accepts_twitter_routes(url):
     assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/home",
+        "https://twitter.com/explore",
+        "https://x.com/someuser",
+    ],
+)
+def test_instagram_url_pattern_rejects_non_status_twitter_routes(url):
+    assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url) is None

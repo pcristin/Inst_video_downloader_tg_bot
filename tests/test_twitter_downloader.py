@@ -25,3 +25,15 @@ def test_twitter_downloader_supports_status_urls(url):
 )
 def test_twitter_downloader_rejects_non_status_urls(url):
     assert not TwitterDownloader.is_supported_url(url)
+
+
+def test_collect_files_filters_non_media_sidecars(tmp_path):
+    prefix = "twitter_1900000000000000000_1234567890"
+    (tmp_path / f"{prefix}_01.mp4").write_bytes(b"video")
+    (tmp_path / f"{prefix}_02.jpg").write_bytes(b"photo")
+    (tmp_path / f"{prefix}_03.info.json").write_text("{}")
+    (tmp_path / f"{prefix}_04.vtt").write_text("subtitle")
+
+    files = TwitterDownloader._collect_files(tmp_path, prefix)
+
+    assert [path.suffix for path in files] == [".mp4", ".jpg"]
