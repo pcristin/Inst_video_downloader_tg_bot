@@ -41,3 +41,6 @@ exclude-newer-package = { instagrapi = false }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["instagram_video_bot*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
