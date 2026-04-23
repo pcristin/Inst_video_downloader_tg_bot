@@ -77,6 +77,11 @@ class _LeaseManager:
         self.accounts = list(accounts)
         self.released = []
         self.banned = []
+        self.failures = []
+        self.successes = []
+
+    def get_available_accounts(self):
+        return list(self.accounts)
 
     def acquire_account(self):
         if not self.accounts:
@@ -89,6 +94,13 @@ class _LeaseManager:
 
     def mark_account_banned(self, account):
         self.banned.append(account.username)
+
+    def record_account_failure(self, account, reason):
+        self.failures.append((account.username, reason))
+        self.banned.append(account.username)
+
+    def record_account_success(self, account):
+        self.successes.append(account.username)
 
 
 class _Account:
@@ -211,7 +223,52 @@ async def test_download_with_account_lease_retries_after_auth_failure(monkeypatc
 
     assert info.file_path == expected_path
     assert info.title == "ok"
-    assert manager.banned == ["acc_fail"]
+    assert manager.failures == [("acc_fail", "auth_challenge")]
+    assert manager.successes == ["acc_ok"]
+
+
+@pytest.mark.asyncio
+async def test_download_retries_across_all_available_accounts(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "video_retry_all.mp4"
+    expected_path.write_bytes(b"video")
+
+    manager = _LeaseManager(
+        [
+            _Account("acc_fail_1"),
+            _Account("acc_fail_2"),
+            _Account("acc_fail_3"),
+            _Account("acc_ok"),
+        ]
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_fail_1": _AuthFailClient(),
+        "acc_fail_2": _AuthFailClient(),
+        "acc_fail_3": _AuthFailClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+
+    def _client_factory(**kwargs):
+        return clients[kwargs["username"]]
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.InstagramClient", _client_factory)
+
+    info = await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert info.title == "ok"
+    assert manager.failures == [
+        ("acc_fail_1", "auth_challenge"),
+        ("acc_fail_2", "auth_challenge"),
+        ("acc_fail_3", "auth_challenge"),
+    ]
+    assert manager.successes == ["acc_ok"]
 
 
 @pytest.mark.asyncio
