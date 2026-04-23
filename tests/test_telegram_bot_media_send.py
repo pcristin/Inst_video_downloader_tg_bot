@@ -379,9 +379,12 @@ async def test_download_success_sends_owner_alert_when_retry_quarantines_account
     update = _FakeUpdate("https://www.instagram.com/reel/success/")
     media_file = tmp_path / "success.mp4"
     media_file.write_bytes(b"video")
+    downloader_instances = []
 
     class FakeDownloader:
         def __init__(self):
+            self.attempted_accounts = []
+            self.quarantined_accounts = []
             self.last_account_health_event = SimpleNamespace(
                 should_alert_owner=True,
                 username="acc1",
@@ -392,8 +395,11 @@ async def test_download_success_sends_owner_alert_when_retry_quarantines_account
                 total_accounts=13,
                 low_watermark=3,
             )
+            downloader_instances.append(self)
 
         async def download_video(self, url: str, output_dir: Path):
+            self.attempted_accounts.extend(["acc1", "acc2"])
+            self.quarantined_accounts.append("acc1")
             return VideoInfo(
                 file_path=media_file,
                 title="success",
@@ -409,6 +415,9 @@ async def test_download_success_sends_owner_alert_when_retry_quarantines_account
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
     assert len(fake_bot.video_calls) == 1
+    assert len(downloader_instances) == 1
+    assert downloader_instances[0].attempted_accounts == ["acc1", "acc2"]
+    assert downloader_instances[0].quarantined_accounts == ["acc1"]
     assert any(
         call["chat_id"] == 1001
         and "Instagram account pool warning:" in call["text"]
