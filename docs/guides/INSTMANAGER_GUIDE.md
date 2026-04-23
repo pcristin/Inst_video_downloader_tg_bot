@@ -47,10 +47,11 @@ login:password||cookies||email:emailpassword
 
 ### 2. Import All Accounts
 
-Run the import script:
+Install dependencies and run the import script:
 
 ```bash
-python3 import_cookies_instmanager.py
+uv sync
+uv run python import_cookies_instmanager.py
 ```
 
 This will:
@@ -118,9 +119,6 @@ Check if everything works:
 # Check account status
 make accounts-status
 
-# Check if cookies are valid
-make check-cookies
-
 # View logs
 make logs
 ```
@@ -153,9 +151,9 @@ If you get "white screen" or authentication errors:
    head -5 cookies/ms.stevenbaker682510_cookies.txt
    ```
 
-2. **Validate cookies**:
+2. **Validate account status**:
    ```bash
-   make check-cookies
+   make accounts-status
    ```
 
 3. **Check account info**:
@@ -177,7 +175,7 @@ If you get "white screen" or authentication errors:
 
 3. **Re-import single account**:
    ```bash
-   python3 -c "
+   uv run python -c "
    from src.instagram_video_bot.utils.cookie_importer import *
    import_instmanager_account('your_account_line_here', 'username')
    "
@@ -197,7 +195,7 @@ make accounts-reset-one USERNAME=ms.stevenbaker682510
 
 ### Check Specific Account
 ```bash
-python3 check_cookies.py cookies/ms.stevenbaker682510_cookies.txt
+make accounts-status
 ```
 
 ## Best Practices
@@ -215,4 +213,4 @@ Your cookies contain:
 - **X-MID**: Machine/browser ID
 - **IG-U-RUR**: Regional routing info
 
-These are automatically converted to Netscape format for yt-dlp compatibility. 
+These are automatically converted to Netscape format for yt-dlp compatibility.

@@ -71,15 +71,15 @@ dev-build: ## Build for development
 	docker-compose -f docker-compose.yml -f docker-compose.dev.yml build
 
 test-health: ## Test the health check
-	docker-compose exec instagram-video-bot python -m src.instagram_video_bot.utils.health_check
+	docker-compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
 
 test-instagrapi: ## Test instagrapi integration and login
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/test_instagrapi.py
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/test_instagrapi.py
 
 test-proxies: ## Test proxy parsing and configuration
 	@echo "🌐 Testing Proxy Configuration"
 	@echo "Format: user:pass@host:port (http:// added automatically)"
-	@docker-compose run --rm --entrypoint python instagram-video-bot -c "from src.instagram_video_bot.config.settings import settings; proxies = settings.get_proxy_list(); print(f'✅ Found {len(proxies)} proxies:'); [print(f'  {i+1}: {proxy}') for i, proxy in enumerate(proxies[:10])] if proxies else print('❌ No proxies configured in PROXIES environment variable')"
+	@docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python -c "from src.instagram_video_bot.config.settings import settings; proxies = settings.get_proxy_list(); print(f'✅ Found {len(proxies)} proxies:'); [print(f'  {i+1}: {proxy}') for i, proxy in enumerate(proxies[:10])] if proxies else print('❌ No proxies configured in PROXIES environment variable')"
 
 # Account Management Commands
 accounts-list: ## List all accounts from accounts.txt with proxy assignments
@@ -97,25 +97,25 @@ accounts-list: ## List all accounts from accounts.txt with proxy assignments
 	fi
 
 accounts-status: ## Show status of all Instagram accounts
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
 
 accounts-setup: ## Setup all accounts (login and create sessions)
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py setup
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
 
 accounts-rotate: ## Manually rotate to next available account
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py rotate
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py rotate
 
 accounts-reset: ## Reset banned status for all accounts
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py reset
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset
 
 accounts-reset-one: ## Reset banned status for specific account (usage: make accounts-reset-one USERNAME=username1)
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py reset $(USERNAME)
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset $(USERNAME)
 
 accounts-warmup: ## Warm up current account
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py warmup
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py warmup
 
 accounts-warmup-one: ## Warm up specific account (usage: make accounts-warmup-one USERNAME=username1)
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py warmup $(USERNAME)
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py warmup $(USERNAME)
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)
@@ -134,7 +134,7 @@ warmup: ## Warm up specific account (usage: make warmup USERNAME=username1)
 		echo "Usage: make warmup USERNAME=username1"; \
 		exit 1; \
 	fi
-	docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py warmup $(USERNAME)
+	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py warmup $(USERNAME)
 
 warmup-batch: ## Warm up multiple accounts with delays (usage: make warmup-batch ACCOUNTS="user1 user2 user3" DELAY=3600)
 	@if [ -z "$(ACCOUNTS)" ]; then \
@@ -144,7 +144,7 @@ warmup-batch: ## Warm up multiple accounts with delays (usage: make warmup-batch
 	fi
 	@for account in $(ACCOUNTS); do \
 		echo "🔥 Warming up account: $$account"; \
-		docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py warmup $$account || true; \
+		docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py warmup $$account || true; \
 		if [ "$(DELAY)" != "" ] && [ "$$account" != "$$(echo $(ACCOUNTS) | rev | cut -d' ' -f1 | rev)" ]; then \
 			echo "⏰ Waiting $(DELAY) seconds before next account..."; \
 			sleep $(DELAY); \
@@ -153,7 +153,7 @@ warmup-batch: ## Warm up multiple accounts with delays (usage: make warmup-batch
 
 warmup-available: ## Warm up all available (non-banned) accounts with 4 hour delays
 	@echo "🔥 Starting batch warmup of available accounts..."
-	@docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "✅" | awk -F'|' '{print $$1}' | tr -d ' ' | head -3 > /tmp/available_accounts.txt
+	@docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status | grep "✅" | awk -F'|' '{print $$1}' | tr -d ' ' | head -3 > /tmp/available_accounts.txt
 	@if [ ! -s /tmp/available_accounts.txt ]; then \
 		echo "❌ No available accounts found"; \
 		rm -f /tmp/available_accounts.txt; \
@@ -166,7 +166,7 @@ warmup-available: ## Warm up all available (non-banned) accounts with 4 hour del
 
 warmup-banned: ## Warm up all banned accounts to potentially restore them (usage: make warmup-banned)
 	@echo "🔥 Starting warmup of banned accounts..."
-	@docker-compose run --rm --entrypoint python instagram-video-bot /app/manage_accounts.py status | grep "❌" | awk -F'|' '{print $$1}' | tr -d ' ' > /tmp/banned_accounts.txt
+	@docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status | grep "❌" | awk -F'|' '{print $$1}' | tr -d ' ' > /tmp/banned_accounts.txt
 	@if [ ! -s /tmp/banned_accounts.txt ]; then \
 		echo "✅ No banned accounts found"; \
 		rm -f /tmp/banned_accounts.txt; \
