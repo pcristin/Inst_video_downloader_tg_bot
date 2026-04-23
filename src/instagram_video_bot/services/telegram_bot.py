@@ -43,6 +43,7 @@ class RequestContext:
     original_message_id: int
     status_message: Message
     quiet_mode: bool
+    joined_existing: bool
 
 
 class TelegramBot:
@@ -83,9 +84,6 @@ class TelegramBot:
             )
 
         for parsed_link in extracted_links:
-            status_message = await update.message.reply_text(
-                self._build_submission_message(parsed_link.provider_label, queue_position=1)
-            )
             submission = self.job_manager.submit(
                 chat_id=update.effective_chat.id,
                 user_id=update.effective_user.id,
@@ -97,6 +95,13 @@ class TelegramBot:
                 execute=self._build_job_executor(update.effective_chat.id, parsed_link),
                 duplicate_suppression=group_settings["duplicate_suppression"],
             )
+            status_message = await update.message.reply_text(
+                self._build_submission_message(
+                    parsed_link.provider_label,
+                    queue_position=submission.queue_position,
+                    joined_existing=not submission.is_new_job,
+                )
+            )
             request_context = RequestContext(
                 request_id=submission.request_id,
                 chat_id=update.effective_chat.id,
@@ -107,16 +112,9 @@ class TelegramBot:
                 original_message_id=update.message.message_id,
                 status_message=status_message,
                 quiet_mode=group_settings["quiet_mode"],
+                joined_existing=not submission.is_new_job,
             )
             self.request_contexts[submission.request_id] = request_context
-            await self._safe_edit_text(
-                status_message,
-                self._build_submission_message(
-                    parsed_link.provider_label,
-                    queue_position=submission.queue_position,
-                    joined_existing=not submission.is_new_job,
-                ),
-            )
             task = asyncio.create_task(self._await_request(context, request_context, submission.job))
             self.active_request_tasks[submission.request_id] = task
             task.add_done_callback(lambda _task, rid=submission.request_id: self._cleanup_request_task(rid))
@@ -305,17 +303,38 @@ class TelegramBot:
             if not job.result_future:
                 raise DownloadError("Job result future was not initialized")
             video_info = await job.result_future
-            if not request_context.quiet_mode:
-                await self._safe_edit_text(
-                    request_context.status_message,
-                    "📤 Uploading result..."
-                )
-            await self._send_media(context, request_context, video_info)
-            cache_suffix = " (cache hit)" if video_info.from_cache else ""
-            await self._safe_edit_text(
-                request_context.status_message,
-                f"✅ Done{cache_suffix}."
-            )
+            while True:
+                if self.job_manager.is_delivery_request(job, request_context.request_id):
+                    try:
+                        await self._send_media(context, request_context, video_info)
+                    except Exception as error:
+                        handed_off = self.job_manager.mark_delivery_failed(
+                            job,
+                            request_context.request_id,
+                            error,
+                        )
+                        if handed_off:
+                            logger.warning(
+                                "Delivery handoff triggered after Telegram send failure",
+                                extra={
+                                    "request_id": request_context.request_id,
+                                    "job_id": job.job_id,
+                                    "chat_id": request_context.chat_id,
+                                },
+                            )
+                            continue
+                        raise
+                    self.job_manager.mark_delivery_completed(job)
+                    break
+                delivered = await self.job_manager.wait_for_delivery(job)
+                if delivered:
+                    break
+                if job.delivery_request_id is not None:
+                    continue
+                if job.last_delivery_error is not None:
+                    raise job.last_delivery_error
+                raise RuntimeError("Shared delivery finished without a result")
+            await self._delete_status_message(request_context.status_message)
             self.job_manager.mark_request_completed(
                 request_context.request_id,
                 cache_hit=video_info.from_cache,
@@ -332,10 +351,14 @@ class TelegramBot:
         except VideoDownloadError as error:
             error_message = self._build_error_message(error)
             logger.error("Download error for %s: %s", request_context.original_url, error)
+            if self.job_manager.is_delivery_request(job, request_context.request_id):
+                self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
             await self._safe_edit_text(request_context.status_message, error_message)
             self.job_manager.mark_request_failed(request_context.request_id, status="failed")
         except Exception as error:
             logger.exception("Unexpected error while delivering %s", request_context.original_url)
+            if self.job_manager.is_delivery_request(job, request_context.request_id):
+                self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
             await self._safe_edit_text(
                 request_context.status_message,
                 "❌ An unexpected error occurred. Please try again later."
@@ -395,14 +418,16 @@ class TelegramBot:
             if request_id not in job.requesters:
                 continue
             if job.state == "running":
-                if request_context.quiet_mode:
+                if request_context.quiet_mode or request_context.joined_existing:
                     continue
                 text = f"⬇️ {request_context.provider_label} downloading..."
+                await self._edit_status_message(request_context.status_message, text)
             elif job.state == "cancelled":
                 text = "🛑 Request cancelled."
+                await self._safe_edit_text(request_context.status_message, text)
             else:
                 text = "❌ Download failed."
-            await self._safe_edit_text(request_context.status_message, text)
+                await self._safe_edit_text(request_context.status_message, text)
 
     async def _global_error_handler(
         self, update: object, context: ContextTypes.DEFAULT_TYPE
@@ -561,7 +586,16 @@ class TelegramBot:
         return f"❌ Sorry, couldn't download the media: {str(error)}"
 
     @staticmethod
+    async def _edit_status_message(message: Message, text: str) -> None:
+        """Try to edit a transient status message without creating extra chat noise."""
+        try:
+            await message.edit_text(text)
+        except Exception:
+            logger.debug("Failed to edit transient status message", exc_info=True)
+
+    @staticmethod
     async def _safe_edit_text(message: Message, text: str) -> None:
+        """Edit status text, falling back to a new visible reply for important states."""
         try:
             await message.edit_text(text)
         except Exception:
@@ -569,6 +603,14 @@ class TelegramBot:
                 await message.reply_text(text)
             except Exception:
                 logger.debug("Failed to edit or reply with status update", exc_info=True)
+
+    @staticmethod
+    async def _delete_status_message(message: Message) -> None:
+        """Delete a transient status message after successful completion."""
+        try:
+            await message.delete()
+        except Exception:
+            logger.debug("Failed to delete transient status message", exc_info=True)
 
     @staticmethod
     def _user_label(update: Update) -> str:
