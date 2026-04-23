@@ -1,10 +1,26 @@
 """Health check utilities for Docker container monitoring."""
 import sys
 import logging
+from pathlib import Path
 
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _has_configured_accounts(accounts_file: Path) -> bool:
+    """Return whether the multi-account file exists and contains at least one account."""
+    if not accounts_file.is_file():
+        return False
+
+    try:
+        return any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in accounts_file.read_text().splitlines()
+        )
+    except Exception as error:
+        logger.error(f"Cannot read accounts file: {error}")
+        return False
 
 def check_health() -> bool:
     """
@@ -35,7 +51,10 @@ def check_health() -> bool:
             logger.error("BOT_TOKEN is not set")
             return False
 
-        if not settings.IG_USERNAME or not settings.IG_PASSWORD:
+        accounts_file = settings.BASE_DIR / "accounts.txt"
+        if not _has_configured_accounts(accounts_file) and (
+            not settings.IG_USERNAME or not settings.IG_PASSWORD
+        ):
             logger.error("Instagram credentials are not set")
             return False
 
