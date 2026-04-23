@@ -30,15 +30,16 @@ PROXY_PASSWORD=proxypass
 - Mobile proxies (good)
 - Datacenter proxies (risky)
 
-### 2. Warm Up New Accounts
+### 2. Initialize New Accounts
 
-Before using the bot, warm up the account:
+Before using the bot, initialize the account with the supported account-manager workflow:
 
 ```bash
-make warmup USERNAME=your_username
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-Then wait at least 30 minutes before first use.
+Every managed account needs a password and a non-empty `totp_secret`. Empty third fields stay unavailable and will not be used for rotation.
 
 ### 3. Initialize Accounts Properly
 
@@ -61,7 +62,6 @@ The updated bot now includes:
 
 **DO:**
 - ✅ Use residential proxy from account's country
-- ✅ Warm up accounts before first use
 - ✅ Wait 10+ seconds between downloads
 - ✅ Limit to 50-100 downloads per day
 - ✅ Take breaks (stop bot for hours)
@@ -112,6 +112,7 @@ make accounts-status
 3. **Switch to a different account**
 4. **Review your usage patterns**
 5. **Ensure proxy is working**
+6. **After cooldown, use `make accounts-reset-old HOURS=24` if you need to clear stale bans**
 
 ## Technical Improvements Made
 
@@ -130,15 +131,10 @@ make accounts-status
 # 3. Initialize account sessions
 uv run python manage_accounts.py setup
 
-# 4. Warm up account
-make warmup USERNAME=your_username
-
-# 5. Wait 30+ minutes
-
-# 6. Start bot with new anti-detection features
+# 4. Start bot with the current uv-native workflow
 make up
 
-# 7. Monitor health
+# 5. Monitor health
 make accounts-status
 ```
 
@@ -148,7 +144,6 @@ If accounts keep getting banned:
 
 - [ ] Are you using a proxy?
 - [ ] Is the proxy from the account's country?
-- [ ] Did you warm up the account?
 - [ ] Are you waiting between downloads?
 - [ ] Are you limiting daily downloads?
 - [ ] Is the User-Agent up to date?

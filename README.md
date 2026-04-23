@@ -43,14 +43,14 @@ Bot:  [Sends downloaded media with caption]
 - **Automatic Media Downloads** - Supports Instagram posts, reels, TV, stories (fallback path), and share links
 - **Photo + Album Support** - Sends single photos and mixed carousel albums to Telegram
 - **Multi-Account Rotation** - High availability with account switching
-- **Anti-Ban Protection** - Human-like behavior and warmup strategies  
+- **Anti-Ban Protection** - Account rotation and cooldown-based recovery
 - **Advanced Authentication** - Cookie management and 2FA support
 - **Health Monitoring** - Automatic account status tracking
 - **Docker Ready** - Easy deployment with Docker Compose
 - **Rate Limiting** - Smart delays to avoid Instagram limits
 - **Easy Configuration** - Environment-based setup
 - **Telegram Integration** - Seamless bot interaction
-- **Management Tools** - Account warmup and maintenance utilities
+- **Management Tools** - Account rotation and maintenance utilities
 
 ## Tech Stack
 
@@ -99,6 +99,7 @@ make up
 
 # 5. Optional multi-account setup
 # Create accounts.txt if you want rotation support, then initialize sessions
+# Each managed account needs password + non-empty totp_secret
 make accounts-setup
 ```
 
@@ -115,7 +116,7 @@ cp .env.example .env
 nano .env  # Add your credentials
 
 # 3. Optional multi-account setup
-# Create accounts.txt with username|password|totp_secret entries
+# Create accounts.txt with username|password|non-empty totp_secret entries
 uv run python manage_accounts.py setup
 
 # 4. Start the bot
@@ -154,19 +155,9 @@ make accounts-rotate
 
 # Reset banned accounts
 make accounts-reset
-```
 
-### Account Warmup (Anti-ban)
-
-```bash
-# Warm up specific account
-make warmup USERNAME=your_username
-
-# Warm up multiple accounts with delays
-make warmup-batch ACCOUNTS="user1 user2" DELAY=3600
-
-# Warm up all available accounts
-make warmup-available
+# Reset accounts banned longer than 24 hours
+make accounts-reset-old HOURS=24
 ```
 
 ### Monitoring & Maintenance
@@ -323,6 +314,8 @@ username1|password1|totp_secret1
 username2|password2|totp_secret2
 ```
 
+Every managed account needs a password and a non-empty `totp_secret`. Empty third fields stay unavailable and will not be used for rotation.
+
 Initialize sessions after creating `accounts.txt`:
 ```bash
 uv run python manage_accounts.py setup
@@ -336,7 +329,7 @@ uv run python manage_accounts.py status
 | Issue | Solution |
 |-------|----------|
 | Authentication failed | Verify `.env` credentials, then run `make accounts-setup` or `uv run python manage_accounts.py setup` |
-| Rate limit reached | `make accounts-rotate` → `make warmup-available` |
+| Rate limit reached | `make accounts-rotate` or, after cooldown, `make accounts-reset-old HOURS=24` |
 | No available accounts | `make accounts-status` → `make accounts-reset` |
 | Container won't start | Check `.env` file and `make logs` |
 | Video download fails | Verify Instagram URL format |

@@ -26,11 +26,8 @@ make accounts-rotate
 
 # Reset banned status
 make accounts-reset                              # Reset all accounts
-make accounts-reset-one USERNAME=samosirarlene   # Reset specific account
+make accounts-reset-old HOURS=24                 # Reset stale bans after cooldown
 
-# Warm up accounts
-make accounts-warmup                             # Warm up current account
-make accounts-warmup-one USERNAME=samosirarlene  # Warm up specific account
 ```
 
 ## Session and Health Commands
@@ -61,7 +58,7 @@ make setup-2fa      # Setup 2FA
 
 ```bash
 # 1. Convert provider data into accounts.txt
-# Format: username|password|totp_secret
+# Format: username|password|non-empty totp_secret
 
 echo "username|password|totp_secret" > accounts.txt
 
@@ -117,14 +114,14 @@ make accounts-rotate
 
 # Reset banned accounts (if any)
 make accounts-reset
+
+# Clear stale bans after cooldown
+make accounts-reset-old HOURS=24
 ```
 
 ### Troubleshooting
 
 ```bash
-# Account banned?
-make accounts-reset-one USERNAME=problemaccount
-
 # All accounts failing?
 make accounts-reset
 make accounts-setup
