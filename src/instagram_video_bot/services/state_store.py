@@ -63,6 +63,7 @@ class StateStore:
                     normalized_url TEXT NOT NULL,
                     status TEXT NOT NULL,
                     cache_hit INTEGER NOT NULL DEFAULT 0,
+                    joined_existing INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -72,6 +73,7 @@ class StateStore:
                     quiet_mode INTEGER NOT NULL DEFAULT 0,
                     duplicate_suppression INTEGER NOT NULL DEFAULT 1,
                     stats_enabled INTEGER NOT NULL DEFAULT 1,
+                    chaos_mode_enabled INTEGER NOT NULL DEFAULT 0,
                     chat_max_concurrent_jobs INTEGER,
                     user_max_active_jobs INTEGER
                 );
@@ -107,6 +109,18 @@ class StateStore:
                 self._conn.execute(
                     "ALTER TABLE group_settings ADD COLUMN user_max_active_jobs INTEGER"
                 )
+            if "chaos_mode_enabled" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE group_settings ADD COLUMN chaos_mode_enabled INTEGER NOT NULL DEFAULT 0"
+                )
+            request_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(request_events)").fetchall()
+            }
+            if "joined_existing" not in request_columns:
+                self._conn.execute(
+                    "ALTER TABLE request_events ADD COLUMN joined_existing INTEGER NOT NULL DEFAULT 0"
+                )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
         with self._lock, self._conn:
@@ -125,7 +139,7 @@ class StateStore:
             )
             row = self._conn.execute(
                 """
-                SELECT quiet_mode, duplicate_suppression, stats_enabled,
+                SELECT quiet_mode, duplicate_suppression, stats_enabled, chaos_mode_enabled,
                        chat_max_concurrent_jobs, user_max_active_jobs
                 FROM group_settings
                 WHERE chat_id = ?
@@ -137,6 +151,7 @@ class StateStore:
             "quiet_mode": bool(row["quiet_mode"]),
             "duplicate_suppression": bool(row["duplicate_suppression"]),
             "stats_enabled": bool(row["stats_enabled"]),
+            "chaos_mode_enabled": bool(row["chaos_mode_enabled"]),
             "chat_max_concurrent_jobs": int(row["chat_max_concurrent_jobs"])
             if row["chat_max_concurrent_jobs"] is not None
             else settings.CHAT_MAX_CONCURRENT_JOBS,
@@ -151,6 +166,7 @@ class StateStore:
             "quiet_mode": "quiet_mode",
             "duplicate_suppression": "duplicate_suppression",
             "stats_enabled": "stats_enabled",
+            "chaos_mode_enabled": "chaos_mode_enabled",
             "chat_max_concurrent_jobs": "chat_max_concurrent_jobs",
             "user_max_active_jobs": "user_max_active_jobs",
         }
@@ -161,7 +177,7 @@ class StateStore:
             if not column:
                 continue
             assignments.append(f"{column} = ?")
-            if key in {"quiet_mode", "duplicate_suppression", "stats_enabled"}:
+            if key in {"quiet_mode", "duplicate_suppression", "stats_enabled", "chaos_mode_enabled"}:
                 values.append(1 if value else 0)
             else:
                 values.append(value)
@@ -222,16 +238,29 @@ class StateStore:
         provider: str,
         normalized_url: str,
         status: str,
+        joined_existing: bool = False,
     ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO request_events
-                    (request_id, job_id, chat_id, user_id, user_label, provider, normalized_url, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (request_id, job_id, chat_id, user_id, user_label, provider, normalized_url, status, joined_existing, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (request_id, job_id, chat_id, user_id, user_label, provider, normalized_url, status, now, now),
+                (
+                    request_id,
+                    job_id,
+                    chat_id,
+                    user_id,
+                    user_label,
+                    provider,
+                    normalized_url,
+                    status,
+                    1 if joined_existing else 0,
+                    now,
+                    now,
+                ),
             )
 
     def update_request_status(self, request_id: str, status: str, cache_hit: bool = False) -> None:
@@ -373,10 +402,20 @@ class StateStore:
                 """,
                 (chat_id,),
             ).fetchall()
+            cache_hits = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM request_events WHERE chat_id = ? AND cache_hit = 1",
+                (chat_id,),
+            ).fetchone()["count"]
+            duplicate_joins = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM request_events WHERE chat_id = ? AND joined_existing = 1",
+                (chat_id,),
+            ).fetchone()["count"]
         return {
             "completed": int(totals["completed"] or 0),
             "failed": int(totals["failed"] or 0),
             "cancelled": int(totals["cancelled"] or 0),
+            "cache_hits": int(cache_hits),
+            "duplicate_joins": int(duplicate_joins),
             "top_users": [(row["user_label"], row["count"]) for row in top_users],
             "top_providers": [(row["provider"], row["count"]) for row in top_providers],
         }
