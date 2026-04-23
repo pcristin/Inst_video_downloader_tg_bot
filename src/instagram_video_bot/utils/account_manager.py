@@ -290,12 +290,13 @@ class AccountManager:
         with self._lock:
             threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
             now = datetime.now()
+            previous_failures = account.consecutive_failures
 
             account.consecutive_failures += 1
             account.last_failure_reason = reason
             account.last_failure_at = now
 
-            threshold_reached = account.consecutive_failures >= threshold
+            threshold_reached = previous_failures < threshold <= account.consecutive_failures
             if threshold_reached:
                 account.is_banned = True
                 account.ban_reason = f"sequential_failures:{reason}"
@@ -442,41 +443,43 @@ class AccountManager:
     
     def reset_banned_accounts(self) -> None:
         """Reset banned status for all accounts."""
-        reset_count = 0
-        for account in self.accounts:
-            if account.is_banned:
-                account.is_banned = False
-                account.ban_reason = None
-                account.banned_at = None
-                account.consecutive_failures = 0
-                account.last_failure_reason = None
-                account.last_failure_at = None
-                reset_count += 1
-        
-        self._save_state()
-        logger.info(f"Reset {reset_count} banned accounts")
+        with self._lock:
+            reset_count = 0
+            for account in self.accounts:
+                if account.is_banned:
+                    account.is_banned = False
+                    account.ban_reason = None
+                    account.banned_at = None
+                    account.consecutive_failures = 0
+                    account.last_failure_reason = None
+                    account.last_failure_at = None
+                    reset_count += 1
+
+            self._save_state()
+            logger.info(f"Reset {reset_count} banned accounts")
     
     def reset_old_banned_accounts(self, hours: int = 24) -> None:
         """Reset accounts that have been banned for more than the specified hours."""
-        reset_count = 0
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        
-        for account in self.accounts:
-            if account.is_banned and account.banned_at and account.banned_at < cutoff_time:
-                logger.info(f"Resetting account {account.username} (banned {hours}+ hours ago for: {account.ban_reason})")
-                account.is_banned = False
-                account.ban_reason = None
-                account.banned_at = None
-                account.consecutive_failures = 0
-                account.last_failure_reason = None
-                account.last_failure_at = None
-                reset_count += 1
-        
-        if reset_count > 0:
-            self._save_state()
-            logger.info(f"Reset {reset_count} accounts that were banned for more than {hours} hours")
-        else:
-            logger.info(f"No accounts to reset (banned for more than {hours} hours)")
+        with self._lock:
+            reset_count = 0
+            cutoff_time = datetime.now() - timedelta(hours=hours)
+
+            for account in self.accounts:
+                if account.is_banned and account.banned_at and account.banned_at < cutoff_time:
+                    logger.info(f"Resetting account {account.username} (banned {hours}+ hours ago for: {account.ban_reason})")
+                    account.is_banned = False
+                    account.ban_reason = None
+                    account.banned_at = None
+                    account.consecutive_failures = 0
+                    account.last_failure_reason = None
+                    account.last_failure_at = None
+                    reset_count += 1
+
+            if reset_count > 0:
+                self._save_state()
+                logger.info(f"Reset {reset_count} accounts that were banned for more than {hours} hours")
+            else:
+                logger.info(f"No accounts to reset (banned for more than {hours} hours)")
     
     def get_status(self) -> Dict[str, Any]:
         """Get status of all accounts."""
