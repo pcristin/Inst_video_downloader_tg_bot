@@ -19,7 +19,7 @@ A professional Telegram bot that automatically downloads Instagram videos and re
 - [Installation](#installation)
 - [Usage](#usage)
 - [Tests](#tests)
-- [CI/CD](#cicd)
+- [CI](#ci)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -222,53 +222,54 @@ def test_video_downloader_initialization():
     assert len(downloader.user_agents) > 0
 ```
 
-## CI/CD
+## CI
 
 ### GitHub Actions Workflow
 
-Our CI/CD pipeline includes:
+The repository now includes a GitHub Actions CI workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-1. **Code Quality Checks**
-   - Black code formatting
-   - isort import sorting  
-   - Pylint static analysis
-   - Type checking with mypy
+Current CI checks:
 
-2. **Testing**
-   - Unit tests with pytest
-   - Integration tests
-   - Coverage reporting
+1. **Dependency Sync**
+   - Installs project and development dependencies with `uv sync --frozen --group dev`
 
-3. **Security**
-   - Dependency vulnerability scanning
-   - Docker image security scanning
+2. **Tests**
+   - Runs the stable test suite with `uv run pytest -q tests`
 
-4. **Deployment**
-   - Automated Docker builds
-   - Multi-platform support (amd64, arm64)
-   - Release automation
+3. **Docker Verification**
+   - Builds the Docker image from the existing `Dockerfile`
 
 ### Workflow Configuration
 
 ```yaml
 # .github/workflows/ci.yml
-name: CI/CD Pipeline
-on: [push, pull_request]
+name: CI
+on:
+  push:
+  pull_request:
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Install uv
         uses: astral-sh/setup-uv@v6
-      - name: Run tests
+      - name: Sync dependencies
         run: |
-          uv sync
-          uv run pytest -q
+          uv sync --frozen --group dev
+      - name: Run tests
+        run: uv run pytest -q tests
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t inst-video-downloader-tg-bot:ci .
 ```
 
 ## Configuration
