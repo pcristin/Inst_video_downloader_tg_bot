@@ -41,21 +41,14 @@ uv sync
 
 # Optional: create accounts.txt for multi-account rotation
 # Format: username|password|totp_secret
+# Every managed account needs a password and non-empty totp_secret
 
 # Initialize account sessions
 uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-### 3. Warm Up the Account (CRITICAL)
-
-```bash
-# Warm up through the account manager workflow
-make warmup USERNAME=denise.toledo1166
-
-# WAIT AT LEAST 30 MINUTES after warmup!
-```
-
-### 4. Start the Bot
+### 3. Start the Bot
 
 ```bash
 # Build and start with Docker
@@ -66,7 +59,7 @@ make up
 make logs
 ```
 
-### 5. Monitor Account Health
+### 4. Monitor Account Health
 
 ```bash
 # Check manually anytime
@@ -111,6 +104,7 @@ Night: Bot stopped
 2. If banned, switch to new account:
    ```bash
    # Update accounts.txt or .env credentials, then re-initialize sessions
+   # Use only accounts with password + non-empty totp_secret
    uv run python manage_accounts.py setup
    make restart
    ```
@@ -119,7 +113,6 @@ Night: Bot stopped
 
 Check this list:
 - [ ] Using USA proxy? (CRITICAL)
-- [ ] Warmed up account before use?
 - [ ] Waiting between downloads?
 - [ ] Taking regular breaks?
 - [ ] Not exceeding daily limits?
@@ -137,7 +130,6 @@ Should return USA IP address.
 
 **✅ DO:**
 - Use residential proxy from account's country
-- Warm up accounts for 30+ minutes
 - Take regular breaks
 - Monitor account health daily
 - Have backup accounts ready
@@ -163,9 +155,8 @@ If account gets banned:
 3. **Switch to backup account**:
    ```bash
    # Update accounts.txt or .env credentials
+   # Use only accounts with password + non-empty totp_secret
    uv run python manage_accounts.py setup
-   make warmup USERNAME=backup_username
-   # Wait 30 minutes
    make up
    ```
 

@@ -57,9 +57,9 @@ username3|password3|your_totp_secret
 ```
 
 Notes:
-- Keep only the login credentials and optional TOTP secret in `accounts.txt`.
+- Keep only the login credentials and a non-empty TOTP secret in `accounts.txt`.
 - Do not rely on legacy exported cookie artifacts or `accounts_preauth.txt` as the primary setup path.
-- If a specific account does not use 2FA, leave the third field empty: `username|password|`.
+- Every managed account needs a password and a non-empty TOTP secret. If you cannot provide one, leave that account out of `accounts.txt` until it is ready to be used.
 
 ### 3. Initialize Account Sessions
 
@@ -162,9 +162,9 @@ If you get authentication errors during setup or rotation:
 make accounts-rotate
 ```
 
-### Reset Banned Account
+### Reset Old Bans
 ```bash
-make accounts-reset-one USERNAME=ms.stevenbaker682510
+make accounts-reset-old HOURS=24
 ```
 
 ### Check Specific Account
