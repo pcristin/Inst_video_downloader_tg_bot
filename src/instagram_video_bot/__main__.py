@@ -65,11 +65,12 @@ def main() -> None:
             logger.info(f"Loaded {status['total_accounts']} accounts ({status['available_accounts']} available)")
 
             if status["available_accounts"] > 0:
-                if manager.rotate_account():
-                    if manager.current_account:
-                        logger.info(f"Using account: {manager.current_account.username}")
+                initial_account = manager.get_next_account()
+                if initial_account:
+                    manager.current_account = initial_account
+                    logger.info(f"Selected initial account: {manager.current_account.username}")
                 else:
-                    logger.error("Failed to setup any account")
+                    logger.error("Failed to select an initial account")
                     logger.info("Account status:")
                     logger.info(manager.get_detailed_status())
                     sys.exit(1)
