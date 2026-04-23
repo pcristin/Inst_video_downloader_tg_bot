@@ -2,6 +2,7 @@
 import json
 import logging
 import random
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -71,6 +72,8 @@ class AccountManager:
         self.current_account: Optional[Account] = None
         self.sessions_dir = Path('sessions')
         self.sessions_dir.mkdir(exist_ok=True)
+        self._leased_accounts: set[str] = set()
+        self._lock = threading.Lock()
         
         # Get available proxies
         self.proxies = settings.get_proxy_list()
@@ -206,7 +209,10 @@ class AccountManager:
     
     def get_next_account(self) -> Optional[Account]:
         """Get the next available account for rotation."""
-        available = self.get_available_accounts()
+        available = [
+            acc for acc in self.get_available_accounts()
+            if acc.username not in self._leased_accounts
+        ]
         
         if not available:
             logger.error("No available accounts for rotation")
@@ -225,6 +231,24 @@ class AccountManager:
                 return random.choice(candidates)
         
         return available[0]
+
+    def acquire_account(self) -> Optional[Account]:
+        """Lease an available account for one concurrent job."""
+        with self._lock:
+            account = self.get_next_account()
+            if not account:
+                return None
+            self._leased_accounts.add(account.username)
+            account.last_used = datetime.now()
+            self._save_state()
+            return account
+
+    def release_account(self, account: Optional[Account]) -> None:
+        """Release a previously leased account."""
+        if not account:
+            return
+        with self._lock:
+            self._leased_accounts.discard(account.username)
     
     def setup_account(self, account: Account) -> bool:
         """Setup an account for use with instagrapi."""
@@ -321,6 +345,7 @@ class AccountManager:
         """Mark an account as banned and try to rotate."""
         logger.warning(f"Marking account as banned: {account.username}")
         account.is_banned = True
+        self._leased_accounts.discard(account.username)
         self._save_state()
         
         # Try to rotate to next account

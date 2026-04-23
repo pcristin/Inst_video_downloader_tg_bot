@@ -2,75 +2,82 @@
 import asyncio
 import logging
 import random
+import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
+from .download_models import (
+    AuthenticationError,
+    DownloadError,
+    MediaItem,
+    VideoInfo,
+    VideoDownloadError,
+)
 from .instagram_client import InstagramAuthError, InstagramClient
-from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
-from .twitter_downloader import TwitterDownloadError, TwitterDownloader
+from .instagram_fast_extractor import InstagramFastExtractor
+from .provider_adapters import (
+    InstagramProviderAdapter,
+    TwitterProviderAdapter,
+    YouTubeShortsProviderAdapter,
+)
+from .twitter_downloader import TwitterDownloader
+from .youtube_downloader import YouTubeShortsDownloader
 from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class MediaItem:
-    """Represents one downloaded media file."""
-
-    file_path: Path
-    media_type: Literal["video", "photo"]
-    caption: Optional[str] = None
-    duration: Optional[float] = None
-
-
-@dataclass
-class VideoInfo:
-    """Video information container."""
-
-    file_path: Path
-    title: str
-    duration: Optional[float] = None
-    description: Optional[str] = None
-    media_items: List[MediaItem] = field(default_factory=list)
-    primary_media_type: Literal["video", "photo"] = "video"
-
-
-class VideoDownloadError(Exception):
-    """Base exception for video download errors."""
-
-    pass
-
-
-class AuthenticationError(VideoDownloadError):
-    """Raised when authentication fails."""
-
-    pass
-
-
-class DownloadError(VideoDownloadError):
-    """Raised when video download fails."""
-
-    pass
-
-
 class VideoDownloader:
     """Service for downloading Instagram videos using instagrapi."""
 
+    _throttle_lock = threading.Lock()
+    _last_instagram_download_by_key: dict[str, float] = {}
+
     def __init__(self):
         """Initialize the video downloader."""
-        self.client: Optional[InstagramClient] = None
-        self.last_download_time = 0
         self.min_delay_between_downloads = 10
         self.random_delay_range = (1.0, 3.0)
-        self.fast_extractor = InstagramFastExtractor(
+        fast_extractor = InstagramFastExtractor(
             timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
             timeout_read=settings.IG_FAST_TIMEOUT_READ,
         )
-        self.twitter_downloader = TwitterDownloader(proxy=settings.get_single_proxy())
+        self.instagram_adapter = InstagramProviderAdapter(fast_extractor)
+        self.twitter_adapter = TwitterProviderAdapter(
+            TwitterDownloader(proxy=settings.get_single_proxy())
+        )
+        self.youtube_adapter = YouTubeShortsProviderAdapter(
+            YouTubeShortsDownloader()
+        )
+
+    @property
+    def fast_extractor(self):
+        """Compatibility accessor for tests and callers."""
+        return self.instagram_adapter.fast_extractor
+
+    @fast_extractor.setter
+    def fast_extractor(self, value):
+        self.instagram_adapter.fast_extractor = value
+
+    @property
+    def twitter_downloader(self):
+        """Compatibility accessor for tests and callers."""
+        return self.twitter_adapter.downloader
+
+    @twitter_downloader.setter
+    def twitter_downloader(self, value):
+        self.twitter_adapter.downloader = value
+
+    @property
+    def youtube_downloader(self):
+        """Compatibility accessor for tests and callers."""
+        return self.youtube_adapter.downloader
+
+    @youtube_downloader.setter
+    def youtube_downloader(self, value):
+        self.youtube_adapter.downloader = value
 
     @staticmethod
     def _redact_proxy(proxy: str) -> str:
@@ -84,63 +91,55 @@ class VideoDownloader:
                 return f"{scheme}://***@{host_part}"
         _, host_part = proxy.split("@", 1)
         return f"***@{host_part}"
-        
-    def _get_client(self) -> InstagramClient:
-        """Get or create Instagram client."""
-        if self.client is None:
-            # Check if using multi-account mode
-            manager = get_account_manager()
-            if manager and manager.current_account:
-                account = manager.current_account
-                self.client = InstagramClient(
-                    username=account.username,
-                    password=account.password,
-                    session_file=account.session_file,
-                    proxy=account.proxy,
-                    totp_secret=account.totp_secret
-                )
-            else:
-                # Single account mode
-                self.client = InstagramClient(
-                    username=settings.IG_USERNAME,
-                    password=settings.IG_PASSWORD,
-                    totp_secret=settings.TOTP_SECRET
-                )
-            
-            if not self.client.login():
-                raise AuthenticationError("Failed to login to Instagram")
-                
-        return self.client
+
+    def _build_single_account_client(self):
+        """Compatibility wrapper for single-account client creation."""
+        client = InstagramClient(
+            username=settings.IG_USERNAME,
+            password=settings.IG_PASSWORD,
+            totp_secret=settings.TOTP_SECRET,
+        )
+        if not client.login():
+            raise AuthenticationError("Failed to login to Instagram")
+        return client
+
+    def _build_leased_client(self, account):
+        """Compatibility wrapper for leased-account client creation."""
+        client = InstagramClient(
+            username=account.username,
+            password=account.password,
+            session_file=account.session_file,
+            proxy=account.proxy,
+            totp_secret=account.totp_secret,
+        )
+        if not client.login():
+            raise AuthenticationError("Failed to login to Instagram")
+        return client
 
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
         """Download media from supported providers."""
         if self._is_twitter_url(url):
-            twitter_info = await self._download_twitter_media(url, output_dir)
-            self.last_download_time = time.time()
-            return twitter_info
+            return await self._download_twitter_media(url, output_dir)
         if self._is_twitter_domain_url(url):
             raise DownloadError("Unsupported Twitter/X URL")
+        if self._is_youtube_shorts_url(url):
+            return await self._download_youtube_media(url, output_dir)
+        if self._is_youtube_domain_url(url):
+            raise DownloadError("Unsupported YouTube URL")
 
-        # Rate limiting
-        current_time = time.time()
-        time_since_last = current_time - self.last_download_time
+        return await self._download_instagram_media(url, output_dir)
 
-        if time_since_last < self.min_delay_between_downloads:
-            delay = self.min_delay_between_downloads - time_since_last
-            logger.info(f"Rate limiting: waiting {delay:.1f} seconds")
-            await asyncio.sleep(delay)
-
-        if self.random_delay_range[1] > 0:
-            jitter = random.uniform(*self.random_delay_range)
-            logger.debug(f"Adding jitter delay: {jitter:.1f} seconds")
-            await asyncio.sleep(jitter)
+    async def _download_instagram_media(self, url: str, output_dir: Path) -> VideoInfo:
+        """Download Instagram media with fast-path and leased fallback."""
+        lease_key = "instagram-fast"
+        manager = get_account_manager()
 
         fast_error: Optional[Exception] = None
-        is_story_url = self._is_story_url(url)
+        is_story_url = self.instagram_adapter.is_story_url(url)
         if settings.IG_FAST_METHOD_ENABLED and not is_story_url:
             try:
-                fast_result = self._download_with_fast_method(url, output_dir)
-                self.last_download_time = time.time()
+                await self._apply_instagram_throttle(lease_key)
+                fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
                 return fast_result
             except Exception as error:
                 fast_error = error
@@ -152,79 +151,37 @@ class VideoDownloader:
                     },
                 )
 
+        if manager:
+            return await self._download_with_account_leases(url, output_dir, fast_error)
+        return await self._download_with_single_account(url, output_dir, fast_error)
+
+    async def _download_with_account_leases(
+        self, url: str, output_dir: Path, fast_error: Optional[Exception]
+    ) -> VideoInfo:
+        """Download using a leased Instagram account for this job."""
+        manager = get_account_manager()
+        if not manager:
+            raise DownloadError("No Instagram accounts available")
+
         last_error: Optional[Exception] = None
+        tried_accounts: set[str] = set()
         for attempt in range(2):
-            rotated = attempt == 1
+            account = manager.acquire_account()
+            if not account:
+                break
+            if account.username in tried_accounts:
+                manager.release_account(account)
+                break
+            tried_accounts.add(account.username)
             try:
-                client = self._get_client()
-                account_name = client.username
-                proxy_value = client.proxy or settings.get_single_proxy() or "none"
-                redacted_proxy = self._redact_proxy(proxy_value)
-                logger.info(
-                    "Starting download attempt",
-                    extra={
-                        "username": account_name,
-                        "proxy": redacted_proxy,
-                        "attempt": attempt + 1,
-                        "rotated": rotated,
-                    },
+                await self._apply_instagram_throttle(account.username)
+                client = self._build_leased_client(account)
+                return self.instagram_adapter.download_with_instagram_client(
+                    client=client,
+                    url=url,
+                    output_dir=output_dir,
+                    redact_proxy=self._redact_proxy,
                 )
-
-                # Download first; metadata is best-effort.
-                file_path = self._download_with_legacy_client(client, url, output_dir)
-                if not file_path:
-                    raise DownloadError("Failed to download video")
-
-                media_info = {"title": "", "duration": 0}
-                try:
-                    info = client.get_media_info(url)
-                    if info:
-                        media_info = info
-                    else:
-                        logger.warning(
-                            "Metadata unavailable after download",
-                            extra={
-                                "username": account_name,
-                                "failure_class": "metadata_unavailable",
-                            },
-                        )
-                except InstagramAuthError as auth_error:
-                    # Download already succeeded; keep response path healthy.
-                    logger.warning(
-                        "Metadata failed with auth error after download",
-                        extra={
-                            "username": account_name,
-                            "failure_class": "metadata_unavailable",
-                            "error": str(auth_error),
-                        },
-                    )
-                except Exception as metadata_error:
-                    logger.warning(
-                        "Metadata lookup failed after download",
-                        extra={
-                            "username": account_name,
-                            "failure_class": "metadata_unavailable",
-                            "error": str(metadata_error),
-                        },
-                    )
-
-                media_type = self._infer_media_type(file_path)
-                media_item = MediaItem(
-                    file_path=file_path,
-                    media_type=media_type,
-                    caption=media_info.get("title") or None,
-                    duration=media_info.get("duration"),
-                )
-                self.last_download_time = time.time()
-                return VideoInfo(
-                    file_path=file_path,
-                    title=media_info.get("title", ""),
-                    duration=media_info.get("duration"),
-                    description=media_info.get("title", ""),
-                    media_items=[media_item],
-                    primary_media_type=media_type,
-                )
-
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
                 logger.warning(
@@ -232,136 +189,59 @@ class VideoDownloader:
                     extra={
                         "failure_class": "auth_challenge",
                         "attempt": attempt + 1,
-                        "rotated": rotated,
+                        "username": account.username,
                         "error": str(auth_error),
                     },
                 )
-                if attempt == 0:
-                    await self._handle_auth_error()
-                    continue
-                raise DownloadError("Authentication failed after account rotation retry") from auth_error
-            except DownloadError as download_error:
-                last_error = download_error
-                logger.error(
-                    "Download failed",
-                    extra={"failure_class": "download_failed", "error": str(download_error)},
-                )
-                raise
-            except Exception as e:
-                last_error = e
-                logger.error(f"Download failed: {e}")
-                raise DownloadError(f"Download failed: {str(e)}") from e
+                manager.mark_account_banned(account)
+            except Exception as error:
+                if isinstance(error, DownloadError):
+                    raise
+                last_error = error
+                raise DownloadError(f"Download failed: {str(error)}") from error
+            finally:
+                manager.release_account(account)
+        if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
+            raise DownloadError("Authentication failed after account rotation retry") from last_error
+        self._raise_final_download_error(last_error, fast_error)
 
-        if last_error:
-            if fast_error:
-                raise DownloadError(
-                    f"Download failed: {str(last_error)} (fast_path_error={str(fast_error)})"
+    async def _download_with_single_account(
+        self, url: str, output_dir: Path, fast_error: Optional[Exception]
+    ) -> VideoInfo:
+        """Download with the configured single Instagram account."""
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                await self._apply_instagram_throttle("__single__")
+                client = self._build_single_account_client()
+                return self.instagram_adapter.download_with_instagram_client(
+                    client=client,
+                    url=url,
+                    output_dir=output_dir,
+                    redact_proxy=self._redact_proxy,
                 )
-            raise DownloadError(f"Download failed: {str(last_error)}")
-        if fast_error:
-            raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
-        raise DownloadError("Download failed")
+            except (InstagramAuthError, AuthenticationError) as auth_error:
+                last_error = auth_error
+                logger.warning(
+                    "Authentication-like failure during single-account download",
+                    extra={"attempt": attempt + 1, "error": str(auth_error)},
+                )
+            except Exception as error:
+                if isinstance(error, DownloadError):
+                    raise
+                last_error = error
+                raise DownloadError(f"Download failed: {str(error)}") from error
+        if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
+            raise DownloadError("Authentication failed after account rotation retry") from last_error
+        self._raise_final_download_error(last_error, fast_error)
 
     async def _download_twitter_media(self, url: str, output_dir: Path) -> VideoInfo:
         """Download Twitter/X media using yt-dlp."""
-        try:
-            result = await self.twitter_downloader.download_media(url, output_dir)
-        except TwitterDownloadError as error:
-            raise DownloadError(str(error)) from error
+        return await self.twitter_adapter.download(url, output_dir)
 
-        if not result.media_items:
-            raise DownloadError("Twitter/X download returned no media items")
-
-        media_items = [
-            MediaItem(
-                file_path=item.file_path,
-                media_type=item.media_type,
-                caption=result.title or None,
-            )
-            for item in result.media_items
-        ]
-        primary_item = media_items[0]
-        return VideoInfo(
-            file_path=primary_item.file_path,
-            title=result.title or "",
-            description=result.title or "",
-            media_items=media_items,
-            primary_media_type=primary_item.media_type,
-        )
-
-    async def _handle_auth_error(self) -> None:
-        """Handle authentication errors by trying account rotation."""
-        self.client = None  # Reset client
-
-        manager = get_account_manager()
-        if manager and manager.current_account:
-            current_username = manager.current_account.username
-            logger.warning(
-                "Account marked for rotation due to auth failure",
-                extra={"username": current_username, "failure_class": "auth_challenge"},
-            )
-            manager.mark_account_banned(manager.current_account)
-
-            # mark_account_banned already attempts rotation internally.
-            if manager.current_account and manager.current_account.username != current_username:
-                logger.info(
-                    "Successfully rotated to a new account",
-                    extra={"username": manager.current_account.username, "rotated": True},
-                )
-            else:
-                logger.error("No accounts available for rotation")
-        else:
-            logger.warning("No account manager available for rotation")
-
-    def _download_with_fast_method(self, url: str, output_dir: Path) -> VideoInfo:
-        """Attempt the new fast extractor method and map result into VideoInfo."""
-        if not self.fast_extractor:
-            raise InstagramFastExtractorError("Fast extractor is not configured")
-
-        self.fast_extractor.proxy = self._get_fast_proxy()
-        result = self.fast_extractor.extract_and_download(url, output_dir)
-        if not result.media_items:
-            raise InstagramFastExtractorError("Fast extractor returned no media")
-
-        media_items = [
-            MediaItem(
-                file_path=item.file_path,
-                media_type=item.media_type,
-                caption=result.caption or None,
-                duration=item.duration,
-            )
-            for item in result.media_items
-        ]
-        primary_item = media_items[0]
-        return VideoInfo(
-            file_path=primary_item.file_path,
-            title=result.caption or "",
-            duration=primary_item.duration,
-            description=result.caption or "",
-            media_items=media_items,
-            primary_media_type=primary_item.media_type,
-        )
-
-    def _download_with_legacy_client(
-        self, client: InstagramClient, url: str, output_dir: Path
-    ) -> Optional[Path]:
-        """Download media using existing authenticated client path."""
-        if hasattr(client, "download_media"):
-            return client.download_media(url, output_dir)
-        return client.download_video(url, output_dir)
-
-    @staticmethod
-    def _infer_media_type(file_path: Path) -> Literal["video", "photo"]:
-        """Infer media type from extension for legacy downloader responses."""
-        ext = file_path.suffix.lower()
-        if ext in {".mp4", ".mov", ".mkv", ".webm"}:
-            return "video"
-        return "photo"
-
-    @staticmethod
-    def _is_story_url(url: str) -> bool:
-        """Check if URL targets Instagram stories."""
-        return "/stories/" in url.lower()
+    async def _download_youtube_media(self, url: str, output_dir: Path) -> VideoInfo:
+        """Download YouTube Shorts media using yt-dlp."""
+        return await self.youtube_adapter.download(url, output_dir)
 
     @staticmethod
     def _is_twitter_url(url: str) -> bool:
@@ -385,10 +265,50 @@ class VideoDownloader:
             "www.x.com",
         }
 
+    async def _apply_instagram_throttle(self, key: str) -> None:
+        """Apply a conservative per-key delay before Instagram work."""
+        sleep_for = 0.0
+        with self._throttle_lock:
+            last_download = self._last_instagram_download_by_key.get(key, 0.0)
+            current_time = time.time()
+            time_since_last = current_time - last_download
+            if time_since_last < self.min_delay_between_downloads:
+                sleep_for = self.min_delay_between_downloads - time_since_last
+            self._last_instagram_download_by_key[key] = current_time + sleep_for
+
+        if sleep_for > 0:
+            logger.info("Instagram throttle delay %.1fs for key %s", sleep_for, key)
+            await asyncio.sleep(sleep_for)
+
+        if self.random_delay_range[1] > 0:
+            jitter = random.uniform(*self.random_delay_range)
+            logger.debug("Adding Instagram jitter delay: %.1fs", jitter)
+            await asyncio.sleep(jitter)
+
     @staticmethod
-    def _get_fast_proxy() -> Optional[str]:
-        """Resolve proxy for fast extractor requests."""
-        manager = get_account_manager()
-        if manager and manager.current_account and manager.current_account.proxy:
-            return manager.current_account.proxy
-        return settings.get_single_proxy()
+    def _raise_final_download_error(
+        last_error: Optional[Exception], fast_error: Optional[Exception]
+    ) -> None:
+        if last_error:
+            if fast_error:
+                raise DownloadError(
+                    f"Download failed: {str(last_error)} (fast_path_error={str(fast_error)})"
+                )
+            raise DownloadError(f"Download failed: {str(last_error)}")
+        if fast_error:
+            raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
+        raise DownloadError("Download failed")
+
+    @staticmethod
+    def _is_youtube_shorts_url(url: str) -> bool:
+        """Check if URL targets YouTube Shorts routes."""
+        return YouTubeShortsDownloader.is_supported_url(url)
+
+    @staticmethod
+    def _is_youtube_domain_url(url: str) -> bool:
+        """Check if URL points to YouTube regardless of path."""
+        try:
+            parsed = urlparse(url.strip())
+        except Exception:
+            return False
+        return (parsed.hostname or "").lower() in {"youtube.com", "www.youtube.com", "m.youtube.com"}

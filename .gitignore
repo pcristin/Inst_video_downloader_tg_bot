@@ -45,6 +45,8 @@ account.txt
 accounts.txt
 accounts_state.json
 cookies/
+bot_state.sqlite3
+bot_state.sqlite3-journal
 
 # Chrome WebDriver
 .wdm/

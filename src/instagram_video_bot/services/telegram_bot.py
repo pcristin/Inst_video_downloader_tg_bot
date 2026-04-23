@@ -1,134 +1,407 @@
-"""Telegram bot service for handling Instagram video downloads."""
+"""Telegram bot service for handling group-friendly media downloads."""
+
+from __future__ import annotations
+
+import asyncio
 from contextlib import ExitStack
-import re
+from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import List
-from typing import Optional
+import time
+from typing import List, Optional
 
 from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
 from telegram.error import NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
-    filters
+    filters,
 )
 
 from ..config.settings import settings
-from .video_downloader import VideoDownloadError, VideoDownloader, VideoInfo
+from .job_manager import JobManager, SharedJob
+from .request_parser import ParsedRequestLink, RequestParser
+from .state_store import CachedMediaEntry, StateStore
+from .video_downloader import DownloadError, MediaItem, VideoDownloadError, VideoDownloader, VideoInfo
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RequestContext:
+    """Telegram state for one user request tied to a shared job."""
+
+    request_id: str
+    chat_id: int
+    user_id: int
+    provider_label: str
+    normalized_url: str
+    original_url: str
+    original_message_id: int
+    status_message: Message
+    quiet_mode: bool
+
 
 class TelegramBot:
     """Telegram bot for downloading media links."""
 
-    # Supported URL pattern (Instagram routes + Twitter/X status links)
-    INSTAGRAM_VIDEO_PATTERN = re.compile(
-        r"("
-        r"https?://(?:www\.|d\.|g\.)?(?:instagram\.com|ddinstagram\.com)/[^ ]+"
-        r"|https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/\d+(?:[/?#][^\s]*)?"
-        r")"
-    )
+    INSTAGRAM_VIDEO_PATTERN = RequestParser.URL_PATTERN
 
-    def __init__(self):
-        """Initialize the Telegram bot with required services."""
-        self.video_downloader = VideoDownloader()
+    def __init__(self, state_store: StateStore | None = None):
         self.application: Optional[Application] = None
+        self.state_store = state_store or StateStore()
+        self.job_manager = JobManager(self.state_store)
+        self.job_manager.add_state_listener(self._on_job_state_change)
+        self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
+        self.request_contexts: dict[str, RequestContext] = {}
+        self.started_at = time.time()
+        self._purge_expired_cache()
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle incoming messages and process supported media links.
-        
-        Args:
-            update: Telegram update object
-            context: Telegram context object
-        """
-        if not update.message or not update.message.text or not update.effective_chat:
+        """Handle incoming messages by queueing supported provider links."""
+        if not update.message or not update.message.text or not update.effective_chat or not update.effective_user:
             return
 
+        self._purge_expired_cache()
         message_text = update.message.text
-        match = self.INSTAGRAM_VIDEO_PATTERN.search(message_text)
-
-        if not match:
+        extracted_links = RequestParser.extract_supported_links(
+            message_text,
+            limit=settings.MAX_LINKS_PER_MESSAGE,
+        )
+        if not extracted_links:
             return
 
-        url = match.group(1)
-        logger.info(f"Processing media URL: {url}")
-
-        status_message: Optional[Message] = None
-        downloaded_files: List[Path] = []
-        try:
-            # Inform user that download is in progress
-            status_message = await update.message.reply_text(
-                "🔄 Downloading media... Please wait."
+        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        raw_url_count = len(RequestParser.URL_PATTERN.findall(message_text))
+        if raw_url_count > settings.MAX_LINKS_PER_MESSAGE:
+            await update.message.reply_text(
+                f"Only the first {settings.MAX_LINKS_PER_MESSAGE} supported links will be queued."
             )
 
-            # Download the media
-            video_info = await self.video_downloader.download_video(url=url, output_dir=settings.TEMP_DIR)
-            media_items = video_info.media_items
-            if not media_items:
-                raise VideoDownloadError("No media items were downloaded")
+        for parsed_link in extracted_links:
+            status_message = await update.message.reply_text(
+                self._build_submission_message(parsed_link.provider_label, queue_position=1)
+            )
+            submission = self.job_manager.submit(
+                chat_id=update.effective_chat.id,
+                user_id=update.effective_user.id,
+                user_label=self._user_label(update),
+                provider=parsed_link.provider,
+                provider_label=parsed_link.provider_label,
+                original_url=parsed_link.original_url,
+                normalized_url=parsed_link.normalized_url,
+                execute=self._build_job_executor(update.effective_chat.id, parsed_link),
+                duplicate_suppression=group_settings["duplicate_suppression"],
+            )
+            request_context = RequestContext(
+                request_id=submission.request_id,
+                chat_id=update.effective_chat.id,
+                user_id=update.effective_user.id,
+                provider_label=parsed_link.provider_label,
+                normalized_url=parsed_link.normalized_url,
+                original_url=parsed_link.original_url,
+                original_message_id=update.message.message_id,
+                status_message=status_message,
+                quiet_mode=group_settings["quiet_mode"],
+            )
+            self.request_contexts[submission.request_id] = request_context
+            await self._safe_edit_text(
+                status_message,
+                self._build_submission_message(
+                    parsed_link.provider_label,
+                    queue_position=submission.queue_position,
+                    joined_existing=not submission.is_new_job,
+                ),
+            )
+            task = asyncio.create_task(self._await_request(context, request_context, submission.job))
+            self.active_request_tasks[submission.request_id] = task
+            task.add_done_callback(lambda _task, rid=submission.request_id: self._cleanup_request_task(rid))
 
-            downloaded_files = [item.file_path for item in media_items]
-            self._validate_media_files(downloaded_files)
-            await self._send_media(context, update, video_info)
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show supported providers and usage help."""
+        if not update.message:
+            return
+        await update.message.reply_text(
+            "Send a supported link directly in chat.\n"
+            "Providers: Instagram, Twitter/X, YouTube Shorts.\n"
+            "Commands: /help, /status, /formats, /cancel, /stats\n"
+            "Owner commands: /quiet on|off, /dupes on|off, /statsmode on|off,\n"
+            "/chatlimit <n>, /userlimit <n>, /admin_status"
+        )
 
-            # Clean up
-            if status_message:
-                await status_message.delete()
+    async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show supported URL shapes."""
+        if not update.message:
+            return
+        await update.message.reply_text(
+            "Supported formats:\n"
+            "- Instagram posts, reels, stories, and share links\n"
+            "- Twitter/X status links\n"
+            "- YouTube Shorts URLs"
+        )
 
-        except VideoDownloadError as e:
-            error_str = str(e).lower()
-            if "authentication failed" in error_str or "cookies have expired" in error_str:
-                error_message = (
-                    "🔐 Instagram authentication failed. The session has expired.\n"
-                    "The bot administrator needs to refresh the cookies.\n"
-                    "Please try again later."
-                )
-            elif "rate-limit" in error_str:
-                error_message = (
-                    "⏳ Instagram rate limit reached. Please wait a few minutes and try again."
-                )
-            else:
-                error_message = f"❌ Sorry, couldn't download the media: {str(e)}"
-            
-            logger.error(f"Download error for {url}: {str(e)}")
-            await self._handle_error(update.message, status_message, error_message)
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show a safe queue and health summary."""
+        if not update.message or not update.effective_chat:
+            return
+        snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
+        persisted = self.state_store.get_public_status(update.effective_chat.id)
+        await update.message.reply_text(
+            "Queue status:\n"
+            f"- Active jobs: {snapshot['active_jobs']}\n"
+            f"- Queued jobs: {snapshot['queued_jobs']}\n"
+            f"- Active requests: {snapshot['active_requests']}\n"
+            f"- Chat concurrency limit: {snapshot['chat_limit']}\n"
+            f"- Per-user limit: {snapshot['user_limit']}\n"
+            f"- Completed requests: {persisted['completed']}\n"
+            f"- Failed requests: {persisted['failed']}\n"
+            f"- Cache hits: {persisted['cache_hits']}"
+        )
 
-        except Exception as e:
-            error_message = "❌ An unexpected error occurred. Please try again later."
-            logger.exception(f"Unexpected error while processing {url}: {str(e)}")
-            await self._handle_error(update.message, status_message, error_message)
-        finally:
-            self._cleanup_files(downloaded_files)
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Cancel the latest active request from the current user."""
+        if not update.message or not update.effective_chat or not update.effective_user:
+            return
+        request_id = self.job_manager.get_latest_active_request_id(
+            update.effective_chat.id,
+            update.effective_user.id,
+        )
+        if not request_id:
+            await update.message.reply_text("You have no active queued or running requests.")
+            return
 
-    async def _handle_error(
+        task = self.active_request_tasks.get(request_id)
+        if task and not task.done():
+            task.cancel()
+        job = self.job_manager.cancel_request(request_id)
+        request_context = self.request_contexts.get(request_id)
+        if request_context:
+            await self._safe_edit_text(request_context.status_message, "🛑 Request cancelled.")
+        if job and update.message:
+            await update.message.reply_text("Latest request cancelled.")
+
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show lightweight group stats."""
+        if not update.message or not update.effective_chat:
+            return
+        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        if not group_settings["stats_enabled"]:
+            await update.message.reply_text("Stats are disabled for this chat.")
+            return
+
+        stats = self.state_store.get_group_stats(update.effective_chat.id)
+        top_users = ", ".join(f"{name} ({count})" for name, count in stats["top_users"]) or "No completed requests yet"
+        top_providers = ", ".join(
+            f"{provider} ({count})" for provider, count in stats["top_providers"]
+        ) or "No completed requests yet"
+        await update.message.reply_text(
+            "Group stats:\n"
+            f"- Completed: {stats['completed']}\n"
+            f"- Failed: {stats['failed']}\n"
+            f"- Cancelled: {stats['cancelled']}\n"
+            f"- Top users: {top_users}\n"
+            f"- Top providers: {top_providers}"
+        )
+
+    async def quiet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle quiet mode for the current chat. Owner-only."""
+        await self._toggle_group_setting(
+            update,
+            context,
+            setting_name="quiet_mode",
+            command_name="quiet",
+            label="Quiet mode",
+        )
+
+    async def dupes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle duplicate suppression for the current chat. Owner-only."""
+        await self._toggle_group_setting(
+            update,
+            context,
+            setting_name="duplicate_suppression",
+            command_name="dupes",
+            label="Duplicate suppression",
+        )
+
+    async def statsmode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle stats collection visibility for the current chat. Owner-only."""
+        await self._toggle_group_setting(
+            update,
+            context,
+            setting_name="stats_enabled",
+            command_name="statsmode",
+            label="Stats mode",
+        )
+
+    async def chatlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Override per-chat concurrent job limit. Owner-only."""
+        await self._set_numeric_group_setting(
+            update,
+            context,
+            setting_name="chat_max_concurrent_jobs",
+            command_name="chatlimit",
+            label="Chat concurrency limit",
+        )
+
+    async def userlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Override per-user active job limit for the current chat. Owner-only."""
+        await self._set_numeric_group_setting(
+            update,
+            context,
+            setting_name="user_max_active_jobs",
+            command_name="userlimit",
+            label="Per-user limit",
+        )
+
+    async def admin_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show owner-facing operational status for the current chat."""
+        if not update.message or not update.effective_chat:
+            return
+        if not await self._require_owner(update):
+            return
+        snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
+        admin_status = self.state_store.get_admin_status(update.effective_chat.id)
+        settings_row = admin_status["settings"]
+        provider_lines = ", ".join(
+            f"{provider}:{status}={count}"
+            for provider, status, count in admin_status["provider_job_counts"]
+        ) or "none"
+        failure_lines = "\n".join(
+            f"  - {provider} | {error_class} | {normalized_url}"
+            for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
+        ) or "  - none"
+        uptime_seconds = int(time.time() - self.started_at)
+        await update.message.reply_text(
+            "Admin status:\n"
+            f"- Uptime: {uptime_seconds}s\n"
+            f"- Quiet mode: {'on' if settings_row['quiet_mode'] else 'off'}\n"
+            f"- Duplicate suppression: {'on' if settings_row['duplicate_suppression'] else 'off'}\n"
+            f"- Stats mode: {'on' if settings_row['stats_enabled'] else 'off'}\n"
+            f"- Chat concurrency limit: {settings_row['chat_max_concurrent_jobs']}\n"
+            f"- Per-user limit: {settings_row['user_max_active_jobs']}\n"
+            f"- Running jobs: {admin_status['running_jobs']}\n"
+            f"- Queued jobs: {admin_status['queued_jobs']}\n"
+            f"- Active requests: {snapshot['active_requests']}\n"
+            f"- Failed jobs: {admin_status['failed_jobs']}\n"
+            f"- Cache entries: {admin_status['cache_entries']}\n"
+            f"- Result cache enabled: {'on' if settings.RESULT_CACHE_ENABLED else 'off'}\n"
+            f"- Queue manager enabled: {'on' if settings.QUEUE_MANAGER_ENABLED else 'off'}\n"
+            f"- Provider job counts: {provider_lines}\n"
+            f"- Recent failures:\n{failure_lines}"
+        )
+
+    async def _await_request(
         self,
-        original_message: Message,
-        status_message: Optional[Message],
-        error_message: str
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        job: SharedJob,
     ) -> None:
-        """
-        Handle errors by sending appropriate messages to the user.
-        
-        Args:
-            original_message: Original message that triggered the error
-            status_message: Status message to be updated/deleted
-            error_message: Error message to send to the user
-        """
-        if status_message:
-            try:
-                await status_message.delete()
-            except Exception:
-                pass
+        """Wait for a shared job result and deliver it to one requester."""
+        try:
+            if not job.result_future:
+                raise DownloadError("Job result future was not initialized")
+            video_info = await job.result_future
+            if not request_context.quiet_mode:
+                await self._safe_edit_text(
+                    request_context.status_message,
+                    "📤 Uploading result..."
+                )
+            await self._send_media(context, request_context, video_info)
+            cache_suffix = " (cache hit)" if video_info.from_cache else ""
+            await self._safe_edit_text(
+                request_context.status_message,
+                f"✅ Done{cache_suffix}."
+            )
+            self.job_manager.mark_request_completed(
+                request_context.request_id,
+                cache_hit=video_info.from_cache,
+            )
+            if (
+                not video_info.from_cache
+                and not settings.RESULT_CACHE_ENABLED
+                and len(job.requesters) == 1
+            ):
+                self._cleanup_files([item.file_path for item in video_info.media_items])
+        except asyncio.CancelledError:
+            self.job_manager.mark_request_failed(request_context.request_id, status="cancelled")
+            raise
+        except VideoDownloadError as error:
+            error_message = self._build_error_message(error)
+            logger.error("Download error for %s: %s", request_context.original_url, error)
+            await self._safe_edit_text(request_context.status_message, error_message)
+            self.job_manager.mark_request_failed(request_context.request_id, status="failed")
+        except Exception as error:
+            logger.exception("Unexpected error while delivering %s", request_context.original_url)
+            await self._safe_edit_text(
+                request_context.status_message,
+                "❌ An unexpected error occurred. Please try again later."
+            )
+            self.job_manager.mark_request_failed(request_context.request_id, status="failed")
 
-        if original_message:
-            try:
-                await original_message.reply_text(error_message)
-            except Exception as e:
-                logger.error(f"Failed to send error message: {str(e)}")
+    def _build_job_executor(self, chat_id: int, parsed_link: ParsedRequestLink):
+        """Create the underlying shared job executor closure."""
+
+        async def _execute() -> VideoInfo:
+            cached = None
+            if settings.RESULT_CACHE_ENABLED:
+                cached = self.state_store.get_cached_result(chat_id, parsed_link.normalized_url)
+            if cached:
+                return self._video_info_from_cache(cached)
+
+            downloader = VideoDownloader()
+            cache_segment = (
+                parsed_link.normalized_url
+                .replace("https://", "")
+                .replace("http://", "")
+                .replace("/", "_")
+            )
+            output_dir = (
+                settings.CACHE_DIR / parsed_link.provider / cache_segment
+                if settings.RESULT_CACHE_ENABLED
+                else settings.TEMP_DIR / parsed_link.provider
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+            if settings.RESULT_CACHE_ENABLED:
+                self.state_store.save_cached_result(
+                    chat_id=chat_id,
+                    normalized_url=parsed_link.normalized_url,
+                    provider=parsed_link.provider,
+                    title=video_info.title,
+                    media_items=[
+                        {
+                            "file_path": str(item.file_path),
+                            "media_type": item.media_type,
+                            "caption": item.caption,
+                            "duration": item.duration,
+                        }
+                        for item in video_info.media_items
+                    ],
+                    ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
+                )
+            return video_info
+
+        return _execute
+
+    async def _on_job_state_change(self, job: SharedJob) -> None:
+        """Propagate shared job state changes to per-request status messages."""
+        if job.state not in {"running", "failed", "cancelled"}:
+            return
+        for request_id, request_context in list(self.request_contexts.items()):
+            if request_id not in job.requesters:
+                continue
+            if job.state == "running":
+                if request_context.quiet_mode:
+                    continue
+                text = f"⬇️ {request_context.provider_label} downloading..."
+            elif job.state == "cancelled":
+                text = "🛑 Request cancelled."
+            else:
+                text = "❌ Download failed."
+            await self._safe_edit_text(request_context.status_message, text)
 
     async def _global_error_handler(
         self, update: object, context: ContextTypes.DEFAULT_TYPE
@@ -163,10 +436,11 @@ class TelegramBot:
                 raise VideoDownloadError(f"Media file is empty: {file_path}")
 
     async def _send_media(
-        self, context: ContextTypes.DEFAULT_TYPE, update: Update, video_info: VideoInfo
+        self, context: ContextTypes.DEFAULT_TYPE, request_context: RequestContext, video_info: VideoInfo
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
+        self._validate_media_files([item.file_path for item in media_items])
         caption = video_info.title.strip()
         caption_text = f"📹 {caption}" if caption else ""
 
@@ -175,17 +449,17 @@ class TelegramBot:
             with open(media_item.file_path, "rb") as media_file:
                 if media_item.media_type == "video":
                     await context.bot.send_video(
-                        chat_id=update.effective_chat.id,
+                        chat_id=request_context.chat_id,
                         video=media_file,
                         caption=caption_text,
-                        reply_to_message_id=update.message.message_id,
+                        reply_to_message_id=request_context.original_message_id,
                     )
                 else:
                     await context.bot.send_photo(
-                        chat_id=update.effective_chat.id,
+                        chat_id=request_context.chat_id,
                         photo=media_file,
                         caption=caption_text,
-                        reply_to_message_id=update.message.message_id,
+                        reply_to_message_id=request_context.original_message_id,
                     )
             return
 
@@ -200,9 +474,9 @@ class TelegramBot:
                     media_group.append(InputMediaPhoto(media=media_file, caption=item_caption))
 
             await context.bot.send_media_group(
-                chat_id=update.effective_chat.id,
+                chat_id=request_context.chat_id,
                 media=media_group,
-                reply_to_message_id=update.message.message_id,
+                reply_to_message_id=request_context.original_message_id,
             )
 
     @staticmethod
@@ -213,6 +487,172 @@ class TelegramBot:
                 file_path.unlink(missing_ok=True)
             except Exception as exc:
                 logger.warning("Failed to clean up file %s: %s", file_path, exc)
+
+    def _purge_expired_cache(self) -> None:
+        """Delete expired cache files and state rows."""
+        if not settings.RESULT_CACHE_ENABLED:
+            return
+        for path in self.state_store.purge_expired_results():
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to delete expired cache file %s", path)
+
+    @staticmethod
+    def _video_info_from_cache(cached: CachedMediaEntry) -> VideoInfo:
+        media_items = [
+            MediaItem(
+                file_path=Path(item["file_path"]),
+                media_type=item["media_type"],
+                caption=item.get("caption"),
+                duration=item.get("duration"),
+            )
+            for item in cached.media_items
+        ]
+        primary = media_items[0]
+        return VideoInfo(
+            file_path=primary.file_path,
+            title=cached.title,
+            description=cached.title,
+            media_items=media_items,
+            primary_media_type=primary.media_type,
+            from_cache=True,
+        )
+
+    @staticmethod
+    def _build_submission_message(
+        provider_label: str,
+        *,
+        queue_position: int,
+        joined_existing: bool = False,
+    ) -> str:
+        if joined_existing:
+            return f"🔁 {provider_label} already in progress. Waiting for the shared result."
+        if queue_position > 1:
+            ahead = queue_position - 1
+            return f"🕓 {provider_label} queued. {ahead} ahead of you."
+        return f"🕓 {provider_label} accepted. Starting shortly."
+
+    @staticmethod
+    def _build_error_message(error: Exception) -> str:
+        error_str = str(error).lower()
+        if "authentication failed" in error_str or "cookies have expired" in error_str:
+            return (
+                "🔐 Instagram authentication failed. "
+                "The bot owner needs to refresh the session."
+            )
+        if "rate-limit" in error_str or "rate limit" in error_str:
+            return "⏳ Provider rate limit reached. Please try again later."
+        if "unsupported" in error_str:
+            return f"❌ {str(error)}"
+        if "timed out" in error_str:
+            return "⏱️ Download timed out. Please try again."
+        return f"❌ Sorry, couldn't download the media: {str(error)}"
+
+    @staticmethod
+    async def _safe_edit_text(message: Message, text: str) -> None:
+        try:
+            await message.edit_text(text)
+        except Exception:
+            try:
+                await message.reply_text(text)
+            except Exception:
+                logger.debug("Failed to edit or reply with status update", exc_info=True)
+
+    @staticmethod
+    def _user_label(update: Update) -> str:
+        user = update.effective_user
+        if user is None:
+            return "unknown"
+        if user.username:
+            return f"@{user.username}"
+        if user.full_name:
+            return user.full_name
+        return str(user.id)
+
+    async def _toggle_group_setting(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        setting_name: str,
+        command_name: str,
+        label: str,
+    ) -> None:
+        """Update a boolean group setting after owner validation."""
+        if not update.message or not update.effective_chat or not update.effective_user:
+            return
+        if not await self._require_owner(update):
+            return
+        desired = self._parse_toggle_arg(context.args[0] if context.args else "")
+        if desired is None:
+            await update.message.reply_text(f"Usage: /{command_name} on|off")
+            return
+        result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: desired})
+        state = "enabled" if result[setting_name] else "disabled"
+        await update.message.reply_text(f"{label} {state}.")
+
+    async def _set_numeric_group_setting(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        setting_name: str,
+        command_name: str,
+        label: str,
+    ) -> None:
+        """Update an integer group setting after owner validation."""
+        if not update.message or not update.effective_chat:
+            return
+        if not await self._require_owner(update):
+            return
+        value = self._parse_positive_int_arg(context.args[0] if context.args else "")
+        if value is None:
+            await update.message.reply_text(f"Usage: /{command_name} <positive integer>")
+            return
+        result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: value})
+        if setting_name == "chat_max_concurrent_jobs":
+            self.job_manager.update_chat_limits(update.effective_chat.id, chat_limit=value)
+        elif setting_name == "user_max_active_jobs":
+            self.job_manager.update_chat_limits(update.effective_chat.id, user_limit=value)
+        await update.message.reply_text(f"{label} set to {result[setting_name]}.")
+
+    async def _require_owner(self, update: Update) -> bool:
+        """Return whether the sender is the configured bot owner."""
+        if not update.message or not update.effective_user:
+            return False
+        if settings.BOT_OWNER_USER_ID is None:
+            await update.message.reply_text(
+                "Owner-only commands are unavailable until BOT_OWNER_USER_ID is configured."
+            )
+            return False
+        if update.effective_user.id != settings.BOT_OWNER_USER_ID:
+            await update.message.reply_text("This command is only available to the bot owner.")
+            return False
+        return True
+
+    @staticmethod
+    def _parse_toggle_arg(value: str) -> bool | None:
+        normalized = value.strip().lower()
+        if normalized in {"on", "enable", "enabled", "true", "1"}:
+            return True
+        if normalized in {"off", "disable", "disabled", "false", "0"}:
+            return False
+        return None
+
+    @staticmethod
+    def _parse_positive_int_arg(value: str) -> int | None:
+        stripped = value.strip()
+        if not stripped.isdigit():
+            return None
+        parsed = int(stripped)
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _cleanup_request_task(self, request_id: str) -> None:
+        self.active_request_tasks.pop(request_id, None)
+        self.request_contexts.pop(request_id, None)
 
     def run(self) -> None:
         """Start the Telegram bot."""
@@ -225,14 +665,24 @@ class TelegramBot:
             .build()
         )
 
-        # Add message handler
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("formats", self.formats_command))
+        self.application.add_handler(CommandHandler("cancel", self.cancel_command))
+        self.application.add_handler(CommandHandler("stats", self.stats_command))
+        self.application.add_handler(CommandHandler("quiet", self.quiet_command))
+        self.application.add_handler(CommandHandler("dupes", self.dupes_command))
+        self.application.add_handler(CommandHandler("statsmode", self.statsmode_command))
+        self.application.add_handler(CommandHandler("chatlimit", self.chatlimit_command))
+        self.application.add_handler(CommandHandler("userlimit", self.userlimit_command))
+        self.application.add_handler(CommandHandler("admin_status", self.admin_status_command))
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
-                self.handle_message
+                self.handle_message,
             )
         )
         self.application.add_error_handler(self._global_error_handler)
 
         logger.info("Bot started and ready to process messages")
-        self.application.run_polling() 
+        self.application.run_polling()
