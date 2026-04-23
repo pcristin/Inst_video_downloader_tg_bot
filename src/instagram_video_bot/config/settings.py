@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 
@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     
     # Bot settings
     BOT_TOKEN: str = ""
+    BOT_OWNER_USER_ID: Optional[int] = None
     
     # Instagram credentials
     IG_USERNAME: str = ""
@@ -43,11 +44,27 @@ class Settings(BaseSettings):
     # Paths - simplified
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
     TEMP_DIR: Path = Path(os.getenv('TEMP_DIR', BASE_DIR / "temp"))
+    CACHE_DIR: Path = Path(os.getenv('CACHE_DIR', TEMP_DIR / "result_cache"))
+    STATE_DB_PATH: Path = Path(os.getenv('STATE_DB_PATH', TEMP_DIR / "bot_state.sqlite3"))
     
     # Note: No longer need COOKIES_FILE - instagrapi uses session files
     
     # Logging
     LOG_LEVEL: str = "INFO"
+
+    # Feature flags
+    QUEUE_MANAGER_ENABLED: bool = True
+    RESULT_CACHE_ENABLED: bool = True
+    GROUP_STATS_ENABLED: bool = True
+    YOUTUBE_SHORTS_ENABLED: bool = True
+    DUPLICATE_SUPPRESSION_ENABLED: bool = True
+
+    # Concurrency and caching
+    GLOBAL_MAX_CONCURRENT_JOBS: int = 3
+    CHAT_MAX_CONCURRENT_JOBS: int = 2
+    USER_MAX_ACTIVE_JOBS: int = 1
+    RECENT_RESULT_TTL_SECONDS: int = 60 * 60 * 4
+    MAX_LINKS_PER_MESSAGE: int = 5
     
     # Docker-specific settings
     RUNNING_IN_DOCKER: bool = os.path.exists('/.dockerenv')
@@ -62,8 +79,10 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         # Ensure directories exist
         self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # Create sessions directory
         (self.BASE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
+        self.STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     
     def get_proxy_list(self) -> List[str]:
         """Get list of proxies from PROXIES setting."""
