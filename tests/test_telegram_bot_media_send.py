@@ -11,10 +11,11 @@ from src.instagram_video_bot.services.video_downloader import MediaItem, VideoIn
 
 
 class _FakeBot:
-    def __init__(self):
+    def __init__(self, member_status: str = "member"):
         self.video_calls = []
         self.photo_calls = []
         self.group_calls = []
+        self.member_status = member_status
 
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -24,6 +25,9 @@ class _FakeBot:
 
     async def send_media_group(self, **kwargs):
         self.group_calls.append(kwargs)
+
+    async def get_chat_member(self, chat_id: int, user_id: int):
+        return SimpleNamespace(status=self.member_status)
 
 
 class _FakeStatusMessage:
@@ -66,9 +70,10 @@ class _FakeUpdate:
         username: str = "alice",
         full_name: str = "Alice",
         message_id: int = 10,
+        chat_type: str = "private",
     ):
         self.message = _FakeMessage(text, message_id=message_id)
-        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.effective_user = SimpleNamespace(id=user_id, username=username, full_name=full_name)
 
 
@@ -198,8 +203,8 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
 
     assert not media_file.exists()
     assert len(fake_bot.video_calls) == 1
-    assert update.message.replies == ["🕓 Instagram accepted. Starting shortly."]
-    assert update.message.status_messages[0].texts == ["⬇️ Instagram downloading..."]
+    assert update.message.replies == ["Принял Instagram. Скоро начну скачивать."]
+    assert update.message.status_messages[0].texts == ["Instagram: скачиваю."]
     assert update.message.status_messages[0].deleted is True
 
 
@@ -234,8 +239,95 @@ async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, t
     assert fake_bot.video_calls[0]["reply_to_message_id"] == 10
     assert first_update.message.status_messages[0].deleted is True
     assert second_update.message.status_messages[0].deleted is True
-    assert second_update.message.replies == ["🔁 Instagram already in progress. Waiting for the shared result."]
+    assert second_update.message.replies == ["Instagram уже скачивается. Дождусь общего результата."]
     assert second_update.message.status_messages[0].texts == []
+
+
+@pytest.mark.asyncio
+async def test_chaos_duplicate_request_uses_playful_russian_text(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    telegram_bot.state_store.update_group_settings(77, chaos_mode_enabled=True)
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
+    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+
+    media_file = tmp_path / "shared-chaos.mp4"
+    media_file.write_bytes(b"video")
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="shared",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert len(fake_bot.video_calls) == 1
+    assert second_update.message.replies == ["Instagram уже в работе. Повтор засчитан, сидим рядом с таймером."]
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_is_delivered_and_counted(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate("https://www.instagram.com/reel/cached/")
+    media_file = tmp_path / "cached.mp4"
+    media_file.write_bytes(b"video")
+    telegram_bot.state_store.save_cached_result(
+        chat_id=77,
+        normalized_url="https://www.instagram.com/reel/cached/",
+        provider="instagram",
+        title="cached",
+        media_items=[
+            {
+                "file_path": str(media_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+            }
+        ],
+        ttl_seconds=3600,
+    )
+
+    async def fail_download_video(self, url: str, output_dir: Path):
+        raise AssertionError("cache hit should skip downloader")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert len(fake_bot.video_calls) == 1
+    assert telegram_bot.state_store.get_public_status(77)["cache_hits"] == 1
+
+
+@pytest.mark.asyncio
+async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    update = _FakeUpdate("https://www.instagram.com/reel/fail/")
+
+    async def fail_download_video(self, url: str, output_dir: Path):
+        from src.instagram_video_bot.services.video_downloader import DownloadError
+
+        raise DownloadError("rate limit")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert update.message.status_messages[0].texts[-1] == "Достигнут лимит провайдера. Попробуй позже."
 
 
 @pytest.mark.parametrize(
@@ -304,7 +396,7 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(mon
     assert delivered_message_ids == [11]
     assert first_update.message.status_messages[0].deleted is True
     assert second_update.message.status_messages[0].deleted is True
-    assert first_update.message.status_messages[0].texts == ["⬇️ Instagram downloading..."]
+    assert first_update.message.status_messages[0].texts == ["Instagram: скачиваю."]
     assert second_update.message.status_messages[0].texts == []
 
 
@@ -318,7 +410,7 @@ async def test_owner_only_quiet_command_requires_owner(monkeypatch, tmp_path):
 
     await telegram_bot.quiet_command(update, context)
 
-    assert update.message.replies[-1] == "This command is only available to the bot owner."
+    assert update.message.replies[-1] == "Эта команда доступна только владельцу бота."
 
 
 @pytest.mark.asyncio
@@ -333,7 +425,70 @@ async def test_owner_can_toggle_quiet_mode(monkeypatch, tmp_path):
 
     settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
     assert settings_row["quiet_mode"] is True
-    assert update.message.replies[-1] == "Quiet mode enabled."
+    assert update.message.replies[-1] == "Тихий режим: включено."
+
+
+@pytest.mark.asyncio
+async def test_owner_can_toggle_chaos_mode_on_and_off(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot(), args=["on"])
+    update = _FakeUpdate("/chaos on", chat_type="group")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+
+    await telegram_bot.chaos_command(update, context)
+
+    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    assert settings_row["chaos_mode_enabled"] is True
+    assert update.message.replies[-1] == "Режим хаоса включен. Теперь бот будет шуметь по делу."
+
+    context.args = ["off"]
+    await telegram_bot.chaos_command(update, context)
+
+    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    assert settings_row["chaos_mode_enabled"] is False
+    assert update.message.replies[-1] == "Режим хаоса выключен. Возвращаюсь к спокойному режиму."
+
+
+@pytest.mark.asyncio
+async def test_chaos_status_reports_russian_state(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/chaos status")
+    context = _FakeContext(_FakeBot(), args=["status"])
+
+    await telegram_bot.chaos_command(update, context)
+
+    assert update.message.replies[-1] == "Режим хаоса выключен для этого чата."
+
+
+@pytest.mark.asyncio
+async def test_chaos_command_rejects_non_admin_group_member(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/chaos on", chat_type="group")
+    context = _FakeContext(_FakeBot(member_status="member"), args=["on"])
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 9999)
+
+    await telegram_bot.chaos_command(update, context)
+
+    assert update.message.replies[-1] == "Режим хаоса могут переключать только админы чата или владелец бота."
+
+
+@pytest.mark.asyncio
+async def test_help_formats_status_and_stats_are_russian(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/help")
+    context = _FakeContext(_FakeBot())
+
+    await telegram_bot.help_command(update, context)
+    await telegram_bot.formats_command(update, context)
+    await telegram_bot.status_command(update, context)
+    await telegram_bot.stats_command(update, context)
+
+    assert "Пришли ссылку" in update.message.replies[0]
+    assert "Поддерживаемые ссылки" in update.message.replies[1]
+    assert "Статус очереди" in update.message.replies[2]
+    assert "Статистика чата" in update.message.replies[3]
 
 
 @pytest.mark.asyncio
@@ -416,7 +571,7 @@ async def test_owner_can_toggle_stats_mode(monkeypatch, tmp_path):
 
     settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
     assert settings_row["stats_enabled"] is False
-    assert update.message.replies[-1] == "Stats mode disabled."
+    assert update.message.replies[-1] == "Статистика: выключено."
 
 
 @pytest.mark.asyncio
@@ -433,7 +588,7 @@ async def test_owner_can_override_chat_limit(monkeypatch, tmp_path):
     snapshot = telegram_bot.job_manager.get_snapshot(update.effective_chat.id)
     assert settings_row["chat_max_concurrent_jobs"] == 4
     assert snapshot["chat_limit"] == 4
-    assert update.message.replies[-1] == "Chat concurrency limit set to 4."
+    assert update.message.replies[-1] == "Лимит чата: 4."
 
 
 @pytest.mark.asyncio
@@ -455,8 +610,8 @@ async def test_admin_status_reports_owner_settings(monkeypatch, tmp_path):
     await telegram_bot.admin_status_command(update, context)
 
     reply = update.message.replies[-1]
-    assert "Quiet mode: on" in reply
-    assert "Duplicate suppression: off" in reply
-    assert "Stats mode: off" in reply
-    assert "Chat concurrency limit: 5" in reply
-    assert "Per-user limit: 2" in reply
+    assert "Тихий режим: включен" in reply
+    assert "Защита от повторов: выключена" in reply
+    assert "Статистика: выключена" in reply
+    assert "Лимит чата: 5" in reply
+    assert "Лимит на пользователя: 2" in reply

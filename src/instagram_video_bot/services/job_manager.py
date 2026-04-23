@@ -112,6 +112,7 @@ class JobManager:
                 provider=provider,
                 normalized_url=normalized_url,
                 status=existing.state,
+                joined_existing=True,
             )
             return JobSubmission(
                 job=existing,
