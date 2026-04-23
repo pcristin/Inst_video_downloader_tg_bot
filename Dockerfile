@@ -1,51 +1,33 @@
-# Instagram Video Downloader Bot - instagrapi version
-# Lightweight Docker image using instagrapi for Instagram API access
-# No browser automation required - direct API communication
-
-# Use Python 3.11 slim image as base
+# Instagram Video Downloader Bot - uv-native version
 FROM python:3.11-slim
 
-# Set environment variables
+COPY --from=ghcr.io/astral-sh/uv:0.11.1 /uv /uvx /bin/
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
 
-# Install system dependencies (minimal for instagrapi)
 RUN apt-get update && apt-get install -y \
-    # Basic utilities
     curl \
     wget \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN useradd -m -u 1000 botuser
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
 COPY src/ ./src/
-
-# Copy management scripts (instagrapi-based)
 COPY manage_accounts.py ./
 
-# Create necessary directories and set permissions
-# temp: for video downloads
-# sessions: for instagrapi session persistence
 RUN mkdir -p temp sessions && \
     chown -R botuser:botuser /app/temp /app/sessions /app
 
-# Switch to non-root user
 USER botuser
 
-# Set the default command
-CMD ["python", "-m", "src.instagram_video_bot"]
+CMD ["uv", "run", "--no-sync", "python", "-m", "src.instagram_video_bot"]

@@ -7,8 +7,9 @@ services:
     volumes:
       # Mount source code for hot reload
       - ./src:/app/src:ro
-      # Mount requirements for easy updates
-      - ./requirements.txt:/app/requirements.txt:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./.python-version:/app/.python-version:ro
     environment:
       # Enable development mode
       - DEV_MODE=true

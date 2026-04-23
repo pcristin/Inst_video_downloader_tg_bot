@@ -23,7 +23,7 @@ services:
       - TZ=UTC
     # Health check
     healthcheck:
-      test: ["CMD", "python", "-m", "src.instagram_video_bot.utils.health_check"]
+      test: ["CMD", "uv", "run", "--no-sync", "python", "-m", "src.instagram_video_bot.utils.health_check"]
       interval: 30s
       timeout: 10s
       retries: 3
