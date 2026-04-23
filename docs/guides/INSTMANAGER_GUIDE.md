@@ -118,23 +118,24 @@ Current: ms.stevenbaker682510
 
 ## Troubleshooting
 
-### Cookies Not Working
+### Session Setup Not Working
 
-If you get "white screen" or authentication errors:
+If you get authentication errors during setup or rotation:
 
-1. **Check cookie format**:
+1. **Check source account format**:
    ```bash
    sed -n '1,5p' instmanager_accounts.txt
    ```
 
-2. **Validate account status**:
+2. **Validate the active account state**:
    ```bash
    make accounts-status
    ```
 
-3. **Check account info**:
+3. **Re-run session initialization**:
    ```bash
-   cat cookies/ms.stevenbaker682510_account_info.json
+   uv run python manage_accounts.py setup
+   uv run python manage_accounts.py status
    ```
 
 ### Import Errors
@@ -149,13 +150,10 @@ If you get "white screen" or authentication errors:
    - `IG-U-DS-USER-ID=...`
    - `X-MID=...`
 
-3. **Re-import single account**:
-   ```bash
-   uv run python -c "
-   from src.instagram_video_bot.utils.cookie_importer import *
-   import_instmanager_account('your_account_line_here', 'username')
-   "
-   ```
+3. **Retry after fixing one source line**:
+   - Update the affected entry in `instmanager_accounts.txt`.
+   - Regenerate `accounts.txt` from that corrected source entry.
+   - Re-run `uv run python manage_accounts.py setup`.
 
 ## Account Management
 
@@ -181,12 +179,12 @@ make accounts-status
 3. **Monitoring**: Check `make accounts-status` daily
 4. **Backup**: Keep your original `instmanager_accounts.txt` file
 
-## Cookie Format Details
+## Source Format Details
 
-Your cookies contain:
-- **Authorization**: Bearer token for API access
-- **IG-U-DS-USER-ID**: User ID for Instagram
-- **X-MID**: Machine/browser ID
-- **IG-U-RUR**: Regional routing info
+The InstAccountsManager source lines may include:
+- **Authorization**: Bearer token from the provider export
+- **IG-U-DS-USER-ID**: Instagram user identifier
+- **X-MID**: Device or browser identifier
+- **IG-U-RUR**: Regional routing metadata
 
-These are automatically converted to Netscape format for yt-dlp compatibility.
+Those fields are part of the source export format, but the repo's active runtime workflow is session-based through `accounts.txt` and `manage_accounts.py`.
