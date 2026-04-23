@@ -167,7 +167,7 @@ class VideoDownloader:
         tried_accounts: set[str] = set()
         max_attempts = max(1, len(manager.get_available_accounts()))
         for attempt in range(max_attempts):
-            account = manager.acquire_account()
+            account = manager.acquire_account(excluded_usernames=tried_accounts)
             if not account:
                 break
             if account.username in tried_accounts:
