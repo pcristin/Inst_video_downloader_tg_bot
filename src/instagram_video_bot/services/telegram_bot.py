@@ -49,6 +49,7 @@ class TelegramBot:
     """Telegram bot for downloading media links."""
 
     INSTAGRAM_VIDEO_PATTERN = RequestParser.URL_PATTERN
+    MAX_MEDIA_CAPTION_LENGTH = 1024
 
     def __init__(self, state_store: StateStore | None = None):
         self.application: Optional[Application] = None
@@ -441,8 +442,7 @@ class TelegramBot:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
         self._validate_media_files([item.file_path for item in media_items])
-        caption = video_info.title.strip()
-        caption_text = f"📹 {caption}" if caption else ""
+        caption_text = self._build_caption_text(video_info.title)
 
         if len(media_items) == 1:
             media_item = media_items[0]
@@ -532,6 +532,17 @@ class TelegramBot:
             ahead = queue_position - 1
             return f"🕓 {provider_label} queued. {ahead} ahead of you."
         return f"🕓 {provider_label} accepted. Starting shortly."
+
+    @classmethod
+    def _build_caption_text(cls, title: str) -> str:
+        """Build a Telegram-safe media caption."""
+        caption = title.strip()
+        if not caption:
+            return ""
+        full_caption = f"📹 {caption}"
+        if len(full_caption) <= cls.MAX_MEDIA_CAPTION_LENGTH:
+            return full_caption
+        return full_caption[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
 
     @staticmethod
     def _build_error_message(error: Exception) -> str:
