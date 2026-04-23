@@ -45,57 +45,33 @@ ms.stevenbaker682510:tGeltLAc02KDNxI||Authorization=Bearer IGT:2:eyJkc191c2VyX2l
 login:password||cookies||email:emailpassword
 ```
 
-### 2. Import All Accounts
+### 2. Convert the Source List to `accounts.txt`
 
-Install dependencies and run the import script:
+The repo's active workflow is session-based. Instead of importing cookie files, convert your InstAccountsManager source into the normal `accounts.txt` input used by `manage_accounts.py`.
+
+Create `accounts.txt` with one account per line:
+```
+ms.stevenbaker682510|tGeltLAc02KDNxI|your_totp_secret
+username2|password2|your_totp_secret
+username3|password3|your_totp_secret
+```
+
+Notes:
+- Keep only the login credentials and optional TOTP secret in `accounts.txt`.
+- Do not rely on legacy exported cookie artifacts or `accounts_preauth.txt` as the primary setup path.
+- If a specific account does not use 2FA, leave the third field empty: `username|password|`.
+
+### 3. Initialize Account Sessions
+
+Install dependencies and create sessions with the supported CLI:
 
 ```bash
 uv sync
-uv run python import_cookies_instmanager.py
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-This will:
-- Parse each account
-- Extract cookies from the header format
-- Save cookies to `cookies/username_cookies.txt`
-- Save account info to `cookies/username_account_info.json`
-
-Expected output:
-```
---- Processing account 1 (line 1) ---
-✅ Parsed account: ms.stevenbaker682510
-✅ Parsed 6 cookies
-✅ Cookies saved to cookies/ms.stevenbaker682510_cookies.txt
-✅ Account info saved to cookies/ms.stevenbaker682510_account_info.json
-✅ Successfully imported ms.stevenbaker682510
-
-==================================================
-Import completed: 10/10 accounts successful
-
-✅ Successfully imported 10 accounts!
-
-Cookie files created in cookies/ directory:
-  - cookies/ms.stevenbaker682510_cookies.txt
-  - cookies/account2_cookies.txt
-  ...
-```
-
-### 3. Create Pre-Auth Accounts File
-
-Create `accounts_preauth.txt` with just the usernames:
-
-```bash
-# Extract usernames from imported accounts
-ls cookies/*_cookies.txt | sed 's/cookies\///g' | sed 's/_cookies.txt//g' > accounts_preauth.txt
-```
-
-Or manually create:
-```
-ms.stevenbaker682510
-username2
-username3
-# ... all 10 usernames
-```
+This creates and verifies the session-based state the bot uses for account rotation.
 
 ### 4. Start the Bot
 
@@ -106,10 +82,10 @@ make logs
 ```
 
 The bot will:
-- Detect `accounts_preauth.txt`
-- Use pre-authenticated mode (no login required)
+- Read configured accounts from `accounts.txt`
+- Use the sessions created by `manage_accounts.py setup`
 - Rotate between accounts automatically
-- Use existing cookies for each account
+- Persist refreshed account sessions between runs
 
 ## Verification
 
@@ -148,7 +124,7 @@ If you get "white screen" or authentication errors:
 
 1. **Check cookie format**:
    ```bash
-   head -5 cookies/ms.stevenbaker682510_cookies.txt
+   sed -n '1,5p' instmanager_accounts.txt
    ```
 
 2. **Validate account status**:
