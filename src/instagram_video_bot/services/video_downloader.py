@@ -172,7 +172,7 @@ class VideoDownloader:
                 break
             if account.username in tried_accounts:
                 manager.release_account(account)
-                break
+                continue
             tried_accounts.add(account.username)
             try:
                 await self._apply_instagram_throttle(account.username)
