@@ -198,7 +198,9 @@ class VideoDownloader:
                         "error": str(auth_error),
                     },
                 )
-                self.last_account_health_event = manager.record_account_failure(account, "auth_challenge")
+                event = manager.record_account_failure(account, "auth_challenge")
+                if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
+                    self.last_account_health_event = event
             except Exception as error:
                 if isinstance(error, DownloadError):
                     raise

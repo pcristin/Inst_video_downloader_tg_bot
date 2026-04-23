@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,6 +117,16 @@ class _DuplicateLeaseManager(_LeaseManager):
             if account.username not in excluded_usernames:
                 return self.lease_sequence.pop(index)
         return None
+
+
+class _HealthEventLeaseManager(_LeaseManager):
+    def __init__(self, accounts, events):
+        super().__init__(accounts)
+        self.events = list(events)
+
+    def record_account_failure(self, account, reason):
+        super().record_account_failure(account, reason)
+        return self.events.pop(0)
 
 
 class _Account:
@@ -371,6 +382,36 @@ async def test_download_fails_after_retry_on_auth_failure(monkeypatch, tmp_path)
 
     with pytest.raises(DownloadError, match="Authentication failed"):
         await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_download_preserves_first_alert_worthy_account_health_event(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    first_alert_event = SimpleNamespace(should_alert_owner=True, username="acc_fail_1")
+    later_non_alert_event = SimpleNamespace(should_alert_owner=False, username="acc_fail_2")
+    manager = _HealthEventLeaseManager(
+        [_Account("acc_fail_1"), _Account("acc_fail_2")],
+        [first_alert_event, later_non_alert_event],
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _client_factory(**kwargs):
+        return _AuthFailClient()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.InstagramClient", _client_factory)
+
+    with pytest.raises(DownloadError, match="Authentication failed"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert manager.failures == [
+        ("acc_fail_1", "auth_challenge"),
+        ("acc_fail_2", "auth_challenge"),
+    ]
+    assert downloader.last_account_health_event is first_alert_event
 
 
 @pytest.mark.asyncio
