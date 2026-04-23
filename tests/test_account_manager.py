@@ -114,3 +114,24 @@ def test_low_pool_alert_respects_cooldown(monkeypatch, tmp_path: Path):
     manager._last_low_pool_alert_at = manager._last_low_pool_alert_at - timedelta(seconds=3601)
 
     assert manager.should_alert_low_pool() is True
+
+
+def test_repeated_failure_after_quarantine_does_not_alert_again(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_LOW_WATERMARK", 2)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_ALERT_COOLDOWN_SECONDS", 3600)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    first_event = manager.record_account_failure(manager.accounts[0], "challenge_required")
+    manager._last_low_pool_alert_at = manager._last_low_pool_alert_at - timedelta(seconds=3601)
+    repeated_event = manager.record_account_failure(manager.accounts[0], "challenge_required")
+
+    assert first_event.threshold_reached is True
+    assert first_event.should_alert_owner is True
+    assert repeated_event.consecutive_failures == 2
+    assert repeated_event.threshold_reached is False
+    assert repeated_event.should_alert_owner is False
