@@ -77,6 +77,20 @@ def test_account_success_resets_failure_counter(monkeypatch, tmp_path: Path):
     assert saved_account["last_failure_at"] is None
 
 
+def test_acquire_account_excludes_usernames(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    account = manager.acquire_account(excluded_usernames={"first"})
+
+    assert account is not None
+    assert account.username == "second"
+    assert manager._leased_accounts == {"second"}
+
+
 def test_below_threshold_failure_does_not_alert_when_pool_is_low(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)

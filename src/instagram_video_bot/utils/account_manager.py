@@ -4,7 +4,7 @@ import logging
 import random
 import threading
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -234,11 +234,13 @@ class AccountManager:
             if not acc.is_banned and acc.password and acc.totp_secret
         ]
     
-    def get_next_account(self) -> Optional[Account]:
+    def get_next_account(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[Account]:
         """Get the next available account for rotation."""
+        excluded_usernames = excluded_usernames or set()
         available = [
             acc for acc in self.get_available_accounts()
             if acc.username not in self._leased_accounts
+            and acc.username not in excluded_usernames
         ]
         
         if not available:
@@ -259,10 +261,10 @@ class AccountManager:
         
         return available[0]
 
-    def acquire_account(self) -> Optional[Account]:
+    def acquire_account(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[Account]:
         """Lease an available account for one concurrent job."""
         with self._lock:
-            account = self.get_next_account()
+            account = self.get_next_account(excluded_usernames=excluded_usernames)
             if not account:
                 return None
             self._leased_accounts.add(account.username)

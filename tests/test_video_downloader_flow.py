@@ -83,10 +83,12 @@ class _LeaseManager:
     def get_available_accounts(self):
         return list(self.accounts)
 
-    def acquire_account(self):
-        if not self.accounts:
-            return None
-        return self.accounts.pop(0)
+    def acquire_account(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        for index, account in enumerate(self.accounts):
+            if account.username not in excluded_usernames:
+                return self.accounts.pop(index)
+        return None
 
     def release_account(self, account):
         if account:
@@ -101,6 +103,19 @@ class _LeaseManager:
 
     def record_account_success(self, account):
         self.successes.append(account.username)
+
+
+class _DuplicateLeaseManager(_LeaseManager):
+    def __init__(self, accounts, lease_sequence):
+        super().__init__(accounts)
+        self.lease_sequence = list(lease_sequence)
+
+    def acquire_account(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        for index, account in enumerate(self.lease_sequence):
+            if account.username not in excluded_usernames:
+                return self.lease_sequence.pop(index)
+        return None
 
 
 class _Account:
@@ -283,6 +298,42 @@ async def test_download_skips_duplicate_leased_accounts(monkeypatch, tmp_path):
 
     acc_fail = _Account("acc_fail")
     manager = _LeaseManager([acc_fail, acc_fail, _Account("acc_ok")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_fail": _AuthFailClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+
+    def _client_factory(**kwargs):
+        return clients[kwargs["username"]]
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.InstagramClient", _client_factory)
+
+    info = await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert info.title == "ok"
+    assert manager.failures == [("acc_fail", "auth_challenge")]
+    assert manager.successes == ["acc_ok"]
+
+
+@pytest.mark.asyncio
+async def test_download_retry_budget_counts_unique_account_leases(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "video_retry_unique_budget.mp4"
+    expected_path.write_bytes(b"video")
+
+    acc_fail = _Account("acc_fail")
+    acc_ok = _Account("acc_ok")
+    manager = _DuplicateLeaseManager(
+        accounts=[acc_fail, acc_ok],
+        lease_sequence=[acc_fail, acc_fail, acc_fail, acc_ok],
+    )
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
 
     clients = {
