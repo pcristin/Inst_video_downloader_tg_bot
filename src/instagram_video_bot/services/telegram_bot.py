@@ -426,6 +426,10 @@ class TelegramBot:
                     ],
                     ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
                 )
+            await self._notify_owner_about_low_account_pool(
+                context,
+                getattr(downloader, "last_account_health_event", None),
+            )
             return video_info
 
         return _execute

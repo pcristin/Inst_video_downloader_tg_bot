@@ -254,6 +254,37 @@ async def test_download_with_account_lease_retries_after_auth_failure(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_success_preserves_pending_account_pool_alert(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "video_retry_alert.mp4"
+    expected_path.write_bytes(b"video")
+    alert_event = SimpleNamespace(should_alert_owner=True, username="acc_fail")
+    manager = _HealthEventLeaseManager([_Account("acc_fail"), _Account("acc_ok")], [alert_event])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_fail": _AuthFailClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+
+    def _client_factory(**kwargs):
+        return clients[kwargs["username"]]
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.InstagramClient", _client_factory)
+
+    info = await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert downloader.last_account_health_event is alert_event
+    assert manager.failures == [("acc_fail", "auth_challenge")]
+    assert manager.successes == ["acc_ok"]
+
+
+@pytest.mark.asyncio
 async def test_download_retries_across_all_available_accounts(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
