@@ -103,7 +103,7 @@ Night: Bot stopped
 
 2. If banned, switch to new account:
    ```bash
-   # Update accounts.txt or .env credentials, then re-initialize sessions
+   # Update accounts.txt, then re-initialize sessions
    # Use only accounts with password + non-empty totp_secret
    uv run python manage_accounts.py setup
    make restart
