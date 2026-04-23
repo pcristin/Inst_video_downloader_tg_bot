@@ -171,9 +171,6 @@ class VideoDownloader:
             account = manager.acquire_account(excluded_usernames=tried_accounts)
             if not account:
                 break
-            if account.username in tried_accounts:
-                manager.release_account(account)
-                continue
             tried_accounts.add(account.username)
             try:
                 await self._apply_instagram_throttle(account.username)
