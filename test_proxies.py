@@ -6,7 +6,11 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from src.instagram_video_bot.utils.proxy_manager import proxy_manager, test_all_proxies, get_proxy_for_account
+from src.instagram_video_bot.utils.proxy_manager import (
+    get_proxy_for_account,
+    proxy_manager,
+    test_all_proxies as run_all_proxy_checks,
+)
 
 def main():
     """Test all proxies and show account assignments."""
@@ -40,7 +44,7 @@ def main():
     
     # Test all proxies
     print("🔍 Testing proxy connectivity...")
-    results = test_all_proxies()
+    results = run_all_proxy_checks()
     
     working_count = 0
     for i, (proxy, is_working) in enumerate(results, 1):
@@ -84,4 +88,4 @@ def main():
     print("- Use residential proxies for best results")
 
 if __name__ == "__main__":
-    main() 
+    main()
