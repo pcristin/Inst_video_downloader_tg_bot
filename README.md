@@ -323,12 +323,10 @@ username1|password1|totp_secret1
 username2|password2|totp_secret2
 ```
 
-#### Pre-authenticated Mode
-Create `accounts_preauth.txt`:
-```
-username1
-username2
-username3
+Initialize sessions after creating `accounts.txt`:
+```bash
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
 ## Troubleshooting
