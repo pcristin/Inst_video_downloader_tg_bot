@@ -732,6 +732,28 @@ class TelegramBot:
             return None
         return parsed
 
+    async def _notify_owner_about_low_account_pool(self, context, event) -> None:
+        if event is None or not event.should_alert_owner:
+            return
+        if settings.BOT_OWNER_USER_ID is None:
+            logger.warning("Skipping low account pool owner alert: BOT_OWNER_USER_ID is not configured")
+            return
+        if not getattr(context, "bot", None):
+            logger.warning("Skipping low account pool owner alert: Telegram bot context is unavailable")
+            return
+
+        text = (
+            "Instagram account pool warning:\n"
+            f"Usable accounts left: {event.available_accounts} of {event.total_accounts}.\n"
+            f"Low-watermark threshold: {event.low_watermark}.\n"
+            f"Last removed account: {event.username}.\n"
+            f"Reason: {event.reason} after {event.consecutive_failures} sequential failures."
+        )
+        try:
+            await context.bot.send_message(chat_id=settings.BOT_OWNER_USER_ID, text=text)
+        except TelegramError as exc:
+            logger.warning("Failed to send low account pool owner alert: %s", exc)
+
     def _cleanup_request_task(self, request_id: str) -> None:
         self.active_request_tasks.pop(request_id, None)
         self.request_contexts.pop(request_id, None)
