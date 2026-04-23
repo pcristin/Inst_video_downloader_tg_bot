@@ -94,12 +94,10 @@ class ChaosText:
                 return "Провайдер включил лимит. Отступаем, чтобы не получить по шапке."
             return "Достигнут лимит провайдера. Попробуй позже."
         if "unsupported" in error_lower:
-            return f"Неподдерживаемая ссылка: {error_text}"
+            return "Эта ссылка не поддерживается."
         if "timed out" in error_lower:
             return "Скачивание не уложилось по времени. Попробуй еще раз."
-        if chaos_enabled:
-            return f"Не смог скачать медиа. Причина без прикрас: {error_text}"
-        return f"Не смог скачать медиа: {error_text}"
+        return "Не смог скачать медиа. Попробуй позже."
 
     @staticmethod
     def stats_disabled() -> str:
