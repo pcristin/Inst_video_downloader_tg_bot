@@ -45,56 +45,33 @@ ms.stevenbaker682510:tGeltLAc02KDNxI||Authorization=Bearer IGT:2:eyJkc191c2VyX2l
 login:password||cookies||email:emailpassword
 ```
 
-### 2. Import All Accounts
+### 2. Convert the Source List to `accounts.txt`
 
-Run the import script:
+The repo's active workflow is session-based. Instead of importing cookie files, convert your InstAccountsManager source into the normal `accounts.txt` input used by `manage_accounts.py`.
+
+Create `accounts.txt` with one account per line:
+```
+ms.stevenbaker682510|tGeltLAc02KDNxI|your_totp_secret
+username2|password2|your_totp_secret
+username3|password3|your_totp_secret
+```
+
+Notes:
+- Keep only the login credentials and a non-empty TOTP secret in `accounts.txt`.
+- Do not rely on legacy exported cookie artifacts or `accounts_preauth.txt` as the primary setup path.
+- Every managed account needs a password and a non-empty TOTP secret. If you cannot provide one, leave that account out of `accounts.txt` until it is ready to be used.
+
+### 3. Initialize Account Sessions
+
+Install dependencies and create sessions with the supported CLI:
 
 ```bash
-python3 import_cookies_instmanager.py
+uv sync
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-This will:
-- Parse each account
-- Extract cookies from the header format
-- Save cookies to `cookies/username_cookies.txt`
-- Save account info to `cookies/username_account_info.json`
-
-Expected output:
-```
---- Processing account 1 (line 1) ---
-✅ Parsed account: ms.stevenbaker682510
-✅ Parsed 6 cookies
-✅ Cookies saved to cookies/ms.stevenbaker682510_cookies.txt
-✅ Account info saved to cookies/ms.stevenbaker682510_account_info.json
-✅ Successfully imported ms.stevenbaker682510
-
-==================================================
-Import completed: 10/10 accounts successful
-
-✅ Successfully imported 10 accounts!
-
-Cookie files created in cookies/ directory:
-  - cookies/ms.stevenbaker682510_cookies.txt
-  - cookies/account2_cookies.txt
-  ...
-```
-
-### 3. Create Pre-Auth Accounts File
-
-Create `accounts_preauth.txt` with just the usernames:
-
-```bash
-# Extract usernames from imported accounts
-ls cookies/*_cookies.txt | sed 's/cookies\///g' | sed 's/_cookies.txt//g' > accounts_preauth.txt
-```
-
-Or manually create:
-```
-ms.stevenbaker682510
-username2
-username3
-# ... all 10 usernames
-```
+This creates and verifies the session-based state the bot uses for account rotation.
 
 ### 4. Start the Bot
 
@@ -105,10 +82,10 @@ make logs
 ```
 
 The bot will:
-- Detect `accounts_preauth.txt`
-- Use pre-authenticated mode (no login required)
+- Read configured accounts from `accounts.txt`
+- Use the sessions created by `manage_accounts.py setup`
 - Rotate between accounts automatically
-- Use existing cookies for each account
+- Persist refreshed account sessions between runs
 
 ## Verification
 
@@ -117,9 +94,6 @@ Check if everything works:
 ```bash
 # Check account status
 make accounts-status
-
-# Check if cookies are valid
-make check-cookies
 
 # View logs
 make logs
@@ -144,23 +118,24 @@ Current: ms.stevenbaker682510
 
 ## Troubleshooting
 
-### Cookies Not Working
+### Session Setup Not Working
 
-If you get "white screen" or authentication errors:
+If you get authentication errors during setup or rotation:
 
-1. **Check cookie format**:
+1. **Check source account format**:
    ```bash
-   head -5 cookies/ms.stevenbaker682510_cookies.txt
+   sed -n '1,5p' instmanager_accounts.txt
    ```
 
-2. **Validate cookies**:
+2. **Validate the active account state**:
    ```bash
-   make check-cookies
+   make accounts-status
    ```
 
-3. **Check account info**:
+3. **Re-run session initialization**:
    ```bash
-   cat cookies/ms.stevenbaker682510_account_info.json
+   uv run python manage_accounts.py setup
+   uv run python manage_accounts.py status
    ```
 
 ### Import Errors
@@ -175,13 +150,10 @@ If you get "white screen" or authentication errors:
    - `IG-U-DS-USER-ID=...`
    - `X-MID=...`
 
-3. **Re-import single account**:
-   ```bash
-   python3 -c "
-   from src.instagram_video_bot.utils.cookie_importer import *
-   import_instmanager_account('your_account_line_here', 'username')
-   "
-   ```
+3. **Retry after fixing one source line**:
+   - Update the affected entry in `instmanager_accounts.txt`.
+   - Regenerate `accounts.txt` from that corrected source entry.
+   - Re-run `uv run python manage_accounts.py setup`.
 
 ## Account Management
 
@@ -190,14 +162,14 @@ If you get "white screen" or authentication errors:
 make accounts-rotate
 ```
 
-### Reset Banned Account
+### Reset Old Bans
 ```bash
-make accounts-reset-one USERNAME=ms.stevenbaker682510
+make accounts-reset-old HOURS=24
 ```
 
 ### Check Specific Account
 ```bash
-python3 check_cookies.py cookies/ms.stevenbaker682510_cookies.txt
+make accounts-status
 ```
 
 ## Best Practices
@@ -207,12 +179,12 @@ python3 check_cookies.py cookies/ms.stevenbaker682510_cookies.txt
 3. **Monitoring**: Check `make accounts-status` daily
 4. **Backup**: Keep your original `instmanager_accounts.txt` file
 
-## Cookie Format Details
+## Source Format Details
 
-Your cookies contain:
-- **Authorization**: Bearer token for API access
-- **IG-U-DS-USER-ID**: User ID for Instagram
-- **X-MID**: Machine/browser ID
-- **IG-U-RUR**: Regional routing info
+The InstAccountsManager source lines may include:
+- **Authorization**: Bearer token from the provider export
+- **IG-U-DS-USER-ID**: Instagram user identifier
+- **X-MID**: Device or browser identifier
+- **IG-U-RUR**: Regional routing metadata
 
-These are automatically converted to Netscape format for yt-dlp compatibility. 
+Those fields are part of the source export format, but the repo's active runtime workflow is session-based through `accounts.txt` and `manage_accounts.py`.

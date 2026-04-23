@@ -85,6 +85,12 @@ class AccountManager:
         if not self.accounts_file.exists():
             logger.warning(f"No accounts file found: {self.accounts_file}")
             return
+        if self.accounts_file.is_dir():
+            logger.error(
+                "Accounts file path %s is a directory. Remove or rename it so the bot can load accounts.",
+                self.accounts_file,
+            )
+            return
         
         logger.info(f"Loading accounts from {self.accounts_file}")
         
@@ -413,7 +419,7 @@ def get_account_manager() -> Optional[AccountManager]:
     if _account_manager is None:
         accounts_file = Path('accounts.txt')
         
-        if accounts_file.exists():
+        if accounts_file.is_file():
             _account_manager = AccountManager(accounts_file=accounts_file)
             logger.info("Using multi-account mode with instagrapi")
         else:

@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-1. **Purchased Instagram Account** with cookies
+1. **Instagram account credentials**
 2. **USA Residential Proxy** (critical for USA accounts)
 3. **Telegram Bot Token** from @BotFather
 
@@ -30,52 +30,41 @@ PROXY_USERNAME=proxyuser
 PROXY_PASSWORD=proxypass
 
 # Optional Settings
-COOKIES_FILE=cookies/instagram_cookies.txt
 LOG_LEVEL=INFO
 ```
 
-### 2. Import Account Cookies
+### 2. Install Dependencies and Configure Accounts
 
 ```bash
-# Create account.txt with your full account line
-cat > account.txt << 'EOF'
-denise.toledo1166;a558hqpf2ytcz3938;email@domain.com;token;2fa_secret;USA;cookie_string;warning
-EOF
+# Install project dependencies
+uv sync
 
-# Import the cookies
-python3 import_cookies.py
+# Optional: create accounts.txt for multi-account rotation
+# Format: username|password|totp_secret
+# Every managed account needs a password and non-empty totp_secret
 
-# Verify cookies are valid
-python3 check_cookies.py
+# Initialize account sessions
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-### 3. Warm Up the Account (CRITICAL)
-
-```bash
-# This simulates human browsing behavior
-python3 warmup_account.py
-
-# WAIT AT LEAST 30 MINUTES after warmup!
-```
-
-### 4. Start the Bot
+### 3. Start the Bot
 
 ```bash
 # Build and start with Docker
-docker-compose up -d
+make build
+make up
 
 # Check logs
-docker-compose logs -f
+make logs
 ```
 
-### 5. Monitor Account Health
+### 4. Monitor Account Health
 
 ```bash
-# Run in background to monitor cookies
-python3 monitor_cookies.py &
-
 # Check manually anytime
-python3 check_cookies.py
+make accounts-status
+uv run python manage_accounts.py status
 ```
 
 ## Usage Guidelines
@@ -105,25 +94,25 @@ Night: Bot stopped
 
 ## Troubleshooting
 
-### "Cookies Expired" Error
+### Authentication Error
 
 1. Check if account is banned:
    ```bash
-   python3 check_cookies.py
+   make accounts-status
    ```
 
 2. If banned, switch to new account:
    ```bash
-   # Update account.txt with new account
-   python3 import_cookies.py
-   docker-compose restart
+   # Update accounts.txt, then re-initialize sessions
+   # Use only accounts with password + non-empty totp_secret
+   uv run python manage_accounts.py setup
+   make restart
    ```
 
 ### Bot Gets Detected Quickly
 
 Check this list:
 - [ ] Using USA proxy? (CRITICAL)
-- [ ] Warmed up account before use?
 - [ ] Waiting between downloads?
 - [ ] Taking regular breaks?
 - [ ] Not exceeding daily limits?
@@ -141,7 +130,6 @@ Should return USA IP address.
 
 **✅ DO:**
 - Use residential proxy from account's country
-- Warm up accounts for 30+ minutes
 - Take regular breaks
 - Monitor account health daily
 - Have backup accounts ready
@@ -159,20 +147,19 @@ If account gets banned:
 
 1. **Stop bot immediately**:
    ```bash
-   docker-compose down
+   make down
    ```
 
 2. **Don't try to login manually** (makes it worse)
 
 3. **Switch to backup account**:
    ```bash
-   # Update account.txt
-   python3 import_cookies.py
-   python3 warmup_account.py
-   # Wait 30 minutes
-   docker-compose up -d
+   # Update accounts.txt or .env credentials
+   # Use only accounts with password + non-empty totp_secret
+   uv run python manage_accounts.py setup
+   make up
    ```
 
 4. **Review what went wrong** using the checklist above
 
-Remember: Even with all precautions, some accounts may still get flagged. This is why having multiple accounts is essential. 
+Remember: Even with all precautions, some accounts may still get flagged. This is why having multiple accounts is essential.
