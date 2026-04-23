@@ -27,7 +27,8 @@ This guide explains how to run the Instagram Video Downloader Bot using Docker.
 
 3. **Build and run the bot:**
    ```bash
-   docker-compose up -d
+   make build
+   make up
    ```
 
 ## Two-Factor Authentication Setup
@@ -53,30 +54,30 @@ If your Instagram account has 2FA enabled:
 
 5. **Restart the bot:**
    ```bash
-   docker-compose restart
+   make restart
    ```
 
 ## Docker Commands
 
 ### Start the bot:
 ```bash
-docker-compose up -d
+make up
 ```
 
 ### View logs:
 ```bash
-docker-compose logs -f
+make logs
 ```
 
 ### Stop the bot:
 ```bash
-docker-compose down
+make down
 ```
 
 ### Rebuild after code changes:
 ```bash
-docker-compose build
-docker-compose up -d
+make build
+make up
 ```
 
 ### Run commands inside container:
@@ -84,12 +85,18 @@ docker-compose up -d
 docker-compose exec instagram-video-bot /bin/bash
 ```
 
+### Run Python commands inside the container:
+```bash
+docker-compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
+docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
+```
+
 ## Volume Mounts
 
 The Docker setup uses several volume mounts:
 
 - `./temp:/app/temp` - Temporary video downloads
-- `./instagram_cookies.txt:/app/instagram_cookies.txt` - Instagram session cookies
+- `./sessions:/app/sessions` - Persisted Instagram sessions
 - `./logs:/app/logs` - Application logs (optional)
 
 ## Troubleshooting
@@ -101,13 +108,14 @@ docker-compose logs instagram-video-bot
 ```
 
 ### Instagram authentication issues
-1. Delete the cookies file:
+1. Verify your `.env` credentials or `accounts.txt` entries.
+2. Re-initialize sessions:
    ```bash
-   rm instagram_cookies.txt
+   docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
    ```
-2. Restart the bot:
+3. Restart the bot:
    ```bash
-   docker-compose restart
+   make restart
    ```
 
 ### Video download failures
@@ -148,7 +156,7 @@ To develop with Docker:
 ## Security Considerations
 
 - Never commit `.env` file to version control
-- Keep Instagram cookies file secure
+- Keep session data secure
 - Use strong passwords for Instagram account
 - Consider using a dedicated Instagram account for the bot
 - Regularly update the Docker image for security patches

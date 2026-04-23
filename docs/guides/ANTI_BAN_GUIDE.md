@@ -30,25 +30,24 @@ PROXY_PASSWORD=proxypass
 - Mobile proxies (good)
 - Datacenter proxies (risky)
 
-### 2. Warm Up New Accounts
+### 2. Initialize New Accounts
 
-Before using the bot, warm up the account:
+Before using the bot, initialize the account with the supported account-manager workflow:
 
 ```bash
-python3 warmup_account.py
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
-Then wait at least 30 minutes before first use.
+Every managed account needs a password and a non-empty `totp_secret`. Empty third fields stay unavailable and will not be used for rotation.
 
-### 3. Import Cookies Properly
+### 3. Initialize Accounts Properly
 
 ```bash
-# 1. Create account.txt with your account data
-# 2. Import cookies
-python3 import_cookies.py
-
-# 3. Check cookies are valid
-python3 check_cookies.py
+uv sync
+# Create accounts.txt if you want multi-account rotation
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
 ### 4. Configure Rate Limiting
@@ -63,7 +62,6 @@ The updated bot now includes:
 
 **DO:**
 - ✅ Use residential proxy from account's country
-- ✅ Warm up accounts before first use
 - ✅ Wait 10+ seconds between downloads
 - ✅ Limit to 50-100 downloads per day
 - ✅ Take breaks (stop bot for hours)
@@ -90,27 +88,21 @@ If you have multiple accounts:
 2. Rotate between them:
    ```bash
    # Use account 1
-   cp account1.txt account.txt
-   python3 import_cookies.py
-   docker-compose restart
+   cp account1.txt accounts.txt
+   uv run python manage_accounts.py setup
+   make restart
    
    # Later, switch to account 2
-   cp account2.txt account.txt
-   python3 import_cookies.py
-   docker-compose restart
+   cp account2.txt accounts.txt
+   uv run python manage_accounts.py setup
+   make restart
    ```
 
 ### 7. Monitor Account Health
 
 Run this regularly:
 ```bash
-python3 check_cookies.py
-```
-
-Set up monitoring:
-```bash
-# Run in background
-python3 monitor_cookies.py &
+make accounts-status
 ```
 
 ### 8. If Account Gets Banned
@@ -120,6 +112,7 @@ python3 monitor_cookies.py &
 3. **Switch to a different account**
 4. **Review your usage patterns**
 5. **Ensure proxy is working**
+6. **After cooldown, use `make accounts-reset-old HOURS=24` if you need to clear stale bans**
 
 ## Technical Improvements Made
 
@@ -135,19 +128,14 @@ python3 monitor_cookies.py &
 ```bash
 # 1. Get USA residential proxy
 # 2. Update .env with proxy details
-# 3. Import account cookies
-python3 import_cookies.py
+# 3. Initialize account sessions
+uv run python manage_accounts.py setup
 
-# 4. Warm up account
-python3 warmup_account.py
+# 4. Start bot with the current uv-native workflow
+make up
 
-# 5. Wait 30+ minutes
-
-# 6. Start bot with new anti-detection features
-docker-compose up -d
-
-# 7. Monitor health
-python3 monitor_cookies.py
+# 5. Monitor health
+make accounts-status
 ```
 
 ## Emergency Checklist
@@ -156,9 +144,8 @@ If accounts keep getting banned:
 
 - [ ] Are you using a proxy?
 - [ ] Is the proxy from the account's country?
-- [ ] Did you warm up the account?
 - [ ] Are you waiting between downloads?
 - [ ] Are you limiting daily downloads?
 - [ ] Is the User-Agent up to date?
 
-Remember: Instagram's detection is sophisticated. Even with all precautions, accounts may still get flagged. Always have backup accounts ready. 
+Remember: Instagram's detection is sophisticated. Even with all precautions, accounts may still get flagged. Always have backup accounts ready.
