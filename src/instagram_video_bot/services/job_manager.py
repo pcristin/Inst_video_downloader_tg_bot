@@ -45,8 +45,11 @@ class SharedJob:
     created_monotonic: float = field(default_factory=monotonic)
     requesters: dict[str, RequestRecord] = field(default_factory=dict)
     result_future: asyncio.Future[Any] | None = None
+    delivery_future: asyncio.Future[bool] | None = None
     task: asyncio.Task[Any] | None = None
     queue_position_at_submit: int = 1
+    delivery_request_id: str | None = None
+    last_delivery_error: Exception | None = None
 
 
 @dataclass(frozen=True)
@@ -127,8 +130,10 @@ class JobManager:
             original_url=original_url,
             normalized_url=normalized_url,
             queue_position_at_submit=queued_count + 1,
+            delivery_request_id=request_id,
         )
         job.result_future = asyncio.get_running_loop().create_future()
+        job.delivery_future = asyncio.get_running_loop().create_future()
         job.requesters[request_id] = RequestRecord(
             request_id=request_id,
             chat_id=chat_id,
@@ -203,6 +208,10 @@ class JobManager:
             if request and request.active:
                 request.active = False
                 self.store.update_request_status(request_id, "cancelled")
+                if job.delivery_request_id == request_id and job.delivery_future and not job.delivery_future.done():
+                    self._handoff_delivery(job, request_id, asyncio.CancelledError())
+                elif job.delivery_request_id == request_id:
+                    self._promote_delivery_request(job)
                 if not any(item.active for item in job.requesters.values()):
                     if job.task and not job.task.done():
                         job.task.cancel()
@@ -228,6 +237,23 @@ class JobManager:
     def mark_request_failed(self, request_id: str, status: str = "failed") -> None:
         self.store.update_request_status(request_id, status)
         self._deactivate_request(request_id)
+
+    def is_delivery_request(self, job: SharedJob, request_id: str) -> bool:
+        request = job.requesters.get(request_id)
+        return bool(request and request.active and job.delivery_request_id == request_id)
+
+    async def wait_for_delivery(self, job: SharedJob) -> bool:
+        if job.delivery_future:
+            return await job.delivery_future
+        return False
+
+    def mark_delivery_completed(self, job: SharedJob) -> None:
+        job.last_delivery_error = None
+        if job.delivery_future and not job.delivery_future.done():
+            job.delivery_future.set_result(True)
+
+    def mark_delivery_failed(self, job: SharedJob, request_id: str, error: Exception) -> bool:
+        return self._handoff_delivery(job, request_id, error)
 
     def get_snapshot(self, chat_id: int) -> dict[str, int]:
         active = 0
@@ -266,11 +292,47 @@ class JobManager:
             request = job.requesters.get(request_id)
             if request:
                 request.active = False
+                if job.delivery_request_id == request_id and not (
+                    job.delivery_future and job.delivery_future.done()
+                ):
+                    self._promote_delivery_request(job)
                 if job.state in {"completed", "failed", "cancelled"} and not any(
                     item.active for item in job.requesters.values()
                 ):
                     self._jobs.pop(job_id, None)
                 return
+
+    def _promote_delivery_request(self, job: SharedJob) -> None:
+        current_future = job.delivery_future
+        next_request_id = self._next_delivery_request_id(job)
+        job.delivery_request_id = next_request_id
+        job.last_delivery_error = None
+        if current_future and not current_future.done():
+            current_future.set_result(False)
+        if next_request_id is not None:
+            job.delivery_future = asyncio.get_running_loop().create_future()
+
+    def _next_delivery_request_id(self, job: SharedJob, *, exclude_request_id: str | None = None) -> str | None:
+        active_requests = [
+            request for request in job.requesters.values()
+            if request.active and request.request_id != exclude_request_id
+        ]
+        if not active_requests:
+            return None
+        active_requests.sort(key=lambda item: item.created_monotonic)
+        return active_requests[0].request_id
+
+    def _handoff_delivery(self, job: SharedJob, failed_request_id: str, error: Exception) -> bool:
+        next_request_id = self._next_delivery_request_id(job, exclude_request_id=failed_request_id)
+        current_future = job.delivery_future
+        job.last_delivery_error = error
+        if current_future and not current_future.done():
+            current_future.set_result(False)
+        job.delivery_request_id = next_request_id
+        if next_request_id is None:
+            return False
+        job.delivery_future = asyncio.get_running_loop().create_future()
+        return True
 
     def _get_chat_semaphore(self, chat_id: int) -> asyncio.Semaphore:
         limits = self.store.get_queue_limits(chat_id)

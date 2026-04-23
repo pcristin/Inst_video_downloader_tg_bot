@@ -29,6 +29,7 @@ class _FakeBot:
 class _FakeStatusMessage:
     def __init__(self):
         self.texts = []
+        self.deleted = False
 
     async def edit_text(self, text: str):
         self.texts.append(text)
@@ -37,23 +38,38 @@ class _FakeStatusMessage:
         self.texts.append(text)
         return self
 
+    async def delete(self):
+        self.deleted = True
+
 
 class _FakeMessage:
-    def __init__(self, text: str):
+    def __init__(self, text: str, message_id: int = 10):
         self.text = text
-        self.message_id = 10
+        self.message_id = message_id
         self.replies = []
+        self.status_messages = []
 
     async def reply_text(self, text: str):
         self.replies.append(text)
-        return _FakeStatusMessage()
+        status_message = _FakeStatusMessage()
+        self.status_messages.append(status_message)
+        return status_message
 
 
 class _FakeUpdate:
-    def __init__(self, text: str):
-        self.message = _FakeMessage(text)
-        self.effective_chat = SimpleNamespace(id=77)
-        self.effective_user = SimpleNamespace(id=1001, username="alice", full_name="Alice")
+    def __init__(
+        self,
+        text: str,
+        *,
+        chat_id: int = 77,
+        user_id: int = 1001,
+        username: str = "alice",
+        full_name: str = "Alice",
+        message_id: int = 10,
+    ):
+        self.message = _FakeMessage(text, message_id=message_id)
+        self.effective_chat = SimpleNamespace(id=chat_id)
+        self.effective_user = SimpleNamespace(id=user_id, username=username, full_name=full_name)
 
 
 class _FakeContext:
@@ -74,6 +90,7 @@ def _make_request_context(status_message: _FakeStatusMessage) -> RequestContext:
         original_message_id=10,
         status_message=status_message,
         quiet_mode=False,
+        joined_existing=False,
     )
 
 
@@ -181,6 +198,44 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
 
     assert not media_file.exists()
     assert len(fake_bot.video_calls) == 1
+    assert update.message.replies == ["🕓 Instagram accepted. Starting shortly."]
+    assert update.message.status_messages[0].texts == ["⬇️ Instagram downloading..."]
+    assert update.message.status_messages[0].deleted is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
+    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+
+    media_file = tmp_path / "shared.mp4"
+    media_file.write_bytes(b"video")
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="shared",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert len(fake_bot.video_calls) == 1
+    assert fake_bot.video_calls[0]["reply_to_message_id"] == 10
+    assert first_update.message.status_messages[0].deleted is True
+    assert second_update.message.status_messages[0].deleted is True
+    assert second_update.message.replies == ["🔁 Instagram already in progress. Waiting for the shared result."]
+    assert second_update.message.status_messages[0].texts == []
 
 
 @pytest.mark.parametrize(
@@ -211,6 +266,46 @@ def test_build_caption_text_truncates_long_titles():
 
     assert len(caption) == TelegramBot.MAX_MEDIA_CAPTION_LENGTH
     assert caption.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
+    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+
+    media_file = tmp_path / "handoff.mp4"
+    media_file.write_bytes(b"video")
+    delivered_message_ids = []
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="handoff",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    async def fake_send_media(self, context, request_context, video_info):
+        if request_context.original_message_id == 10:
+            raise RuntimeError("telegram send failed")
+        delivered_message_ids.append(request_context.original_message_id)
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(TelegramBot, "_send_media", fake_send_media)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert delivered_message_ids == [11]
+    assert first_update.message.status_messages[0].deleted is True
+    assert second_update.message.status_messages[0].deleted is True
+    assert first_update.message.status_messages[0].texts == ["⬇️ Instagram downloading..."]
+    assert second_update.message.status_messages[0].texts == []
 
 
 @pytest.mark.asyncio
@@ -255,6 +350,41 @@ async def test_quiet_mode_skips_running_status_updates(tmp_path):
         original_message_id=10,
         status_message=status_message,
         quiet_mode=True,
+        joined_existing=False,
+    )
+    telegram_bot.request_contexts["req-1"] = request_context
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=77,
+        submitter_user_id=1001,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="running",
+        requesters={"req-1": RequestRecord(request_id="req-1", chat_id=77, user_id=1001, user_label="alice")},
+    )
+
+    await telegram_bot._on_job_state_change(job)
+
+    assert status_message.texts == []
+
+
+@pytest.mark.asyncio
+async def test_joined_existing_request_skips_running_status_updates(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    status_message = _FakeStatusMessage()
+    request_context = RequestContext(
+        request_id="req-1",
+        chat_id=77,
+        user_id=1001,
+        provider_label="Instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+        original_url="https://www.instagram.com/reel/a/",
+        original_message_id=10,
+        status_message=status_message,
+        quiet_mode=False,
+        joined_existing=True,
     )
     telegram_bot.request_contexts["req-1"] = request_context
     job = SharedJob(
