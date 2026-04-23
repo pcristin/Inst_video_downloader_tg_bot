@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # Bot settings
     BOT_TOKEN: str = ""
     BOT_OWNER_USER_ID: Optional[int] = None
+    ACCOUNT_FAILURE_THRESHOLD: int = 2
+    ACCOUNT_LOW_WATERMARK: int = 3
+    ACCOUNT_ALERT_COOLDOWN_SECONDS: int = 60 * 60
     
     # Instagram credentials
     IG_USERNAME: str = ""

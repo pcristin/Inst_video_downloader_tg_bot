@@ -94,7 +94,7 @@ class TelegramBot:
                 provider_label=parsed_link.provider_label,
                 original_url=parsed_link.original_url,
                 normalized_url=parsed_link.normalized_url,
-                execute=self._build_job_executor(update.effective_chat.id, parsed_link),
+                execute=self._build_job_executor(update.effective_chat.id, parsed_link, context),
                 duplicate_suppression=group_settings["duplicate_suppression"],
             )
             status_message = await update.message.reply_text(
@@ -373,7 +373,12 @@ class TelegramBot:
             )
             self.job_manager.mark_request_failed(request_context.request_id, status="failed")
 
-    def _build_job_executor(self, chat_id: int, parsed_link: ParsedRequestLink):
+    def _build_job_executor(
+        self,
+        chat_id: int,
+        parsed_link: ParsedRequestLink,
+        context: ContextTypes.DEFAULT_TYPE,
+    ):
         """Create the underlying shared job executor closure."""
 
         async def _execute() -> VideoInfo:
@@ -396,7 +401,14 @@ class TelegramBot:
                 else settings.TEMP_DIR / parsed_link.provider
             )
             output_dir.mkdir(parents=True, exist_ok=True)
-            video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+            try:
+                video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+            except Exception:
+                await self._notify_owner_about_low_account_pool(
+                    context,
+                    getattr(downloader, "last_account_health_event", None),
+                )
+                raise
             if settings.RESULT_CACHE_ENABLED:
                 self.state_store.save_cached_result(
                     chat_id=chat_id,
@@ -414,6 +426,10 @@ class TelegramBot:
                     ],
                     ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
                 )
+            await self._notify_owner_about_low_account_pool(
+                context,
+                getattr(downloader, "last_account_health_event", None),
+            )
             return video_info
 
         return _execute
@@ -731,6 +747,28 @@ class TelegramBot:
         if parsed <= 0:
             return None
         return parsed
+
+    async def _notify_owner_about_low_account_pool(self, context, event) -> None:
+        if event is None or not event.should_alert_owner:
+            return
+        if settings.BOT_OWNER_USER_ID is None:
+            logger.warning("Skipping low account pool owner alert: BOT_OWNER_USER_ID is not configured")
+            return
+        if not getattr(context, "bot", None):
+            logger.warning("Skipping low account pool owner alert: Telegram bot context is unavailable")
+            return
+
+        text = (
+            "Instagram account pool warning:\n"
+            f"Usable accounts left: {event.available_accounts} of {event.total_accounts}.\n"
+            f"Low-watermark threshold: {event.low_watermark}.\n"
+            f"Last removed account: {event.username}.\n"
+            f"Reason: {event.reason} after {event.consecutive_failures} sequential failures."
+        )
+        try:
+            await context.bot.send_message(chat_id=settings.BOT_OWNER_USER_ID, text=text)
+        except TelegramError as exc:
+            logger.warning("Failed to send low account pool owner alert: %s", exc)
 
     def _cleanup_request_task(self, request_id: str) -> None:
         self.active_request_tasks.pop(request_id, None)

@@ -8,6 +8,7 @@ from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
 from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
 from src.instagram_video_bot.services.video_downloader import MediaItem, VideoInfo
+from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
 class _FakeBot:
@@ -15,7 +16,11 @@ class _FakeBot:
         self.video_calls = []
         self.photo_calls = []
         self.group_calls = []
+        self.message_calls = []
         self.member_status = member_status
+
+    async def send_message(self, **kwargs):
+        self.message_calls.append(kwargs)
 
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -244,6 +249,79 @@ async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_concurrent_downloads_keep_account_alerts_scoped_to_job(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    alert_update = _FakeUpdate("https://www.instagram.com/reel/alert/", message_id=10)
+    clean_update = _FakeUpdate("https://www.instagram.com/reel/clean/", message_id=11)
+    alert_file = tmp_path / "alert.mp4"
+    clean_file = tmp_path / "clean.mp4"
+    alert_file.write_bytes(b"alert")
+    clean_file.write_bytes(b"clean")
+    downloader_instances = []
+
+    class FakeDownloader:
+        def __init__(self):
+            self.last_account_health_event = None
+            downloader_instances.append(self)
+
+        async def download_video(self, url: str, output_dir: Path):
+            await asyncio.sleep(0)
+            if "alert" in url:
+                self.last_account_health_event = SimpleNamespace(
+                    should_alert_owner=True,
+                    username="acc1",
+                    reason="auth_challenge",
+                    consecutive_failures=2,
+                    threshold=2,
+                    available_accounts=2,
+                    total_accounts=13,
+                    low_watermark=3,
+                )
+                media_file = alert_file
+            else:
+                media_file = clean_file
+            return VideoInfo(
+                file_path=media_file,
+                title="scoped",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+
+    await telegram_bot.handle_message(alert_update, context)
+    await telegram_bot.handle_message(clean_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert len(downloader_instances) == 2
+    assert len({id(instance) for instance in downloader_instances}) == 2
+    assert sum(
+        1 for instance in downloader_instances
+        if getattr(instance.last_account_health_event, "should_alert_owner", False)
+    ) == 1
+    assert len(fake_bot.video_calls) == 2
+    assert [
+        call for call in fake_bot.message_calls
+        if "Instagram account pool warning:" in call["text"]
+    ] == [
+        {
+            "chat_id": 1001,
+            "text": (
+                "Instagram account pool warning:\n"
+                "Usable accounts left: 2 of 13.\n"
+                "Low-watermark threshold: 3.\n"
+                "Last removed account: acc1.\n"
+                "Reason: auth_challenge after 2 sequential failures."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_chaos_duplicate_request_uses_playful_russian_text(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     telegram_bot.state_store.update_group_settings(77, chaos_mode_enabled=True)
@@ -330,6 +408,96 @@ async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
     assert update.message.status_messages[0].texts[-1] == "Достигнут лимит провайдера. Попробуй позже."
 
 
+@pytest.mark.asyncio
+async def test_download_failure_sends_owner_alert_when_pool_is_low(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate("https://www.instagram.com/reel/fail/")
+
+    class FakeDownloader:
+        def __init__(self):
+            self.last_account_health_event = SimpleNamespace(
+                should_alert_owner=True,
+                username="acc1",
+                reason="auth_challenge",
+                consecutive_failures=2,
+                threshold=2,
+                available_accounts=2,
+                total_accounts=13,
+                low_watermark=3,
+            )
+
+        async def download_video(self, url: str, output_dir: Path):
+            raise RuntimeError("download failed")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert any(
+        call["chat_id"] == 1001
+        and "Instagram account pool warning:" in call["text"]
+        for call in fake_bot.message_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_success_sends_owner_alert_when_retry_quarantines_account(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate("https://www.instagram.com/reel/success/")
+    media_file = tmp_path / "success.mp4"
+    media_file.write_bytes(b"video")
+    downloader_instances = []
+
+    class FakeDownloader:
+        def __init__(self):
+            self.attempted_accounts = []
+            self.quarantined_accounts = []
+            self.last_account_health_event = SimpleNamespace(
+                should_alert_owner=True,
+                username="acc1",
+                reason="auth_challenge",
+                consecutive_failures=2,
+                threshold=2,
+                available_accounts=2,
+                total_accounts=13,
+                low_watermark=3,
+            )
+            downloader_instances.append(self)
+
+        async def download_video(self, url: str, output_dir: Path):
+            self.attempted_accounts.extend(["acc1", "acc2"])
+            self.quarantined_accounts.append("acc1")
+            return VideoInfo(
+                file_path=media_file,
+                title="success",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert len(fake_bot.video_calls) == 1
+    assert len(downloader_instances) == 1
+    assert downloader_instances[0].attempted_accounts == ["acc1", "acc2"]
+    assert downloader_instances[0].quarantined_accounts == ["acc1"]
+    assert any(
+        call["chat_id"] == 1001
+        and "Instagram account pool warning:" in call["text"]
+        for call in fake_bot.message_calls
+    )
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -358,6 +526,65 @@ def test_build_caption_text_truncates_long_titles():
 
     assert len(caption) == TelegramBot.MAX_MEDIA_CAPTION_LENGTH
     assert caption.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_owner_low_account_pool_alert_is_english(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    event = AccountHealthEvent(
+        username="acc1",
+        reason="auth_challenge",
+        consecutive_failures=2,
+        threshold=2,
+        threshold_reached=True,
+        available_accounts=2,
+        total_accounts=13,
+        low_watermark=3,
+        should_alert_owner=True,
+    )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+
+    await telegram_bot._notify_owner_about_low_account_pool(context, event)
+
+    assert fake_bot.message_calls == [
+        {
+            "chat_id": 1001,
+            "text": (
+                "Instagram account pool warning:\n"
+                "Usable accounts left: 2 of 13.\n"
+                "Low-watermark threshold: 3.\n"
+                "Last removed account: acc1.\n"
+                "Reason: auth_challenge after 2 sequential failures."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_owner_low_account_pool_alert_skips_without_owner(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    event = AccountHealthEvent(
+        username="acc1",
+        reason="auth_challenge",
+        consecutive_failures=2,
+        threshold=2,
+        threshold_reached=True,
+        available_accounts=2,
+        total_accounts=13,
+        low_watermark=3,
+        should_alert_owner=True,
+    )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", None)
+
+    await telegram_bot._notify_owner_about_low_account_pool(context, event)
+
+    assert fake_bot.message_calls == []
 
 
 @pytest.mark.asyncio
