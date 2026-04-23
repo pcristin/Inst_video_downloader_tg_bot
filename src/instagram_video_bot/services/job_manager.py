@@ -303,8 +303,14 @@ class JobManager:
                 return
 
     def _promote_delivery_request(self, job: SharedJob) -> None:
+        current_future = job.delivery_future
         next_request_id = self._next_delivery_request_id(job)
         job.delivery_request_id = next_request_id
+        job.last_delivery_error = None
+        if current_future and not current_future.done():
+            current_future.set_result(False)
+        if next_request_id is not None:
+            job.delivery_future = asyncio.get_running_loop().create_future()
 
     def _next_delivery_request_id(self, job: SharedJob, *, exclude_request_id: str | None = None) -> str | None:
         active_requests = [
