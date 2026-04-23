@@ -51,6 +51,7 @@ class VideoDownloader:
         self.youtube_adapter = YouTubeShortsProviderAdapter(
             YouTubeShortsDownloader()
         )
+        self.last_account_health_event = None
 
     @property
     def fast_extractor(self):
@@ -184,6 +185,7 @@ class VideoDownloader:
                     redact_proxy=self._redact_proxy,
                 )
                 manager.record_account_success(account)
+                self.last_account_health_event = None
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
@@ -196,7 +198,7 @@ class VideoDownloader:
                         "error": str(auth_error),
                     },
                 )
-                manager.record_account_failure(account, "auth_challenge")
+                self.last_account_health_event = manager.record_account_failure(account, "auth_challenge")
             except Exception as error:
                 if isinstance(error, DownloadError):
                     raise

@@ -94,7 +94,7 @@ class TelegramBot:
                 provider_label=parsed_link.provider_label,
                 original_url=parsed_link.original_url,
                 normalized_url=parsed_link.normalized_url,
-                execute=self._build_job_executor(update.effective_chat.id, parsed_link),
+                execute=self._build_job_executor(update.effective_chat.id, parsed_link, context),
                 duplicate_suppression=group_settings["duplicate_suppression"],
             )
             status_message = await update.message.reply_text(
@@ -373,7 +373,12 @@ class TelegramBot:
             )
             self.job_manager.mark_request_failed(request_context.request_id, status="failed")
 
-    def _build_job_executor(self, chat_id: int, parsed_link: ParsedRequestLink):
+    def _build_job_executor(
+        self,
+        chat_id: int,
+        parsed_link: ParsedRequestLink,
+        context: ContextTypes.DEFAULT_TYPE,
+    ):
         """Create the underlying shared job executor closure."""
 
         async def _execute() -> VideoInfo:
@@ -396,7 +401,14 @@ class TelegramBot:
                 else settings.TEMP_DIR / parsed_link.provider
             )
             output_dir.mkdir(parents=True, exist_ok=True)
-            video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+            try:
+                video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+            except Exception:
+                await self._notify_owner_about_low_account_pool(
+                    context,
+                    getattr(downloader, "last_account_health_event", None),
+                )
+                raise
             if settings.RESULT_CACHE_ENABLED:
                 self.state_store.save_cached_result(
                     chat_id=chat_id,
