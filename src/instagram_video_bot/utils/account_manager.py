@@ -96,7 +96,7 @@ class AccountManager:
         self.sessions_dir = Path('sessions')
         self.sessions_dir.mkdir(exist_ok=True)
         self._leased_accounts: set[str] = set()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._last_low_pool_alert_at: Optional[datetime] = None
         
         # Get available proxies
@@ -279,59 +279,62 @@ class AccountManager:
 
     def record_account_success(self, account: Account) -> None:
         """Reset sequential failure tracking after a successful account use."""
-        account.consecutive_failures = 0
-        account.last_failure_reason = None
-        account.last_failure_at = None
-        self._save_state()
+        with self._lock:
+            account.consecutive_failures = 0
+            account.last_failure_reason = None
+            account.last_failure_at = None
+            self._save_state()
 
     def record_account_failure(self, account: Account, reason: str) -> AccountHealthEvent:
         """Persist a sequential failure and quarantine accounts at threshold."""
-        threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
-        now = datetime.now()
+        with self._lock:
+            threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
+            now = datetime.now()
 
-        account.consecutive_failures += 1
-        account.last_failure_reason = reason
-        account.last_failure_at = now
+            account.consecutive_failures += 1
+            account.last_failure_reason = reason
+            account.last_failure_at = now
 
-        threshold_reached = account.consecutive_failures >= threshold
-        if threshold_reached:
-            account.is_banned = True
-            account.ban_reason = f"sequential_failures:{reason}"
-            account.banned_at = now
-            self._leased_accounts.discard(account.username)
+            threshold_reached = account.consecutive_failures >= threshold
+            if threshold_reached:
+                account.is_banned = True
+                account.ban_reason = f"sequential_failures:{reason}"
+                account.banned_at = now
+                self._leased_accounts.discard(account.username)
 
-        self._save_state()
+            self._save_state()
 
-        return AccountHealthEvent(
-            username=account.username,
-            reason=reason,
-            consecutive_failures=account.consecutive_failures,
-            threshold=threshold,
-            threshold_reached=threshold_reached,
-            available_accounts=len(self.get_available_accounts()),
-            total_accounts=len(self.accounts),
-            low_watermark=settings.ACCOUNT_LOW_WATERMARK,
-            should_alert_owner=self.should_alert_low_pool(),
-        )
+            return AccountHealthEvent(
+                username=account.username,
+                reason=reason,
+                consecutive_failures=account.consecutive_failures,
+                threshold=threshold,
+                threshold_reached=threshold_reached,
+                available_accounts=len(self.get_available_accounts()),
+                total_accounts=len(self.accounts),
+                low_watermark=settings.ACCOUNT_LOW_WATERMARK,
+                should_alert_owner=threshold_reached and self.should_alert_low_pool(),
+            )
 
     def should_alert_low_pool(self) -> bool:
         """Return true when the available account pool is below watermark and cooldown elapsed."""
-        low_watermark = settings.ACCOUNT_LOW_WATERMARK
-        if low_watermark <= 0:
-            return False
-        if len(self.get_available_accounts()) >= low_watermark:
-            return False
+        with self._lock:
+            low_watermark = settings.ACCOUNT_LOW_WATERMARK
+            if low_watermark <= 0:
+                return False
+            if len(self.get_available_accounts()) >= low_watermark:
+                return False
 
-        now = datetime.now()
-        cooldown = max(0, settings.ACCOUNT_ALERT_COOLDOWN_SECONDS)
-        if (
-            self._last_low_pool_alert_at
-            and (now - self._last_low_pool_alert_at).total_seconds() < cooldown
-        ):
-            return False
+            now = datetime.now()
+            cooldown = max(0, settings.ACCOUNT_ALERT_COOLDOWN_SECONDS)
+            if (
+                self._last_low_pool_alert_at
+                and (now - self._last_low_pool_alert_at).total_seconds() < cooldown
+            ):
+                return False
 
-        self._last_low_pool_alert_at = now
-        return True
+            self._last_low_pool_alert_at = now
+            return True
     
     def setup_account(self, account: Account) -> bool:
         """Setup an account for use with instagrapi."""

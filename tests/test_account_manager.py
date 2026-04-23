@@ -77,6 +77,24 @@ def test_account_success_resets_failure_counter(monkeypatch, tmp_path: Path):
     assert saved_account["last_failure_at"] is None
 
 
+def test_below_threshold_failure_does_not_alert_when_pool_is_low(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_LOW_WATERMARK", 2)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    manager.accounts[1].is_banned = True
+
+    event = manager.record_account_failure(manager.accounts[0], "timeout")
+
+    assert event.threshold_reached is False
+    assert event.available_accounts == 1
+    assert event.should_alert_owner is False
+    assert manager._last_low_pool_alert_at is None
+
+
 def test_low_pool_alert_respects_cooldown(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 1)
