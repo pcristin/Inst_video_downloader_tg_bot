@@ -51,6 +51,7 @@ class VideoDownloader:
         self.youtube_adapter = YouTubeShortsProviderAdapter(
             YouTubeShortsDownloader()
         )
+        self.last_account_health_event = None
 
     @property
     def fast_extractor(self):
@@ -165,23 +166,25 @@ class VideoDownloader:
 
         last_error: Optional[Exception] = None
         tried_accounts: set[str] = set()
-        for attempt in range(2):
-            account = manager.acquire_account()
+        max_attempts = max(1, len(manager.get_available_accounts()))
+        for attempt in range(max_attempts):
+            account = manager.acquire_account(excluded_usernames=tried_accounts)
             if not account:
-                break
-            if account.username in tried_accounts:
-                manager.release_account(account)
                 break
             tried_accounts.add(account.username)
             try:
                 await self._apply_instagram_throttle(account.username)
                 client = self._build_leased_client(account)
-                return self.instagram_adapter.download_with_instagram_client(
+                result = self.instagram_adapter.download_with_instagram_client(
                     client=client,
                     url=url,
                     output_dir=output_dir,
                     redact_proxy=self._redact_proxy,
                 )
+                manager.record_account_success(account)
+                if not getattr(self.last_account_health_event, "should_alert_owner", False):
+                    self.last_account_health_event = None
+                return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
                 logger.warning(
@@ -193,7 +196,9 @@ class VideoDownloader:
                         "error": str(auth_error),
                     },
                 )
-                manager.mark_account_banned(account)
+                event = manager.record_account_failure(account, "auth_challenge")
+                if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
+                    self.last_account_health_event = event
             except Exception as error:
                 if isinstance(error, DownloadError):
                     raise

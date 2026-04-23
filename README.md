@@ -317,6 +317,15 @@ username2|password2|totp_secret2
 
 Every managed account needs a password and a non-empty `totp_secret`. Empty third fields stay unavailable and will not be used for rotation.
 
+### Account Auto-Quarantine
+
+The bot tracks sequential failures for each managed Instagram account in `accounts_state.json`.
+When an account reaches `ACCOUNT_FAILURE_THRESHOLD` sequential auth/download failures, it is removed from the usable rotation by state, not deleted from `accounts.txt`.
+A successful account use resets its sequential failure counter.
+
+If usable accounts drop below `ACCOUNT_LOW_WATERMARK`, the bot sends an English DM alert to `BOT_OWNER_USER_ID`.
+Alerts are rate-limited by `ACCOUNT_ALERT_COOLDOWN_SECONDS` to avoid spam during outage bursts.
+
 Initialize sessions after creating `accounts.txt`:
 ```bash
 uv run python manage_accounts.py setup
