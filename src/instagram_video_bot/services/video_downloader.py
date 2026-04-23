@@ -185,7 +185,8 @@ class VideoDownloader:
                     redact_proxy=self._redact_proxy,
                 )
                 manager.record_account_success(account)
-                self.last_account_health_event = None
+                if not getattr(self.last_account_health_event, "should_alert_owner", False):
+                    self.last_account_health_event = None
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
