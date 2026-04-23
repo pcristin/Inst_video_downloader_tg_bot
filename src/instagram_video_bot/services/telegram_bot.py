@@ -22,6 +22,7 @@ from telegram.ext import (
 )
 
 from ..config.settings import settings
+from .chaos_text import ChaosText, TextContext
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
@@ -44,6 +45,7 @@ class RequestContext:
     status_message: Message
     quiet_mode: bool
     joined_existing: bool
+    chaos_enabled: bool = False
 
 
 class TelegramBot:
@@ -80,7 +82,7 @@ class TelegramBot:
         raw_url_count = len(RequestParser.URL_PATTERN.findall(message_text))
         if raw_url_count > settings.MAX_LINKS_PER_MESSAGE:
             await update.message.reply_text(
-                f"Only the first {settings.MAX_LINKS_PER_MESSAGE} supported links will be queued."
+                ChaosText.too_many_links(settings.MAX_LINKS_PER_MESSAGE)
             )
 
         for parsed_link in extracted_links:
@@ -100,6 +102,7 @@ class TelegramBot:
                     parsed_link.provider_label,
                     queue_position=submission.queue_position,
                     joined_existing=not submission.is_new_job,
+                    chaos_enabled=group_settings["chaos_mode_enabled"],
                 )
             )
             request_context = RequestContext(
@@ -113,6 +116,7 @@ class TelegramBot:
                 status_message=status_message,
                 quiet_mode=group_settings["quiet_mode"],
                 joined_existing=not submission.is_new_job,
+                chaos_enabled=group_settings["chaos_mode_enabled"],
             )
             self.request_contexts[submission.request_id] = request_context
             task = asyncio.create_task(self._await_request(context, request_context, submission.job))
@@ -121,26 +125,16 @@ class TelegramBot:
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show supported providers and usage help."""
-        if not update.message:
+        if not update.message or not update.effective_chat:
             return
-        await update.message.reply_text(
-            "Send a supported link directly in chat.\n"
-            "Providers: Instagram, Twitter/X, YouTube Shorts.\n"
-            "Commands: /help, /status, /formats, /cancel, /stats\n"
-            "Owner commands: /quiet on|off, /dupes on|off, /statsmode on|off,\n"
-            "/chatlimit <n>, /userlimit <n>, /admin_status"
-        )
+        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        await update.message.reply_text(ChaosText.help(group_settings["chaos_mode_enabled"]))
 
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show supported URL shapes."""
         if not update.message:
             return
-        await update.message.reply_text(
-            "Supported formats:\n"
-            "- Instagram posts, reels, stories, and share links\n"
-            "- Twitter/X status links\n"
-            "- YouTube Shorts URLs"
-        )
+        await update.message.reply_text(ChaosText.formats())
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show a safe queue and health summary."""
@@ -148,16 +142,9 @@ class TelegramBot:
             return
         snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
         persisted = self.state_store.get_public_status(update.effective_chat.id)
+        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
         await update.message.reply_text(
-            "Queue status:\n"
-            f"- Active jobs: {snapshot['active_jobs']}\n"
-            f"- Queued jobs: {snapshot['queued_jobs']}\n"
-            f"- Active requests: {snapshot['active_requests']}\n"
-            f"- Chat concurrency limit: {snapshot['chat_limit']}\n"
-            f"- Per-user limit: {snapshot['user_limit']}\n"
-            f"- Completed requests: {persisted['completed']}\n"
-            f"- Failed requests: {persisted['failed']}\n"
-            f"- Cache hits: {persisted['cache_hits']}"
+            ChaosText.status(snapshot, persisted, chaos_enabled=group_settings["chaos_mode_enabled"])
         )
 
     async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -169,7 +156,7 @@ class TelegramBot:
             update.effective_user.id,
         )
         if not request_id:
-            await update.message.reply_text("You have no active queued or running requests.")
+            await update.message.reply_text(ChaosText.no_active_request())
             return
 
         task = self.active_request_tasks.get(request_id)
@@ -178,9 +165,12 @@ class TelegramBot:
         job = self.job_manager.cancel_request(request_id)
         request_context = self.request_contexts.get(request_id)
         if request_context:
-            await self._safe_edit_text(request_context.status_message, "🛑 Request cancelled.")
+            await self._safe_edit_text(
+                request_context.status_message,
+                ChaosText.cancelled(request_context.chaos_enabled),
+            )
         if job and update.message:
-            await update.message.reply_text("Latest request cancelled.")
+            await update.message.reply_text(ChaosText.latest_cancelled())
 
     async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show lightweight group stats."""
@@ -188,22 +178,36 @@ class TelegramBot:
             return
         group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
         if not group_settings["stats_enabled"]:
-            await update.message.reply_text("Stats are disabled for this chat.")
+            await update.message.reply_text(ChaosText.stats_disabled())
             return
 
         stats = self.state_store.get_group_stats(update.effective_chat.id)
-        top_users = ", ".join(f"{name} ({count})" for name, count in stats["top_users"]) or "No completed requests yet"
-        top_providers = ", ".join(
-            f"{provider} ({count})" for provider, count in stats["top_providers"]
-        ) or "No completed requests yet"
         await update.message.reply_text(
-            "Group stats:\n"
-            f"- Completed: {stats['completed']}\n"
-            f"- Failed: {stats['failed']}\n"
-            f"- Cancelled: {stats['cancelled']}\n"
-            f"- Top users: {top_users}\n"
-            f"- Top providers: {top_providers}"
+            ChaosText.stats(stats, chaos_enabled=group_settings["chaos_mode_enabled"])
         )
+
+    async def chaos_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle or inspect chat-level chaos mode."""
+        if not update.message or not update.effective_chat or not update.effective_user:
+            return
+        action = (context.args[0] if context.args else "status").strip().lower()
+        if action == "status":
+            settings_row = self.state_store.ensure_group_settings(update.effective_chat.id)
+            await update.message.reply_text(ChaosText.chaos_status(settings_row["chaos_mode_enabled"]))
+            return
+
+        desired = self._parse_toggle_arg(action)
+        if desired is None:
+            await update.message.reply_text(ChaosText.chaos_usage())
+            return
+        if not await self._require_chaos_admin(update, context):
+            return
+
+        result = self.state_store.update_group_settings(
+            update.effective_chat.id,
+            chaos_mode_enabled=desired,
+        )
+        await update.message.reply_text(ChaosText.chaos_updated(result["chaos_mode_enabled"]))
 
     async def quiet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Toggle quiet mode for the current chat. Owner-only."""
@@ -212,7 +216,7 @@ class TelegramBot:
             context,
             setting_name="quiet_mode",
             command_name="quiet",
-            label="Quiet mode",
+            label="Тихий режим",
         )
 
     async def dupes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,7 +226,7 @@ class TelegramBot:
             context,
             setting_name="duplicate_suppression",
             command_name="dupes",
-            label="Duplicate suppression",
+            label="Защита от повторов",
         )
 
     async def statsmode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,7 +236,7 @@ class TelegramBot:
             context,
             setting_name="stats_enabled",
             command_name="statsmode",
-            label="Stats mode",
+            label="Статистика",
         )
 
     async def chatlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -242,7 +246,7 @@ class TelegramBot:
             context,
             setting_name="chat_max_concurrent_jobs",
             command_name="chatlimit",
-            label="Chat concurrency limit",
+            label="Лимит чата",
         )
 
     async def userlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,7 +256,7 @@ class TelegramBot:
             context,
             setting_name="user_max_active_jobs",
             command_name="userlimit",
-            label="Per-user limit",
+            label="Лимит на пользователя",
         )
 
     async def admin_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,29 +271,30 @@ class TelegramBot:
         provider_lines = ", ".join(
             f"{provider}:{status}={count}"
             for provider, status, count in admin_status["provider_job_counts"]
-        ) or "none"
+        ) or "нет"
         failure_lines = "\n".join(
             f"  - {provider} | {error_class} | {normalized_url}"
             for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
-        ) or "  - none"
+        ) or "  - нет"
         uptime_seconds = int(time.time() - self.started_at)
         await update.message.reply_text(
-            "Admin status:\n"
-            f"- Uptime: {uptime_seconds}s\n"
-            f"- Quiet mode: {'on' if settings_row['quiet_mode'] else 'off'}\n"
-            f"- Duplicate suppression: {'on' if settings_row['duplicate_suppression'] else 'off'}\n"
-            f"- Stats mode: {'on' if settings_row['stats_enabled'] else 'off'}\n"
-            f"- Chat concurrency limit: {settings_row['chat_max_concurrent_jobs']}\n"
-            f"- Per-user limit: {settings_row['user_max_active_jobs']}\n"
-            f"- Running jobs: {admin_status['running_jobs']}\n"
-            f"- Queued jobs: {admin_status['queued_jobs']}\n"
-            f"- Active requests: {snapshot['active_requests']}\n"
-            f"- Failed jobs: {admin_status['failed_jobs']}\n"
-            f"- Cache entries: {admin_status['cache_entries']}\n"
-            f"- Result cache enabled: {'on' if settings.RESULT_CACHE_ENABLED else 'off'}\n"
-            f"- Queue manager enabled: {'on' if settings.QUEUE_MANAGER_ENABLED else 'off'}\n"
-            f"- Provider job counts: {provider_lines}\n"
-            f"- Recent failures:\n{failure_lines}"
+            "Админ-статус:\n"
+            f"- Аптайм: {uptime_seconds}с\n"
+            f"- Тихий режим: {self._ru_on_off(settings_row['quiet_mode'])}\n"
+            f"- Защита от повторов: {self._ru_on_off(settings_row['duplicate_suppression'], feminine=True)}\n"
+            f"- Статистика: {self._ru_on_off(settings_row['stats_enabled'], feminine=True)}\n"
+            f"- Режим хаоса: {self._ru_on_off(settings_row['chaos_mode_enabled'])}\n"
+            f"- Лимит чата: {settings_row['chat_max_concurrent_jobs']}\n"
+            f"- Лимит на пользователя: {settings_row['user_max_active_jobs']}\n"
+            f"- Выполняется задач: {admin_status['running_jobs']}\n"
+            f"- В очереди задач: {admin_status['queued_jobs']}\n"
+            f"- Активные запросы: {snapshot['active_requests']}\n"
+            f"- Ошибочных задач: {admin_status['failed_jobs']}\n"
+            f"- Записей в кэше: {admin_status['cache_entries']}\n"
+            f"- Кэш результатов: {self._ru_on_off(settings.RESULT_CACHE_ENABLED)}\n"
+            f"- Менеджер очереди: {self._ru_on_off(settings.QUEUE_MANAGER_ENABLED)}\n"
+            f"- Задачи по площадкам: {provider_lines}\n"
+            f"- Последние ошибки:\n{failure_lines}"
         )
 
     async def _await_request(
@@ -349,7 +354,10 @@ class TelegramBot:
             self.job_manager.mark_request_failed(request_context.request_id, status="cancelled")
             raise
         except VideoDownloadError as error:
-            error_message = self._build_error_message(error)
+            error_message = self._build_error_message(
+                error,
+                chaos_enabled=request_context.chaos_enabled,
+            )
             logger.error("Download error for %s: %s", request_context.original_url, error)
             if self.job_manager.is_delivery_request(job, request_context.request_id):
                 self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
@@ -361,7 +369,7 @@ class TelegramBot:
                 self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
             await self._safe_edit_text(
                 request_context.status_message,
-                "❌ An unexpected error occurred. Please try again later."
+                ChaosText.unexpected_error()
             )
             self.job_manager.mark_request_failed(request_context.request_id, status="failed")
 
@@ -420,13 +428,18 @@ class TelegramBot:
             if job.state == "running":
                 if request_context.quiet_mode or request_context.joined_existing:
                     continue
-                text = f"⬇️ {request_context.provider_label} downloading..."
+                text = ChaosText.running(
+                    TextContext(
+                        provider_label=request_context.provider_label,
+                        chaos_enabled=request_context.chaos_enabled,
+                    )
+                )
                 await self._edit_status_message(request_context.status_message, text)
             elif job.state == "cancelled":
-                text = "🛑 Request cancelled."
+                text = ChaosText.cancelled(request_context.chaos_enabled)
                 await self._safe_edit_text(request_context.status_message, text)
             else:
-                text = "❌ Download failed."
+                text = ChaosText.failed(request_context.chaos_enabled)
                 await self._safe_edit_text(request_context.status_message, text)
 
     async def _global_error_handler(
@@ -550,13 +563,13 @@ class TelegramBot:
         *,
         queue_position: int,
         joined_existing: bool = False,
+        chaos_enabled: bool = False,
     ) -> str:
-        if joined_existing:
-            return f"🔁 {provider_label} already in progress. Waiting for the shared result."
-        if queue_position > 1:
-            ahead = queue_position - 1
-            return f"🕓 {provider_label} queued. {ahead} ahead of you."
-        return f"🕓 {provider_label} accepted. Starting shortly."
+        return ChaosText.submission(
+            TextContext(provider_label=provider_label, chaos_enabled=chaos_enabled),
+            queue_position=queue_position,
+            joined_existing=joined_existing,
+        )
 
     @classmethod
     def _build_caption_text(cls, title: str) -> str:
@@ -564,26 +577,14 @@ class TelegramBot:
         caption = title.strip()
         if not caption:
             return ""
-        full_caption = f"📹 {caption}"
+        full_caption = ChaosText.media_caption(caption)
         if len(full_caption) <= cls.MAX_MEDIA_CAPTION_LENGTH:
             return full_caption
         return full_caption[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
 
     @staticmethod
-    def _build_error_message(error: Exception) -> str:
-        error_str = str(error).lower()
-        if "authentication failed" in error_str or "cookies have expired" in error_str:
-            return (
-                "🔐 Instagram authentication failed. "
-                "The bot owner needs to refresh the session."
-            )
-        if "rate-limit" in error_str or "rate limit" in error_str:
-            return "⏳ Provider rate limit reached. Please try again later."
-        if "unsupported" in error_str:
-            return f"❌ {str(error)}"
-        if "timed out" in error_str:
-            return "⏱️ Download timed out. Please try again."
-        return f"❌ Sorry, couldn't download the media: {str(error)}"
+    def _build_error_message(error: Exception, *, chaos_enabled: bool = False) -> str:
+        return ChaosText.error(error, chaos_enabled=chaos_enabled)
 
     @staticmethod
     async def _edit_status_message(message: Message, text: str) -> None:
@@ -639,11 +640,10 @@ class TelegramBot:
             return
         desired = self._parse_toggle_arg(context.args[0] if context.args else "")
         if desired is None:
-            await update.message.reply_text(f"Usage: /{command_name} on|off")
+            await update.message.reply_text(ChaosText.setting_usage(command_name))
             return
         result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: desired})
-        state = "enabled" if result[setting_name] else "disabled"
-        await update.message.reply_text(f"{label} {state}.")
+        await update.message.reply_text(ChaosText.setting_updated(label, result[setting_name]))
 
     async def _set_numeric_group_setting(
         self,
@@ -661,28 +661,57 @@ class TelegramBot:
             return
         value = self._parse_positive_int_arg(context.args[0] if context.args else "")
         if value is None:
-            await update.message.reply_text(f"Usage: /{command_name} <positive integer>")
+            await update.message.reply_text(ChaosText.numeric_setting_usage(command_name))
             return
         result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: value})
         if setting_name == "chat_max_concurrent_jobs":
             self.job_manager.update_chat_limits(update.effective_chat.id, chat_limit=value)
         elif setting_name == "user_max_active_jobs":
             self.job_manager.update_chat_limits(update.effective_chat.id, user_limit=value)
-        await update.message.reply_text(f"{label} set to {result[setting_name]}.")
+        await update.message.reply_text(ChaosText.numeric_setting_updated(label, result[setting_name]))
+
+    @staticmethod
+    def _ru_on_off(value: bool, *, feminine: bool = False) -> str:
+        if feminine:
+            return "включена" if value else "выключена"
+        return "включен" if value else "выключен"
 
     async def _require_owner(self, update: Update) -> bool:
         """Return whether the sender is the configured bot owner."""
         if not update.message or not update.effective_user:
             return False
         if settings.BOT_OWNER_USER_ID is None:
-            await update.message.reply_text(
-                "Owner-only commands are unavailable until BOT_OWNER_USER_ID is configured."
-            )
+            await update.message.reply_text(ChaosText.owner_unconfigured())
             return False
         if update.effective_user.id != settings.BOT_OWNER_USER_ID:
-            await update.message.reply_text("This command is only available to the bot owner.")
+            await update.message.reply_text(ChaosText.owner_required())
             return False
         return True
+
+    async def _require_chaos_admin(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> bool:
+        """Return whether the sender can manage chat-level chaos mode."""
+        if not update.message or not update.effective_chat or not update.effective_user:
+            return False
+        if getattr(update.effective_chat, "type", "") == "private":
+            return True
+        if settings.BOT_OWNER_USER_ID is not None and update.effective_user.id == settings.BOT_OWNER_USER_ID:
+            return True
+        try:
+            member = await context.bot.get_chat_member(
+                update.effective_chat.id,
+                update.effective_user.id,
+            )
+        except Exception:
+            await update.message.reply_text(ChaosText.admin_required())
+            return False
+        if getattr(member, "status", "") in {"administrator", "creator"}:
+            return True
+        await update.message.reply_text(ChaosText.admin_required())
+        return False
 
     @staticmethod
     def _parse_toggle_arg(value: str) -> bool | None:
@@ -723,6 +752,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("formats", self.formats_command))
         self.application.add_handler(CommandHandler("cancel", self.cancel_command))
         self.application.add_handler(CommandHandler("stats", self.stats_command))
+        self.application.add_handler(CommandHandler("chaos", self.chaos_command))
         self.application.add_handler(CommandHandler("quiet", self.quiet_command))
         self.application.add_handler(CommandHandler("dupes", self.dupes_command))
         self.application.add_handler(CommandHandler("statsmode", self.statsmode_command))
