@@ -165,7 +165,8 @@ class VideoDownloader:
 
         last_error: Optional[Exception] = None
         tried_accounts: set[str] = set()
-        for attempt in range(2):
+        max_attempts = max(1, len(manager.get_available_accounts()))
+        for attempt in range(max_attempts):
             account = manager.acquire_account()
             if not account:
                 break
@@ -176,12 +177,14 @@ class VideoDownloader:
             try:
                 await self._apply_instagram_throttle(account.username)
                 client = self._build_leased_client(account)
-                return self.instagram_adapter.download_with_instagram_client(
+                result = self.instagram_adapter.download_with_instagram_client(
                     client=client,
                     url=url,
                     output_dir=output_dir,
                     redact_proxy=self._redact_proxy,
                 )
+                manager.record_account_success(account)
+                return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
                 logger.warning(
@@ -193,7 +196,7 @@ class VideoDownloader:
                         "error": str(auth_error),
                     },
                 )
-                manager.mark_account_banned(account)
+                manager.record_account_failure(account, "auth_challenge")
             except Exception as error:
                 if isinstance(error, DownloadError):
                     raise
