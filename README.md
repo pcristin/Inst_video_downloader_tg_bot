@@ -97,30 +97,29 @@ nano .env  # Add BOT_TOKEN, IG_USERNAME, IG_PASSWORD
 make build
 make up
 
-# 5. Import Instagram cookies (choose one method)
-make import-cookies              # For single account
-make accounts-setup             # For multi-account mode
+# 5. Optional multi-account setup
+# Create accounts.txt if you want rotation support, then initialize sessions
+make accounts-setup
 ```
 
 ### Option 2: Local Installation
 
 ```bash
-# 1. Clone and setup Python environment
+# 1. Clone and install project dependencies
 git clone https://github.com/yourusername/instagram-video-downloader-bot.git
 cd instagram-video-downloader-bot
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv sync
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure environment
+# 2. Configure environment
 cp .env.example .env
 nano .env  # Add your credentials
 
-# 4. Import cookies and start
-python3 import_cookies.py
-python3 -m src.instagram_video_bot
+# 3. Optional multi-account setup
+# Create accounts.txt with username|password|totp_secret entries
+uv run python manage_accounts.py setup
+
+# 4. Start the bot
+uv run python -m src.instagram_video_bot
 ```
 
 ## Usage
@@ -130,7 +129,7 @@ python3 -m src.instagram_video_bot
 ```bash
 # Start the bot
 make up                    # Docker
-python3 -m src.instagram_video_bot  # Local
+uv run python -m src.instagram_video_bot  # Local
 
 # View logs
 make logs                  # Docker
@@ -173,11 +172,9 @@ make warmup-available
 ### Monitoring & Maintenance
 
 ```bash
-# Check cookie validity
-make check-cookies
-
-# Monitor account health
-make monitor-cookies
+# Inspect account health
+make accounts-status              # Docker
+uv run python manage_accounts.py status  # Local
 
 # View system health
 make test-health
@@ -205,16 +202,10 @@ make clean
 
 ```bash
 # Run all tests
-python -m pytest
-
-# Run with coverage
-python -m pytest --cov=src/instagram_video_bot
+uv run pytest -q
 
 # Run specific test file
-python -m pytest tests/test_video_downloader.py
-
-# Run in Docker
-make test
+uv run pytest tests/test_video_downloader.py -q
 ```
 
 ### Test Structure
@@ -281,10 +272,12 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
       - name: Run tests
         run: |
-          pip install -r requirements.txt
-          python -m pytest --cov
+          uv sync
+          uv run pytest -q
 ```
 
 ## Configuration
@@ -321,7 +314,7 @@ DEV_MODE=false
 ### Account Files
 
 #### Single Account Mode
-Use browser cookies (see Installation section)
+Set `IG_USERNAME`, `IG_PASSWORD`, and optional `TOTP_SECRET` in `.env`.
 
 #### Multi-Account Mode
 Create `accounts.txt`:
@@ -344,7 +337,7 @@ username3
 
 | Issue | Solution |
 |-------|----------|
-| Authentication failed | `make check-cookies` → `make import-cookies` |
+| Authentication failed | Verify `.env` credentials, then run `make accounts-setup` or `uv run python manage_accounts.py setup` |
 | Rate limit reached | `make accounts-rotate` → `make warmup-available` |
 | No available accounts | `make accounts-status` → `make accounts-reset` |
 | Container won't start | Check `.env` file and `make logs` |
@@ -392,27 +385,22 @@ We welcome contributions! Please follow these guidelines:
 git clone https://github.com/yourusername/instagram-video-downloader-bot.git
 cd instagram-video-downloader-bot
 
-# 2. Create virtual environment
-python -m venv .venv
-source .venv/bin/activate
+# 2. Install development dependencies
+uv sync
 
-# 3. Install development dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
-
-# 4. Create feature branch
+# 3. Create feature branch
 git checkout -b feature/your-feature-name
 
-# 5. Make changes and test
-python -m pytest
-black src/
-isort src/
+# 4. Make changes and test
+uv run pytest -q
+uv run black src/
+uv run isort src/
 
-# 6. Commit and push
+# 5. Commit and push
 git commit -m "Add your feature"
 git push origin feature/your-feature-name
 
-# 7. Create Pull Request
+# 6. Create Pull Request
 ```
 
 ### Development Guidelines

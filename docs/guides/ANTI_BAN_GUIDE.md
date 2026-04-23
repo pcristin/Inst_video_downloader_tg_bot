@@ -35,20 +35,18 @@ PROXY_PASSWORD=proxypass
 Before using the bot, warm up the account:
 
 ```bash
-python3 warmup_account.py
+make warmup USERNAME=your_username
 ```
 
 Then wait at least 30 minutes before first use.
 
-### 3. Import Cookies Properly
+### 3. Initialize Accounts Properly
 
 ```bash
-# 1. Create account.txt with your account data
-# 2. Import cookies
-python3 import_cookies.py
-
-# 3. Check cookies are valid
-python3 check_cookies.py
+uv sync
+# Create accounts.txt if you want multi-account rotation
+uv run python manage_accounts.py setup
+uv run python manage_accounts.py status
 ```
 
 ### 4. Configure Rate Limiting
@@ -90,27 +88,21 @@ If you have multiple accounts:
 2. Rotate between them:
    ```bash
    # Use account 1
-   cp account1.txt account.txt
-   python3 import_cookies.py
-   docker-compose restart
+   cp account1.txt accounts.txt
+   uv run python manage_accounts.py setup
+   make restart
    
    # Later, switch to account 2
-   cp account2.txt account.txt
-   python3 import_cookies.py
-   docker-compose restart
+   cp account2.txt accounts.txt
+   uv run python manage_accounts.py setup
+   make restart
    ```
 
 ### 7. Monitor Account Health
 
 Run this regularly:
 ```bash
-python3 check_cookies.py
-```
-
-Set up monitoring:
-```bash
-# Run in background
-python3 monitor_cookies.py &
+make accounts-status
 ```
 
 ### 8. If Account Gets Banned
@@ -135,19 +127,19 @@ python3 monitor_cookies.py &
 ```bash
 # 1. Get USA residential proxy
 # 2. Update .env with proxy details
-# 3. Import account cookies
-python3 import_cookies.py
+# 3. Initialize account sessions
+uv run python manage_accounts.py setup
 
 # 4. Warm up account
-python3 warmup_account.py
+make warmup USERNAME=your_username
 
 # 5. Wait 30+ minutes
 
 # 6. Start bot with new anti-detection features
-docker-compose up -d
+make up
 
 # 7. Monitor health
-python3 monitor_cookies.py
+make accounts-status
 ```
 
 ## Emergency Checklist
@@ -161,4 +153,4 @@ If accounts keep getting banned:
 - [ ] Are you limiting daily downloads?
 - [ ] Is the User-Agent up to date?
 
-Remember: Instagram's detection is sophisticated. Even with all precautions, accounts may still get flagged. Always have backup accounts ready. 
+Remember: Instagram's detection is sophisticated. Even with all precautions, accounts may still get flagged. Always have backup accounts ready.
