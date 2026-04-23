@@ -204,6 +204,15 @@ def test_supported_url_pattern_matches_supported_routes(url):
     assert TelegramBot.INSTAGRAM_VIDEO_PATTERN.search(url)
 
 
+def test_build_caption_text_truncates_long_titles():
+    title = "x" * 2000
+
+    caption = TelegramBot._build_caption_text(title)
+
+    assert len(caption) == TelegramBot.MAX_MEDIA_CAPTION_LENGTH
+    assert caption.endswith("...")
+
+
 @pytest.mark.asyncio
 async def test_owner_only_quiet_command_requires_owner(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
