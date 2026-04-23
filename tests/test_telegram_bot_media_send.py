@@ -8,6 +8,7 @@ from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
 from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
 from src.instagram_video_bot.services.video_downloader import MediaItem, VideoInfo
+from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
 class _FakeBot:
@@ -15,7 +16,11 @@ class _FakeBot:
         self.video_calls = []
         self.photo_calls = []
         self.group_calls = []
+        self.message_calls = []
         self.member_status = member_status
+
+    async def send_message(self, **kwargs):
+        self.message_calls.append(kwargs)
 
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -358,6 +363,65 @@ def test_build_caption_text_truncates_long_titles():
 
     assert len(caption) == TelegramBot.MAX_MEDIA_CAPTION_LENGTH
     assert caption.endswith("...")
+
+
+@pytest.mark.asyncio
+async def test_owner_low_account_pool_alert_is_english(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    event = AccountHealthEvent(
+        username="acc1",
+        reason="auth_challenge",
+        consecutive_failures=2,
+        threshold=2,
+        threshold_reached=True,
+        available_accounts=2,
+        total_accounts=13,
+        low_watermark=3,
+        should_alert_owner=True,
+    )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+
+    await telegram_bot._notify_owner_about_low_account_pool(context, event)
+
+    assert fake_bot.message_calls == [
+        {
+            "chat_id": 1001,
+            "text": (
+                "Instagram account pool warning:\n"
+                "Usable accounts left: 2 of 13.\n"
+                "Low-watermark threshold: 3.\n"
+                "Last removed account: acc1.\n"
+                "Reason: auth_challenge after 2 sequential failures."
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_owner_low_account_pool_alert_skips_without_owner(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    event = AccountHealthEvent(
+        username="acc1",
+        reason="auth_challenge",
+        consecutive_failures=2,
+        threshold=2,
+        threshold_reached=True,
+        available_accounts=2,
+        total_accounts=13,
+        low_watermark=3,
+        should_alert_owner=True,
+    )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", None)
+
+    await telegram_bot._notify_owner_about_low_account_pool(context, event)
+
+    assert fake_bot.message_calls == []
 
 
 @pytest.mark.asyncio
