@@ -24,6 +24,9 @@ class Account:
     ban_reason: Optional[str] = None  # Reason for being marked unavailable
     banned_at: Optional[datetime] = None  # When the account was banned
     last_used: Optional[datetime] = None
+    consecutive_failures: int = 0
+    last_failure_reason: Optional[str] = None
+    last_failure_at: Optional[datetime] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -37,6 +40,9 @@ class Account:
             'ban_reason': self.ban_reason,
             'banned_at': self.banned_at.isoformat() if self.banned_at else None,
             'last_used': self.last_used.isoformat() if self.last_used else None,
+            'consecutive_failures': self.consecutive_failures,
+            'last_failure_reason': self.last_failure_reason,
+            'last_failure_at': self.last_failure_at.isoformat() if self.last_failure_at else None,
         }
     
     @classmethod
@@ -50,6 +56,8 @@ class Account:
             session_file=Path(data['session_file']) if data.get('session_file') else None,
             is_banned=data.get('is_banned', False),
             ban_reason=data.get('ban_reason'),
+            consecutive_failures=data.get('consecutive_failures', 0),
+            last_failure_reason=data.get('last_failure_reason'),
         )
         
         # Parse datetime fields
@@ -57,8 +65,23 @@ class Account:
             account.banned_at = datetime.fromisoformat(data['banned_at'])
         if data.get('last_used'):
             account.last_used = datetime.fromisoformat(data['last_used'])
+        if data.get('last_failure_at'):
+            account.last_failure_at = datetime.fromisoformat(data['last_failure_at'])
             
         return account
+
+@dataclass
+class AccountHealthEvent:
+    """Structured account health update for alerts and logs."""
+    username: str
+    reason: str
+    consecutive_failures: int
+    threshold: int
+    threshold_reached: bool
+    available_accounts: int
+    total_accounts: int
+    low_watermark: int
+    should_alert_owner: bool
 
 class AccountManager:
     """Manages multiple Instagram accounts with rotation and health tracking."""
@@ -74,6 +97,7 @@ class AccountManager:
         self.sessions_dir.mkdir(exist_ok=True)
         self._leased_accounts: set[str] = set()
         self._lock = threading.Lock()
+        self._last_low_pool_alert_at: Optional[datetime] = None
         
         # Get available proxies
         self.proxies = settings.get_proxy_list()
@@ -170,6 +194,9 @@ class AccountManager:
                         account.is_banned = saved_account.get('is_banned', False)
                         account.ban_reason = saved_account.get('ban_reason')
                         account.banned_at = datetime.fromisoformat(saved_account['banned_at']) if saved_account.get('banned_at') else None
+                        account.consecutive_failures = saved_account.get('consecutive_failures', 0)
+                        account.last_failure_reason = saved_account.get('last_failure_reason')
+                        account.last_failure_at = datetime.fromisoformat(saved_account['last_failure_at']) if saved_account.get('last_failure_at') else None
                         # Update proxy if changed
                         if saved_account.get('proxy'):
                             account.proxy = saved_account['proxy']
@@ -249,6 +276,62 @@ class AccountManager:
             return
         with self._lock:
             self._leased_accounts.discard(account.username)
+
+    def record_account_success(self, account: Account) -> None:
+        """Reset sequential failure tracking after a successful account use."""
+        account.consecutive_failures = 0
+        account.last_failure_reason = None
+        account.last_failure_at = None
+        self._save_state()
+
+    def record_account_failure(self, account: Account, reason: str) -> AccountHealthEvent:
+        """Persist a sequential failure and quarantine accounts at threshold."""
+        threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
+        now = datetime.now()
+
+        account.consecutive_failures += 1
+        account.last_failure_reason = reason
+        account.last_failure_at = now
+
+        threshold_reached = account.consecutive_failures >= threshold
+        if threshold_reached:
+            account.is_banned = True
+            account.ban_reason = f"sequential_failures:{reason}"
+            account.banned_at = now
+            self._leased_accounts.discard(account.username)
+
+        self._save_state()
+
+        return AccountHealthEvent(
+            username=account.username,
+            reason=reason,
+            consecutive_failures=account.consecutive_failures,
+            threshold=threshold,
+            threshold_reached=threshold_reached,
+            available_accounts=len(self.get_available_accounts()),
+            total_accounts=len(self.accounts),
+            low_watermark=settings.ACCOUNT_LOW_WATERMARK,
+            should_alert_owner=self.should_alert_low_pool(),
+        )
+
+    def should_alert_low_pool(self) -> bool:
+        """Return true when the available account pool is below watermark and cooldown elapsed."""
+        low_watermark = settings.ACCOUNT_LOW_WATERMARK
+        if low_watermark <= 0:
+            return False
+        if len(self.get_available_accounts()) >= low_watermark:
+            return False
+
+        now = datetime.now()
+        cooldown = max(0, settings.ACCOUNT_ALERT_COOLDOWN_SECONDS)
+        if (
+            self._last_low_pool_alert_at
+            and (now - self._last_low_pool_alert_at).total_seconds() < cooldown
+        ):
+            return False
+
+        self._last_low_pool_alert_at = now
+        return True
     
     def setup_account(self, account: Account) -> bool:
         """Setup an account for use with instagrapi."""
@@ -362,6 +445,9 @@ class AccountManager:
                 account.is_banned = False
                 account.ban_reason = None
                 account.banned_at = None
+                account.consecutive_failures = 0
+                account.last_failure_reason = None
+                account.last_failure_at = None
                 reset_count += 1
         
         self._save_state()
@@ -378,6 +464,9 @@ class AccountManager:
                 account.is_banned = False
                 account.ban_reason = None
                 account.banned_at = None
+                account.consecutive_failures = 0
+                account.last_failure_reason = None
+                account.last_failure_at = None
                 reset_count += 1
         
         if reset_count > 0:
