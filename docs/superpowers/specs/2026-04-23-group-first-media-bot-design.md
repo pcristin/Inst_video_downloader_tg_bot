@@ -73,10 +73,28 @@ When a user posts a supported link in a group:
 ### Commands
 
 - `/help`: show supported providers and example usage
-- `/status`: show queue depth, active jobs, cache state, and basic health
+- `/status`: show a user-safe queue summary and basic availability information
 - `/formats`: show supported URL types and provider list
 - `/cancel`: let a user cancel their own queued job and attempt to cancel their running job when feasible
 - `/stats`: optional lightweight group statistics if enabled
+
+### Command Access Model
+
+Public commands available to any user:
+
+- `/help`
+- `/status`
+- `/formats`
+- `/cancel` for that user's own jobs
+- `/stats` when enabled
+
+Owner-only admin commands and settings changes:
+
+- any future commands that mutate bot configuration or queue policy
+- detailed operational or diagnostic status views beyond the public `/status`
+- toggling quiet mode, duplicate suppression, stats collection, or concurrency overrides
+
+The owner identity should be explicit in configuration, for example `BOT_OWNER_USER_ID`, and checked against the Telegram user id of the command sender. This is preferred over relying on group admin roles because the operational owner of the bot is what matters here, not chat-level moderation permissions.
 
 ## Architecture
 
@@ -235,6 +253,8 @@ Store:
 - optional local overrides for concurrency caps
 - stats enabled
 
+All writes to group settings must be restricted to the configured bot owner.
+
 #### `recent_results`
 
 Store:
@@ -270,6 +290,7 @@ Add configuration flags for safe rollout:
 - `USER_MAX_ACTIVE_JOBS`
 - `RECENT_RESULT_TTL_SECONDS`
 - `MAX_LINKS_PER_MESSAGE`
+- `BOT_OWNER_USER_ID`
 
 These allow gradual rollout without destabilizing the bot.
 
