@@ -18,7 +18,7 @@ make clean          # Clean up temp files
 # View all accounts status
 make accounts-status
 
-# Setup all accounts (login & generate cookies)
+# Setup all accounts and initialize sessions
 make accounts-setup
 
 # Rotate to next available account
@@ -33,23 +33,17 @@ make accounts-warmup                             # Warm up current account
 make accounts-warmup-one USERNAME=samosirarlene  # Warm up specific account
 ```
 
-## Cookie Management
+## Session and Health Commands
 
 ```bash
-# Check if cookies are valid
-make check-cookies
+# Health check inside the running container
+make test-health
 
-# Import cookies (single account mode)
-make import-cookies
+# Inspect current account/session state
+make accounts-status
 
-# Import InstAccountsManager format accounts
-make import-instmanager
-
-# Create pre-auth accounts file from imported cookies
-make create-preauth
-
-# Monitor cookie health
-make monitor-cookies
+# Open a shell if you need manual inspection
+make shell
 ```
 
 ## Development & Testing
@@ -63,31 +57,27 @@ make setup-2fa      # Setup 2FA
 
 ## Typical Workflows
 
-### Setup with InstAccountsManager Format (NEW!)
+### Setup with InstAccountsManager Source Data
 
 ```bash
-# 1. Create raw_accounts.txt with your full account data
-# (copy-paste from your provider)
+# 1. Convert provider data into accounts.txt
+# Format: username|password|totp_secret
 
-# 2. Format accounts to correct format
-make format-instmanager
+echo "username|password|totp_secret" > accounts.txt
 
-# 3. Build Docker image
+# 2. Build Docker image
 make build
 
-# 4. Import all accounts and extract cookies
-make import-instmanager
+# 3. Initialize account sessions
+make accounts-setup
 
-# 5. Create pre-auth accounts file
-make create-preauth
-
-# 6. Start the bot (will auto-detect accounts_preauth.txt)
+# 4. Start the bot
 make up
 
-# 7. Check status
+# 5. Check status
 make accounts-status
 
-# 8. Monitor logs
+# 6. Monitor logs
 make logs
 ```
 
@@ -139,8 +129,11 @@ make accounts-reset-one USERNAME=problemaccount
 make accounts-reset
 make accounts-setup
 
-# Need to check cookies?
-make check-cookies
+# Need to inspect current account state?
+make accounts-status
+
+# Need to run the health check?
+make test-health
 
 # Need shell access?
 make shell
@@ -149,7 +142,7 @@ make shell
 ## Notes
 
 - All commands run inside Docker container
-- No need to install Python/pip on host
+- The image uses `uv` for Python execution
 - Account data persists in `accounts_state.json`
-- Cookies stored in `cookies/` directory
+- Session state is managed through the supported account workflow
 - Logs available with `make logs` 
