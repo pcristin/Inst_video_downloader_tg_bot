@@ -75,14 +75,15 @@ def probe_video_metadata(file_path: Path) -> MediaMetadata:
     height = _safe_int(stream.get("height"))
     duration = _safe_float(stream.get("duration"))
 
-    if _has_right_angle_rotation(stream) and width and height:
-        width, height = height, width
-
     width, height = _apply_sample_aspect_ratio(
         width,
         height,
         str(stream.get("sample_aspect_ratio") or ""),
     )
+
+    if _has_right_angle_rotation(stream) and width and height:
+        width, height = height, width
+
     return MediaMetadata(duration=duration, width=width, height=height)
 
 
