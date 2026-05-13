@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dtm
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -157,7 +158,7 @@ async def test_send_single_video_passes_probe_metadata_to_telegram(tmp_path):
 
     assert fake_bot.video_calls[0]["width"] == 720
     assert fake_bot.video_calls[0]["height"] == 1280
-    assert fake_bot.video_calls[0]["duration"] == 12
+    assert fake_bot.video_calls[0]["duration"] == dtm.timedelta(seconds=12)
     assert fake_bot.video_calls[0]["supports_streaming"] is True
 
 
@@ -248,7 +249,7 @@ async def test_send_media_group_video_includes_probe_metadata(tmp_path):
     video_media = fake_bot.group_calls[0]["media"][1]
     assert video_media.width == 1080
     assert video_media.height == 1920
-    assert video_media.duration == 4
+    assert video_media._duration == dtm.timedelta(seconds=4)
     assert video_media.supports_streaming is True
 
 
