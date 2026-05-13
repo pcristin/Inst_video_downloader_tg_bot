@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import ExitStack
 from dataclasses import dataclass
+import datetime as dtm
 import logging
 from pathlib import Path
 import time
@@ -619,7 +620,7 @@ class TelegramBot:
         if media_item.height:
             kwargs["height"] = int(media_item.height)
         if media_item.duration is not None:
-            kwargs["duration"] = max(0, round(float(media_item.duration)))
+            kwargs["duration"] = dtm.timedelta(seconds=max(0, round(float(media_item.duration))))
         if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
             kwargs["supports_streaming"] = True
         return kwargs
