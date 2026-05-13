@@ -421,6 +421,8 @@ class TelegramBot:
                             "media_type": item.media_type,
                             "caption": item.caption,
                             "duration": item.duration,
+                            "width": item.width,
+                            "height": item.height,
                         }
                         for item in video_info.media_items
                     ],
@@ -502,11 +504,13 @@ class TelegramBot:
             media_item = media_items[0]
             with open(media_item.file_path, "rb") as media_file:
                 if media_item.media_type == "video":
+                    video_kwargs = self._telegram_video_kwargs(media_item)
                     await context.bot.send_video(
                         chat_id=request_context.chat_id,
                         video=media_file,
                         caption=caption_text,
                         reply_to_message_id=request_context.original_message_id,
+                        **video_kwargs,
                     )
                 else:
                     await context.bot.send_photo(
@@ -523,7 +527,13 @@ class TelegramBot:
                 media_file = stack.enter_context(open(media_item.file_path, "rb"))
                 item_caption = caption_text if index == 0 else None
                 if media_item.media_type == "video":
-                    media_group.append(InputMediaVideo(media=media_file, caption=item_caption))
+                    media_group.append(
+                        InputMediaVideo(
+                            media=media_file,
+                            caption=item_caption,
+                            **self._telegram_video_kwargs(media_item),
+                        )
+                    )
                 else:
                     media_group.append(InputMediaPhoto(media=media_file, caption=item_caption))
 
@@ -560,6 +570,8 @@ class TelegramBot:
                 media_type=item["media_type"],
                 caption=item.get("caption"),
                 duration=item.get("duration"),
+                width=item.get("width"),
+                height=item.get("height"),
             )
             for item in cached.media_items
         ]
@@ -597,6 +609,20 @@ class TelegramBot:
         if len(full_caption) <= cls.MAX_MEDIA_CAPTION_LENGTH:
             return full_caption
         return full_caption[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
+
+    @staticmethod
+    def _telegram_video_kwargs(media_item: MediaItem) -> dict[str, object]:
+        """Build optional Telegram video metadata from a media item."""
+        kwargs: dict[str, object] = {}
+        if media_item.width:
+            kwargs["width"] = int(media_item.width)
+        if media_item.height:
+            kwargs["height"] = int(media_item.height)
+        if media_item.duration is not None:
+            kwargs["duration"] = max(0, round(float(media_item.duration)))
+        if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
+            kwargs["supports_streaming"] = True
+        return kwargs
 
     @staticmethod
     def _build_error_message(error: Exception, *, chaos_enabled: bool = False) -> str:
