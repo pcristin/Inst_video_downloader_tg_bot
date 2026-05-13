@@ -129,6 +129,39 @@ async def test_send_single_video_uses_send_video(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_single_video_passes_probe_metadata_to_telegram(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    video_file = tmp_path / "portrait.mp4"
+    video_file.write_bytes(b"video")
+
+    info = VideoInfo(
+        file_path=video_file,
+        title="Portrait reel",
+        media_items=[
+            MediaItem(
+                file_path=video_file,
+                media_type="video",
+                duration=11.6,
+                width=720,
+                height=1280,
+            )
+        ],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    assert fake_bot.video_calls[0]["width"] == 720
+    assert fake_bot.video_calls[0]["height"] == 1280
+    assert fake_bot.video_calls[0]["duration"] == 12
+    assert fake_bot.video_calls[0]["supports_streaming"] is True
+
+
+@pytest.mark.asyncio
 async def test_send_single_photo_uses_send_photo(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
@@ -180,6 +213,43 @@ async def test_send_carousel_uses_media_group(tmp_path):
     assert len(fake_bot.photo_calls) == 0
     assert len(fake_bot.group_calls) == 1
     assert len(fake_bot.group_calls[0]["media"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_media_group_video_includes_probe_metadata(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    first = tmp_path / "1.jpg"
+    second = tmp_path / "2.mp4"
+    first.write_bytes(b"photo")
+    second.write_bytes(b"video")
+
+    info = VideoInfo(
+        file_path=first,
+        title="Album title",
+        media_items=[
+            MediaItem(file_path=first, media_type="photo"),
+            MediaItem(
+                file_path=second,
+                media_type="video",
+                duration=4.2,
+                width=1080,
+                height=1920,
+            ),
+        ],
+        primary_media_type="photo",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    video_media = fake_bot.group_calls[0]["media"][1]
+    assert video_media.width == 1080
+    assert video_media.height == 1920
+    assert video_media.duration == 4
+    assert video_media.supports_streaming is True
 
 
 @pytest.mark.asyncio

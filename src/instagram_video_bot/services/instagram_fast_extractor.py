@@ -32,6 +32,8 @@ class ExtractedMedia:
     url: str
     media_type: _MEDIA_TYPE
     duration: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass
@@ -41,6 +43,8 @@ class DownloadedMedia:
     file_path: Path
     media_type: _MEDIA_TYPE
     duration: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass
@@ -328,9 +332,11 @@ class InstagramFastExtractor:
             best = self._pick_highest_resolution_video(video_versions)
             if best:
                 return ExtractedMedia(
-                    url=best,
+                    url=str(best["url"]),
                     media_type="video",
                     duration=self._safe_float(node.get("video_duration")),
+                    width=self._safe_int(best.get("width")),
+                    height=self._safe_int(best.get("height")),
                 )
 
         image_versions = node.get("image_versions2")
@@ -385,11 +391,14 @@ class InstagramFastExtractor:
                     if not isinstance(media_node, dict):
                         continue
                     if media_node.get("is_video") and media_node.get("video_url"):
+                        width, height = self._parse_graphql_dimensions(media_node)
                         out.append(
                             ExtractedMedia(
                                 url=str(media_node["video_url"]),
                                 media_type="video",
                                 duration=self._safe_float(media_node.get("video_duration")),
+                                width=width,
+                                height=height,
                             )
                         )
                     elif media_node.get("display_url"):
@@ -404,6 +413,7 @@ class InstagramFastExtractor:
                     return caption_text, out
 
         if node.get("video_url"):
+            width, height = self._parse_graphql_dimensions(node)
             return (
                 caption_text,
                 [
@@ -411,6 +421,8 @@ class InstagramFastExtractor:
                         url=str(node["video_url"]),
                         media_type="video",
                         duration=self._safe_float(node.get("video_duration")),
+                        width=width,
+                        height=height,
                     )
                 ],
             )
@@ -474,6 +486,8 @@ class InstagramFastExtractor:
                     file_path=out_path,
                     media_type=item.media_type,
                     duration=item.duration,
+                    width=item.width,
+                    height=item.height,
                 )
             )
 
@@ -540,9 +554,9 @@ class InstagramFastExtractor:
         return None
 
     @staticmethod
-    def _pick_highest_resolution_video(video_versions: List[Dict[str, Any]]) -> Optional[str]:
+    def _pick_highest_resolution_video(video_versions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Pick best video candidate by pixel area."""
-        best_url: Optional[str] = None
+        best_item: Optional[Dict[str, Any]] = None
         best_area = -1
         for item in video_versions:
             if not isinstance(item, dict) or not item.get("url"):
@@ -552,8 +566,15 @@ class InstagramFastExtractor:
             area = width * height
             if area > best_area:
                 best_area = area
-                best_url = str(item["url"])
-        return best_url
+                best_item = item
+        return best_item
+
+    @classmethod
+    def _parse_graphql_dimensions(cls, node: Dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+        dimensions = node.get("dimensions")
+        if not isinstance(dimensions, dict):
+            return None, None
+        return cls._safe_int(dimensions.get("width")), cls._safe_int(dimensions.get("height"))
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
@@ -562,6 +583,16 @@ class InstagramFastExtractor:
             if value is None:
                 return None
             return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        """Convert value to int if possible."""
+        try:
+            if value is None:
+                return None
+            return int(value)
         except (TypeError, ValueError):
             return None
 
