@@ -144,7 +144,7 @@ class InstagramProviderAdapter:
         return VideoInfo(
             file_path=file_path,
             title=media_info.get("title", ""),
-            duration=media_info.get("duration"),
+            duration=media_item.duration,
             description=media_info.get("title", ""),
             media_items=[media_item],
             primary_media_type=media_type,
@@ -181,9 +181,10 @@ class InstagramProviderAdapter:
         height: int | None = None,
     ) -> MediaItem:
         """Build a media item and fill missing video metadata from the local file."""
-        if media_type == "video" and (duration is None or not width or not height):
+        duration_is_missing = InstagramProviderAdapter._is_missing_video_duration(duration)
+        if media_type == "video" and (duration_is_missing or not width or not height):
             metadata = probe_video_metadata(file_path)
-            duration = duration if duration is not None else metadata.duration
+            duration = metadata.duration if duration_is_missing else duration
             width = width or metadata.width
             height = height or metadata.height
 
@@ -195,6 +196,15 @@ class InstagramProviderAdapter:
             width=width,
             height=height,
         )
+
+    @staticmethod
+    def _is_missing_video_duration(duration: float | int | None) -> bool:
+        if duration is None:
+            return True
+        try:
+            return float(duration) <= 0
+        except (TypeError, ValueError):
+            return True
 
 
 class TwitterProviderAdapter:
