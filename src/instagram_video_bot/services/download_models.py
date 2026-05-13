@@ -15,6 +15,8 @@ class MediaItem:
     media_type: Literal["video", "photo"]
     caption: Optional[str] = None
     duration: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass

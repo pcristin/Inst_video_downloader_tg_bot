@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, cast
 
 from .download_models import AuthenticationError, DownloadError, MediaItem, VideoInfo
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor, InstagramFastExtractorError
+from .media_metadata import probe_video_metadata
 from .twitter_downloader import TwitterDownloadError, TwitterDownloader
 from .youtube_downloader import YouTubeDownloadError, YouTubeShortsDownloader
 from ..config.settings import settings
@@ -65,11 +66,13 @@ class InstagramProviderAdapter:
             raise InstagramFastExtractorError("Fast extractor returned no media")
 
         media_items = [
-            MediaItem(
+            self._build_media_item(
                 file_path=item.file_path,
                 media_type=item.media_type,
                 caption=result.caption or None,
                 duration=item.duration,
+                width=item.width,
+                height=item.height,
             )
             for item in result.media_items
         ]
@@ -132,7 +135,7 @@ class InstagramProviderAdapter:
             )
 
         media_type = self._infer_media_type(file_path)
-        media_item = MediaItem(
+        media_item = self._build_media_item(
             file_path=file_path,
             media_type=media_type,
             caption=media_info.get("title") or None,
@@ -141,7 +144,7 @@ class InstagramProviderAdapter:
         return VideoInfo(
             file_path=file_path,
             title=media_info.get("title", ""),
-            duration=media_info.get("duration"),
+            duration=media_item.duration,
             description=media_info.get("title", ""),
             media_items=[media_item],
             primary_media_type=media_type,
@@ -167,6 +170,42 @@ class InstagramProviderAdapter:
             return "video"
         return "photo"
 
+    @staticmethod
+    def _build_media_item(
+        *,
+        file_path: Path,
+        media_type: str,
+        caption: str | None = None,
+        duration: float | int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> MediaItem:
+        """Build a media item and fill missing video metadata from the local file."""
+        duration_is_missing = InstagramProviderAdapter._is_missing_video_duration(duration)
+        if media_type == "video" and (duration_is_missing or not width or not height):
+            metadata = probe_video_metadata(file_path)
+            duration = metadata.duration if duration_is_missing else duration
+            width = width or metadata.width
+            height = height or metadata.height
+
+        return MediaItem(
+            file_path=file_path,
+            media_type=cast(Literal["video", "photo"], media_type),
+            caption=caption,
+            duration=duration,
+            width=width,
+            height=height,
+        )
+
+    @staticmethod
+    def _is_missing_video_duration(duration: float | int | None) -> bool:
+        if duration is None:
+            return True
+        try:
+            return float(duration) <= 0
+        except (TypeError, ValueError):
+            return True
+
 
 class TwitterProviderAdapter:
     """Twitter/X adapter around yt-dlp downloader."""
@@ -184,7 +223,7 @@ class TwitterProviderAdapter:
             raise DownloadError("Twitter/X download returned no media items")
 
         media_items = [
-            MediaItem(
+            InstagramProviderAdapter._build_media_item(
                 file_path=item.file_path,
                 media_type=item.media_type,
                 caption=result.title or None,
@@ -217,7 +256,7 @@ class YouTubeShortsProviderAdapter:
             raise DownloadError("YouTube Shorts download returned no media items")
 
         media_items = [
-            MediaItem(
+            InstagramProviderAdapter._build_media_item(
                 file_path=item.file_path,
                 media_type=item.media_type,
                 caption=result.title or None,

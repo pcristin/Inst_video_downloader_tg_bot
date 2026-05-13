@@ -9,6 +9,8 @@ from src.instagram_video_bot.services.instagram_fast_extractor import (
     FastExtractorDownloadResult,
     InstagramFastExtractorError,
 )
+from src.instagram_video_bot.services.media_metadata import MediaMetadata
+from src.instagram_video_bot.services.provider_adapters import InstagramProviderAdapter
 from src.instagram_video_bot.services.video_downloader import (
     DownloadError,
     MediaItem,
@@ -136,6 +138,26 @@ class _Account:
         self.proxy = None
         self.totp_secret = "totp"
         self.session_file = None
+
+
+def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path):
+    video_file = tmp_path / "legacy.mp4"
+    video_file.write_bytes(b"video")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.provider_adapters.probe_video_metadata",
+        lambda _path: MediaMetadata(duration=12.4, width=720, height=1280),
+    )
+
+    media_item = InstagramProviderAdapter._build_media_item(
+        file_path=video_file,
+        media_type="video",
+        duration=0,
+    )
+
+    assert media_item.duration == 12.4
+    assert media_item.width == 720
+    assert media_item.height == 1280
 
 
 @pytest.mark.asyncio
