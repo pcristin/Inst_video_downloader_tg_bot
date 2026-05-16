@@ -277,7 +277,7 @@ class TelegramBot:
         performance = self.state_store.get_performance_summary(update.effective_chat.id, limit=50)
         group_stats = self.state_store.get_group_stats(update.effective_chat.id)
         performance["duplicate_joins"] = group_stats["duplicate_joins"]
-        performance["failure_classes"] = [
+        performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
             error_class
             for _provider, _normalized_url, error_class, _finished_at in admin_status["recent_failures"]
         ]
@@ -483,8 +483,7 @@ class TelegramBot:
     ) -> None:
         """Persist provider execution metrics without leaking provider internals."""
         metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
-        if failure_class and not getattr(metrics, "failure_class", None):
-            metrics.failure_class = failure_class
+        effective_failure_class = getattr(metrics, "failure_class", None) or failure_class
         self.state_store.record_download_metrics(
             job_id,
             download_duration_ms=download_duration_ms,
@@ -496,6 +495,7 @@ class TelegramBot:
             instagram_account_retries=int(getattr(metrics, "instagram_account_retries", 0) or 0),
             instagram_auth_failures=int(getattr(metrics, "instagram_auth_failures", 0) or 0),
             instagram_success_path=getattr(metrics, "instagram_success_path", None),
+            failure_class=effective_failure_class,
         )
 
     @staticmethod
