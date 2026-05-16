@@ -4,9 +4,10 @@ import logging
 import random
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import Optional
+from typing import AsyncIterator, Optional
 from urllib.parse import urlparse
 
 from .download_models import (
@@ -37,6 +38,9 @@ class VideoDownloader:
 
     _throttle_lock = threading.Lock()
     _last_instagram_download_by_key: dict[str, float] = {}
+    _instagram_provider_semaphore: asyncio.Semaphore | None = None
+    _instagram_provider_semaphore_limit: int | None = None
+    _instagram_provider_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
     def __init__(self):
         """Initialize the video downloader."""
@@ -164,8 +168,9 @@ class VideoDownloader:
         if settings.IG_FAST_METHOD_ENABLED and not is_story_url:
             fast_started_at = perf_counter()
             try:
-                await self._apply_instagram_throttle(lease_key)
-                fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
+                async with self._instagram_provider_slot():
+                    await self._apply_instagram_throttle(lease_key)
+                    fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
                 self.last_provider_metrics.instagram_fast_status = "succeeded"
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
                     (perf_counter() - fast_started_at) * 1000
@@ -213,14 +218,15 @@ class VideoDownloader:
             tried_accounts.add(account.username)
             self._record_instagram_account_attempt()
             try:
-                await self._apply_instagram_throttle(account.username)
-                client = self._build_leased_client(account)
-                result = self.instagram_adapter.download_with_instagram_client(
-                    client=client,
-                    url=url,
-                    output_dir=output_dir,
-                    redact_proxy=self._redact_proxy,
-                )
+                async with self._instagram_provider_slot():
+                    await self._apply_instagram_throttle(account.username)
+                    client = self._build_leased_client(account)
+                    result = self.instagram_adapter.download_with_instagram_client(
+                        client=client,
+                        url=url,
+                        output_dir=output_dir,
+                        redact_proxy=self._redact_proxy,
+                    )
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
                     self.last_account_health_event = None
@@ -284,14 +290,15 @@ class VideoDownloader:
         for attempt in range(2):
             self._record_instagram_account_attempt()
             try:
-                await self._apply_instagram_throttle("__single__")
-                client = self._build_single_account_client()
-                result = self.instagram_adapter.download_with_instagram_client(
-                    client=client,
-                    url=url,
-                    output_dir=output_dir,
-                    redact_proxy=self._redact_proxy,
-                )
+                async with self._instagram_provider_slot():
+                    await self._apply_instagram_throttle("__single__")
+                    client = self._build_single_account_client()
+                    result = self.instagram_adapter.download_with_instagram_client(
+                        client=client,
+                        url=url,
+                        output_dir=output_dir,
+                        redact_proxy=self._redact_proxy,
+                    )
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
@@ -406,6 +413,27 @@ class VideoDownloader:
             jitter = random.uniform(*self.random_delay_range)
             logger.debug("Adding Instagram jitter delay: %.1fs", jitter)
             await asyncio.sleep(jitter)
+
+    @classmethod
+    @asynccontextmanager
+    async def _instagram_provider_slot(cls) -> AsyncIterator[None]:
+        semaphore = cls._get_instagram_provider_semaphore()
+        async with semaphore:
+            yield
+
+    @classmethod
+    def _get_instagram_provider_semaphore(cls) -> asyncio.Semaphore:
+        limit = max(1, settings.INSTAGRAM_MAX_CONCURRENT_JOBS)
+        loop = asyncio.get_running_loop()
+        if (
+            cls._instagram_provider_semaphore is None
+            or cls._instagram_provider_semaphore_limit != limit
+            or cls._instagram_provider_semaphore_loop is not loop
+        ):
+            cls._instagram_provider_semaphore = asyncio.Semaphore(limit)
+            cls._instagram_provider_semaphore_limit = limit
+            cls._instagram_provider_semaphore_loop = loop
+        return cls._instagram_provider_semaphore
 
     @staticmethod
     def _raise_final_download_error(
