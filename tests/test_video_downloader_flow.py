@@ -619,3 +619,4 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     assert metrics.instagram_fast_status == "failed"
     assert metrics.instagram_fallback_attempted is True
     assert metrics.instagram_success_path == "fallback"
+    assert metrics.instagram_account_attempts == 1
