@@ -253,7 +253,7 @@ class VideoDownloader:
                 manager.release_account(account)
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
-        if not acquired_account and not last_error and not fast_error:
+        if not acquired_account and not last_error:
             self.last_provider_metrics.failure_class = "no_instagram_accounts"
         self._raise_final_download_error(last_error, fast_error)
 
@@ -263,6 +263,9 @@ class VideoDownloader:
             account = manager.acquire_account(excluded_usernames=tried_accounts)
             if account:
                 return account
+            get_leasable_account_count = getattr(manager, "get_leasable_account_count", None)
+            if get_leasable_account_count and get_leasable_account_count(excluded_usernames=tried_accounts) == 0:
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
