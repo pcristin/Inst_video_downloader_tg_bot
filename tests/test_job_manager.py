@@ -14,6 +14,14 @@ async def _wait_for_started(started: list[tuple[str, int] | str], expected: tupl
     await asyncio.wait_for(_wait(), timeout=1)
 
 
+async def _wait_for_start_count(started: list[tuple[str, int] | str], count: int) -> None:
+    async def _wait() -> None:
+        while len(started) < count:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait(), timeout=1)
+
+
 @pytest.mark.asyncio
 async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_path):
     store = StateStore(tmp_path / "state.db")
@@ -113,6 +121,7 @@ async def test_job_manager_supports_zero_arg_executor_for_compatibility(tmp_path
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_same_provider_without_blocking_other_provider(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
+    store.update_group_settings(77, chat_max_concurrent_jobs=3)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 2)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 2)
@@ -166,6 +175,63 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
     assert started.count("twitter") == 1
 
     release.set()
+    await asyncio.gather(first.job.task, second.job.task, third.job.task)
+
+
+@pytest.mark.asyncio
+async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_group_settings(77, chat_max_concurrent_jobs=3)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    manager = JobManager(store)
+    started = []
+    release = asyncio.Event()
+
+    async def execute(job):
+        started.append(job.job_id)
+        await release.wait()
+        return job.job_id
+
+    first = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    second = manager.submit(
+        chat_id=77,
+        user_id=1002,
+        user_label="bob",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/b/",
+        normalized_url="https://www.instagram.com/reel/b/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    third = manager.submit(
+        chat_id=77,
+        user_id=1003,
+        user_label="cara",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/c/",
+        normalized_url="https://www.instagram.com/reel/c/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+
+    await _wait_for_start_count(started, 1)
+    assert started == [first.job.job_id]
+
+    release.set()
+    await _wait_for_start_count(started, 2)
     await asyncio.gather(first.job.task, second.job.task, third.job.task)
 
 
