@@ -77,7 +77,7 @@ async def test_job_manager_passes_job_to_executor_and_records_metrics(tmp_path):
 @pytest.mark.asyncio
 async def test_provider_semaphore_limits_same_provider_without_blocking_other_provider(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 2)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 2)
     manager = JobManager(store)
