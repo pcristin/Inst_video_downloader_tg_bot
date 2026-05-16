@@ -173,8 +173,8 @@ class JobManager:
 
     async def _run_job(self, job: SharedJob, execute: JobExecutor) -> None:
         try:
-            async with self._global_semaphore:
-                async with self._get_provider_semaphore(job.provider):
+            async with self._get_provider_semaphore(job.provider):
+                async with self._global_semaphore:
                     async with self._get_chat_semaphore(job.chat_id):
                         async with self._get_user_semaphore(job.chat_id, job.submitter_user_id):
                             await self._set_state(job, "running")
