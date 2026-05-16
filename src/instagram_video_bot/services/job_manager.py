@@ -384,10 +384,11 @@ class JobManager:
         semaphores = [
             self._get_chat_semaphore(job.chat_id),
             self._get_user_semaphore(job.chat_id, job.submitter_user_id),
-            self._get_provider_semaphore(job.provider),
         ]
-        # Instagram may wait for account leases inside the executor; keep global capacity for ready work.
+        # Instagram account waits happen inside the downloader. Its provider gate is taken only
+        # around actual provider calls so account waiters do not block fast-path jobs.
         if job.provider != "instagram":
+            semaphores.append(self._get_provider_semaphore(job.provider))
             semaphores.append(self._global_semaphore)
         return semaphores
 
