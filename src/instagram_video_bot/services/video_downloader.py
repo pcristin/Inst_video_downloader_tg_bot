@@ -5,6 +5,7 @@ import random
 import threading
 import time
 from pathlib import Path
+from time import perf_counter
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -12,6 +13,7 @@ from .download_models import (
     AuthenticationError,
     DownloadError,
     MediaItem,
+    ProviderExecutionMetrics,
     VideoInfo,
     VideoDownloadError,
 )
@@ -52,6 +54,7 @@ class VideoDownloader:
             YouTubeShortsDownloader()
         )
         self.last_account_health_event = None
+        self.last_provider_metrics = ProviderExecutionMetrics(provider="unknown")
 
     @property
     def fast_extractor(self):
@@ -120,30 +123,55 @@ class VideoDownloader:
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
         """Download media from supported providers."""
         if self._is_twitter_url(url):
+            self.last_provider_metrics = ProviderExecutionMetrics(provider="twitter")
             return await self._download_twitter_media(url, output_dir)
         if self._is_twitter_domain_url(url):
+            self.last_provider_metrics = ProviderExecutionMetrics(
+                provider="twitter",
+                failure_class="unsupported_url",
+            )
             raise DownloadError("Unsupported Twitter/X URL")
         if self._is_youtube_shorts_url(url):
+            self.last_provider_metrics = ProviderExecutionMetrics(provider="youtube")
             return await self._download_youtube_media(url, output_dir)
         if self._is_youtube_domain_url(url):
+            self.last_provider_metrics = ProviderExecutionMetrics(
+                provider="youtube",
+                failure_class="unsupported_url",
+            )
             raise DownloadError("Unsupported YouTube URL")
 
+        self.last_provider_metrics = ProviderExecutionMetrics(provider="instagram")
         return await self._download_instagram_media(url, output_dir)
 
     async def _download_instagram_media(self, url: str, output_dir: Path) -> VideoInfo:
         """Download Instagram media with fast-path and leased fallback."""
+        self.last_provider_metrics = ProviderExecutionMetrics(provider="instagram")
         lease_key = "instagram-fast"
         manager = get_account_manager()
 
         fast_error: Optional[Exception] = None
         is_story_url = self.instagram_adapter.is_story_url(url)
+        if is_story_url:
+            self.last_provider_metrics.instagram_fast_status = "skipped"
         if settings.IG_FAST_METHOD_ENABLED and not is_story_url:
+            fast_started_at = perf_counter()
             try:
                 await self._apply_instagram_throttle(lease_key)
                 fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
+                self.last_provider_metrics.instagram_fast_status = "succeeded"
+                self.last_provider_metrics.instagram_fast_duration_ms = int(
+                    (perf_counter() - fast_started_at) * 1000
+                )
+                self.last_provider_metrics.instagram_success_path = "fast"
                 return fast_result
             except Exception as error:
                 fast_error = error
+                self.last_provider_metrics.instagram_fast_status = "failed"
+                self.last_provider_metrics.instagram_fast_duration_ms = int(
+                    (perf_counter() - fast_started_at) * 1000
+                )
+                self.last_provider_metrics.failure_class = "fast_path_failed"
                 logger.warning(
                     "Fast extractor failed, falling back to legacy method",
                     extra={
@@ -152,6 +180,7 @@ class VideoDownloader:
                     },
                 )
 
+        self.last_provider_metrics.instagram_fallback_attempted = True
         if manager:
             return await self._download_with_account_leases(url, output_dir, fast_error)
         return await self._download_with_single_account(url, output_dir, fast_error)
@@ -172,6 +201,7 @@ class VideoDownloader:
             if not account:
                 break
             tried_accounts.add(account.username)
+            self.last_provider_metrics.instagram_account_attempts += 1
             try:
                 await self._apply_instagram_throttle(account.username)
                 client = self._build_leased_client(account)
@@ -184,9 +214,14 @@ class VideoDownloader:
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
                     self.last_account_health_event = None
+                self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
+                self.last_provider_metrics.instagram_auth_failures += 1
+                self.last_provider_metrics.instagram_account_retries += 1
+                self.last_provider_metrics.retry_count += 1
+                self.last_provider_metrics.failure_class = "auth_challenge"
                 logger.warning(
                     "Authentication-like failure during download",
                     extra={
@@ -219,14 +254,20 @@ class VideoDownloader:
             try:
                 await self._apply_instagram_throttle("__single__")
                 client = self._build_single_account_client()
-                return self.instagram_adapter.download_with_instagram_client(
+                result = self.instagram_adapter.download_with_instagram_client(
                     client=client,
                     url=url,
                     output_dir=output_dir,
                     redact_proxy=self._redact_proxy,
                 )
+                self.last_provider_metrics.instagram_success_path = "fallback"
+                return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
+                self.last_provider_metrics.instagram_auth_failures += 1
+                self.last_provider_metrics.instagram_account_retries += 1
+                self.last_provider_metrics.retry_count += 1
+                self.last_provider_metrics.failure_class = "auth_challenge"
                 logger.warning(
                     "Authentication-like failure during single-account download",
                     extra={"attempt": attempt + 1, "error": str(auth_error)},

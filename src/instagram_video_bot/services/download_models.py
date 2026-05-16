@@ -32,6 +32,22 @@ class VideoInfo:
     from_cache: bool = False
 
 
+@dataclass
+class ProviderExecutionMetrics:
+    """Provider-stage metrics captured during one download execution."""
+
+    provider: str
+    retry_count: int = 0
+    failure_class: Optional[str] = None
+    instagram_fast_status: Optional[str] = None
+    instagram_fast_duration_ms: Optional[int] = None
+    instagram_fallback_attempted: bool = False
+    instagram_account_attempts: int = 0
+    instagram_account_retries: int = 0
+    instagram_auth_failures: int = 0
+    instagram_success_path: Optional[str] = None
+
+
 class VideoDownloadError(Exception):
     """Base exception for media download failures."""
 
