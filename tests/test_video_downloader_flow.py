@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -102,6 +103,10 @@ class _LeaseManager:
 
     def get_available_accounts(self):
         return list(self.accounts)
+
+    def get_leasable_account_count(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        return sum(1 for account in self.accounts if account.username not in excluded_usernames)
 
     def acquire_account(self, excluded_usernames=None):
         excluded_usernames = excluded_usernames or set()
@@ -756,14 +761,53 @@ async def test_empty_leased_account_pool_sets_failure_class(monkeypatch, tmp_pat
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 1.0)
     monkeypatch.setattr(
         "src.instagram_video_bot.services.video_downloader.get_account_manager",
         lambda: _LeaseManager([]),
     )
 
     with pytest.raises(DownloadError, match="Download failed"):
+        await asyncio.wait_for(
+            downloader.download_video("https://www.instagram.com/reel/a/", tmp_path),
+            timeout=0.5,
+        )
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 0
+    assert metrics.failure_class == "no_instagram_accounts"
+
+
+@pytest.mark.asyncio
+async def test_empty_leased_account_pool_overrides_fast_failure_class(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 0.0)
+    downloader.fast_extractor = _FastExtractorFailure()
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.get_account_manager",
+        lambda: _LeaseManager([]),
+    )
+
+    with pytest.raises(DownloadError, match="fast_path_error=fast-failed"):
         await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
 
     metrics = downloader.last_provider_metrics
     assert metrics.instagram_account_attempts == 0
     assert metrics.failure_class == "no_instagram_accounts"
+
+
+@pytest.mark.asyncio
+async def test_acquire_account_with_wait_fails_promptly_when_all_accounts_excluded(monkeypatch):
+    downloader = VideoDownloader()
+    manager = _LeaseManager([_Account("acc_used")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 1.0)
+
+    account = await asyncio.wait_for(
+        downloader._acquire_account_with_wait(manager, {"acc_used"}),
+        timeout=0.5,
+    )
+
+    assert account is None
