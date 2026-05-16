@@ -6,6 +6,14 @@ from src.instagram_video_bot.services.job_manager import JobManager, RequestReco
 from src.instagram_video_bot.services.state_store import StateStore
 
 
+async def _wait_for_started(started: list[tuple[str, int] | str], expected: tuple[str, int] | str) -> None:
+    async def _wait() -> None:
+        while expected not in started:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait(), timeout=1)
+
+
 @pytest.mark.asyncio
 async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_path):
     store = StateStore(tmp_path / "state.db")
@@ -75,6 +83,34 @@ async def test_job_manager_passes_job_to_executor_and_records_metrics(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_job_manager_supports_zero_arg_executor_for_compatibility(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    manager = JobManager(store)
+    called = False
+
+    async def execute():
+        nonlocal called
+        called = True
+        return "ok"
+
+    submission = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+
+    assert await submission.job.result_future == "ok"
+    await submission.job.task
+    assert called is True
+
+
+@pytest.mark.asyncio
 async def test_provider_semaphore_limits_same_provider_without_blocking_other_provider(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 2)
@@ -123,10 +159,71 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
         duplicate_suppression=False,
     )
 
-    await asyncio.sleep(0)
+    await _wait_for_started(started, "instagram")
+    await _wait_for_started(started, "twitter")
 
     assert started.count("instagram") == 1
     assert started.count("twitter") == 1
+
+    release.set()
+    await asyncio.gather(first.job.task, second.job.task, third.job.task)
+
+
+@pytest.mark.asyncio
+async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_group_settings(77, chat_max_concurrent_jobs=1)
+    store.update_group_settings(88, chat_max_concurrent_jobs=1)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 2)
+    manager = JobManager(store)
+    started = []
+    release = asyncio.Event()
+
+    async def execute(job):
+        started.append((job.provider, job.chat_id))
+        await release.wait()
+        return job.provider
+
+    first = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    second = manager.submit(
+        chat_id=77,
+        user_id=1002,
+        user_label="bob",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/b/",
+        normalized_url="https://www.instagram.com/reel/b/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    third = manager.submit(
+        chat_id=88,
+        user_id=1003,
+        user_label="cara",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/c/",
+        normalized_url="https://www.instagram.com/reel/c/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+
+    await _wait_for_started(started, ("instagram", 77))
+    await _wait_for_started(started, ("instagram", 88))
+
+    assert started.count(("instagram", 77)) == 1
+    assert started.count(("instagram", 88)) == 1
 
     release.set()
     await asyncio.gather(first.job.task, second.job.task, third.job.task)
