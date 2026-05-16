@@ -123,8 +123,8 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 2)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 2)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.YOUTUBE_SHORTS_MAX_CONCURRENT_JOBS", 2)
     manager = JobManager(store)
     started = []
     release = asyncio.Event()
@@ -138,28 +138,6 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
         chat_id=77,
         user_id=1001,
         user_label="alice",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/a/",
-        normalized_url="https://www.instagram.com/reel/a/",
-        execute=execute,
-        duplicate_suppression=False,
-    )
-    second = manager.submit(
-        chat_id=77,
-        user_id=1002,
-        user_label="bob",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/b/",
-        normalized_url="https://www.instagram.com/reel/b/",
-        execute=execute,
-        duplicate_suppression=False,
-    )
-    third = manager.submit(
-        chat_id=77,
-        user_id=1003,
-        user_label="cara",
         provider="twitter",
         provider_label="Twitter/X",
         original_url="https://x.com/a/status/1",
@@ -167,12 +145,34 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
         execute=execute,
         duplicate_suppression=False,
     )
+    second = manager.submit(
+        chat_id=77,
+        user_id=1002,
+        user_label="bob",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/2",
+        normalized_url="https://x.com/a/status/2",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    third = manager.submit(
+        chat_id=77,
+        user_id=1003,
+        user_label="cara",
+        provider="youtube_shorts",
+        provider_label="YouTube Shorts",
+        original_url="https://youtube.com/shorts/abcdefg1234",
+        normalized_url="https://youtube.com/shorts/abcdefg1234",
+        execute=execute,
+        duplicate_suppression=False,
+    )
 
-    await _wait_for_started(started, "instagram")
     await _wait_for_started(started, "twitter")
+    await _wait_for_started(started, "youtube_shorts")
 
-    assert started.count("instagram") == 1
     assert started.count("twitter") == 1
+    assert started.count("youtube_shorts") == 1
 
     release.set()
     await asyncio.gather(first.job.task, second.job.task, third.job.task)
@@ -234,7 +234,7 @@ async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatc
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
     manager = JobManager(store)
     started = []
     release = asyncio.Event()
@@ -248,10 +248,10 @@ async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatc
         chat_id=77,
         user_id=1001,
         user_label="alice",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/a/",
-        normalized_url="https://www.instagram.com/reel/a/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/1",
+        normalized_url="https://x.com/a/status/1",
         execute=execute,
         duplicate_suppression=False,
     )
@@ -259,10 +259,10 @@ async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatc
         chat_id=77,
         user_id=1002,
         user_label="bob",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/b/",
-        normalized_url="https://www.instagram.com/reel/b/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/2",
+        normalized_url="https://x.com/a/status/2",
         execute=execute,
         duplicate_suppression=False,
     )
@@ -270,10 +270,10 @@ async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatc
         chat_id=77,
         user_id=1003,
         user_label="cara",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/c/",
-        normalized_url="https://www.instagram.com/reel/c/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/3",
+        normalized_url="https://x.com/a/status/3",
         execute=execute,
         duplicate_suppression=False,
     )
@@ -292,7 +292,7 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
     store.update_group_settings(77, chat_max_concurrent_jobs=1)
     store.update_group_settings(88, chat_max_concurrent_jobs=1)
     monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 2)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 2)
     manager = JobManager(store)
     started = []
     release = asyncio.Event()
@@ -306,10 +306,10 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
         chat_id=77,
         user_id=1001,
         user_label="alice",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/a/",
-        normalized_url="https://www.instagram.com/reel/a/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/1",
+        normalized_url="https://x.com/a/status/1",
         execute=execute,
         duplicate_suppression=False,
     )
@@ -317,10 +317,10 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
         chat_id=77,
         user_id=1002,
         user_label="bob",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/b/",
-        normalized_url="https://www.instagram.com/reel/b/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/2",
+        normalized_url="https://x.com/a/status/2",
         execute=execute,
         duplicate_suppression=False,
     )
@@ -328,19 +328,19 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
         chat_id=88,
         user_id=1003,
         user_label="cara",
-        provider="instagram",
-        provider_label="Instagram",
-        original_url="https://www.instagram.com/reel/c/",
-        normalized_url="https://www.instagram.com/reel/c/",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/3",
+        normalized_url="https://x.com/a/status/3",
         execute=execute,
         duplicate_suppression=False,
     )
 
-    await _wait_for_started(started, ("instagram", 77))
-    await _wait_for_started(started, ("instagram", 88))
+    await _wait_for_started(started, ("twitter", 77))
+    await _wait_for_started(started, ("twitter", 88))
 
-    assert started.count(("instagram", 77)) == 1
-    assert started.count(("instagram", 88)) == 1
+    assert started.count(("twitter", 77)) == 1
+    assert started.count(("twitter", 88)) == 1
 
     release.set()
     await asyncio.gather(first.job.task, second.job.task, third.job.task)
