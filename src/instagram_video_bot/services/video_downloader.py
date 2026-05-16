@@ -251,6 +251,7 @@ class VideoDownloader:
         """Download with the configured single Instagram account."""
         last_error: Optional[Exception] = None
         for attempt in range(2):
+            self.last_provider_metrics.instagram_account_attempts += 1
             try:
                 await self._apply_instagram_throttle("__single__")
                 client = self._build_single_account_client()
