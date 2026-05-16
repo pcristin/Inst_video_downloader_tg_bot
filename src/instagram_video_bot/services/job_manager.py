@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ from .state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
-JobExecutor = Callable[[], Awaitable[Any]]
+JobExecutor = Callable[["SharedJob"], Awaitable[Any]]
 StateListener = Callable[["SharedJob"], Awaitable[None]]
 
 
@@ -70,8 +71,10 @@ class JobManager:
         self._global_semaphore = asyncio.Semaphore(settings.GLOBAL_MAX_CONCURRENT_JOBS)
         self._chat_semaphores: dict[int, asyncio.Semaphore] = {}
         self._user_semaphores: dict[tuple[int, int], asyncio.Semaphore] = {}
+        self._provider_semaphores: dict[str, asyncio.Semaphore] = {}
         self._chat_semaphore_limits: dict[int, int] = {}
         self._user_semaphore_limits: dict[int, int] = {}
+        self._provider_semaphore_limits: dict[str, int] = {}
         self._jobs: dict[str, SharedJob] = {}
         self._active_jobs: dict[tuple[int, str], SharedJob] = {}
         self._listeners: list[StateListener] = []
@@ -144,6 +147,12 @@ class JobManager:
         self._jobs[job.job_id] = job
         self._active_jobs[active_key] = job
         self.store.create_job(job.job_id, chat_id, normalized_url, provider, "queued")
+        self.store.start_job_metrics(
+            job_id=job.job_id,
+            chat_id=chat_id,
+            provider=provider,
+            normalized_url=normalized_url,
+        )
         self.store.create_request(
             request_id=request_id,
             job_id=job.job_id,
@@ -165,15 +174,19 @@ class JobManager:
     async def _run_job(self, job: SharedJob, execute: JobExecutor) -> None:
         try:
             async with self._global_semaphore:
-                async with self._get_chat_semaphore(job.chat_id):
-                    async with self._get_user_semaphore(job.chat_id, job.submitter_user_id):
-                        await self._set_state(job, "running")
-                        result = await execute()
-                        if job.result_future and not job.result_future.done():
-                            job.result_future.set_result(result)
-                        await self._set_state(job, "completed")
+                async with self._get_provider_semaphore(job.provider):
+                    async with self._get_chat_semaphore(job.chat_id):
+                        async with self._get_user_semaphore(job.chat_id, job.submitter_user_id):
+                            await self._set_state(job, "running")
+                            self.store.mark_job_metrics_started(job.job_id)
+                            result = await self._execute_job(execute, job)
+                            if job.result_future and not job.result_future.done():
+                                job.result_future.set_result(result)
+                            await self._set_state(job, "completed")
+                            self.store.finalize_job_metrics(job.job_id, status="completed")
         except asyncio.CancelledError:
             self.store.update_job_status(job.job_id, "cancelled")
+            self.store.finalize_job_metrics(job.job_id, status="cancelled")
             if job.result_future and not job.result_future.done():
                 job.result_future.set_exception(asyncio.CancelledError())
             await self._set_state(job, "cancelled")
@@ -181,6 +194,7 @@ class JobManager:
         except Exception as error:
             logger.exception("Shared job failed", extra={"job_id": job.job_id, "provider": job.provider})
             self.store.update_job_status(job.job_id, "failed", error.__class__.__name__)
+            self.store.finalize_job_metrics(job.job_id, status="failed")
             if job.result_future and not job.result_future.done():
                 job.result_future.set_exception(error)
             await self._set_state(job, "failed")
@@ -355,3 +369,44 @@ class JobManager:
             self._user_semaphores[key] = current
             self._user_semaphore_limits[chat_id] = limit
         return current
+
+    def _get_provider_semaphore(self, provider: str) -> asyncio.Semaphore:
+        limit = self._provider_limit(provider)
+        existing = self._provider_semaphores.get(provider)
+        if existing is None or self._provider_semaphore_limits.get(provider) != limit:
+            existing = asyncio.Semaphore(limit)
+            self._provider_semaphores[provider] = existing
+            self._provider_semaphore_limits[provider] = limit
+        return existing
+
+    @staticmethod
+    def _provider_limit(provider: str) -> int:
+        if provider == "instagram":
+            return max(1, settings.INSTAGRAM_MAX_CONCURRENT_JOBS)
+        if provider == "twitter":
+            return max(1, settings.TWITTER_MAX_CONCURRENT_JOBS)
+        if provider == "youtube_shorts":
+            return max(1, settings.YOUTUBE_SHORTS_MAX_CONCURRENT_JOBS)
+        return max(1, settings.GLOBAL_MAX_CONCURRENT_JOBS)
+
+    @staticmethod
+    async def _execute_job(execute: JobExecutor, job: SharedJob) -> Any:
+        if JobManager._executor_accepts_job(execute):
+            return await execute(job)
+        return await execute()  # type: ignore[call-arg]
+
+    @staticmethod
+    def _executor_accepts_job(execute: JobExecutor) -> bool:
+        try:
+            parameters = inspect.signature(execute).parameters.values()
+        except (TypeError, ValueError):
+            return True
+        return any(
+            parameter.kind
+            in {
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.VAR_POSITIONAL,
+            }
+            for parameter in parameters
+        )
