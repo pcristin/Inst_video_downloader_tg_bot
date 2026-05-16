@@ -315,11 +315,47 @@ class VideoDownloader:
 
     async def _download_twitter_media(self, url: str, output_dir: Path) -> VideoInfo:
         """Download Twitter/X media using yt-dlp."""
-        return await self.twitter_adapter.download(url, output_dir)
+        return await self._with_transient_retries(
+            lambda: self.twitter_adapter.download(url, output_dir)
+        )
 
     async def _download_youtube_media(self, url: str, output_dir: Path) -> VideoInfo:
         """Download YouTube Shorts media using yt-dlp."""
-        return await self.youtube_adapter.download(url, output_dir)
+        return await self._with_transient_retries(
+            lambda: self.youtube_adapter.download(url, output_dir)
+        )
+
+    async def _with_transient_retries(self, operation):
+        attempts = max(1, settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return await operation()
+            except DownloadError as error:
+                last_error = error
+                if not self._is_transient_download_error(error) or attempt == attempts - 1:
+                    self.last_provider_metrics.failure_class = self._classify_download_error(error)
+                    raise
+                self.last_provider_metrics.retry_count += 1
+                await asyncio.sleep(max(0.0, settings.PROVIDER_RETRY_BACKOFF_SECONDS) * (attempt + 1))
+        assert last_error is not None
+        raise last_error
+
+    @staticmethod
+    def _is_transient_download_error(error: Exception) -> bool:
+        text = str(error).lower()
+        return any(token in text for token in ("timeout", "timed out", "temporarily", "connection", "network"))
+
+    @staticmethod
+    def _classify_download_error(error: Exception) -> str:
+        text = str(error).lower()
+        if "unsupported" in text:
+            return "unsupported_url"
+        if "timeout" in text or "timed out" in text:
+            return "provider_timeout"
+        if "connection" in text or "network" in text:
+            return "transient_network"
+        return error.__class__.__name__
 
     @staticmethod
     def _is_twitter_url(url: str) -> bool:

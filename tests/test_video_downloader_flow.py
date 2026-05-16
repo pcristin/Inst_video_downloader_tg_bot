@@ -860,3 +860,49 @@ async def test_acquire_account_with_wait_waits_for_temporarily_leased_account(mo
 
     assert account is not None
     assert account.username == "acc_wait"
+
+
+class _FlakyTwitterAdapter:
+    def __init__(self, result):
+        self.calls = 0
+        self.result = result
+
+    async def download(self, url, output_dir):
+        self.calls += 1
+        if self.calls == 1:
+            raise DownloadError("timed out while downloading")
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_error_retries_once(monkeypatch, tmp_path):
+    media_file = tmp_path / "twitter.mp4"
+    media_file.write_bytes(b"video")
+    result = VideoInfo(
+        file_path=media_file,
+        title="twitter",
+        media_items=[MediaItem(file_path=media_file, media_type="video")],
+        primary_media_type="video",
+    )
+    downloader = VideoDownloader()
+    adapter = _FlakyTwitterAdapter(result)
+    downloader.twitter_adapter = adapter
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+
+    info = await downloader.download_video("https://x.com/a/status/123", tmp_path)
+
+    assert info.file_path == media_file
+    assert adapter.calls == 2
+    assert downloader.last_provider_metrics.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unsupported_provider_error_does_not_retry(tmp_path):
+    downloader = VideoDownloader()
+
+    with pytest.raises(DownloadError):
+        await downloader.download_video("https://x.com/not-a-status", tmp_path)
+
+    assert downloader.last_provider_metrics.retry_count == 0
+    assert downloader.last_provider_metrics.failure_class == "unsupported_url"
