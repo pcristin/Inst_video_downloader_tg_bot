@@ -179,6 +179,57 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
 
 
 @pytest.mark.asyncio
+async def test_instagram_executor_wait_does_not_hold_global_capacity(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_group_settings(77, chat_max_concurrent_jobs=3)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 2)
+    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
+    manager = JobManager(store)
+    started = []
+    instagram_waiting = asyncio.Event()
+    release_instagram = asyncio.Event()
+
+    async def execute(job):
+        started.append(job.provider)
+        if job.provider == "instagram":
+            instagram_waiting.set()
+            await release_instagram.wait()
+        return job.provider
+
+    instagram = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    await asyncio.wait_for(instagram_waiting.wait(), timeout=1)
+
+    twitter = manager.submit(
+        chat_id=77,
+        user_id=1002,
+        user_label="bob",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/1",
+        normalized_url="https://x.com/a/status/1",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+
+    try:
+        await _wait_for_started(started, "twitter")
+    finally:
+        release_instagram.set()
+        await asyncio.gather(instagram.job.task, twitter.job.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)

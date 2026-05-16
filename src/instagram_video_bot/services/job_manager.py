@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import uuid
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Awaitable, Callable
@@ -173,18 +174,16 @@ class JobManager:
 
     async def _run_job(self, job: SharedJob, execute: JobExecutor) -> None:
         try:
-            async with self._get_chat_semaphore(job.chat_id):
-                async with self._get_user_semaphore(job.chat_id, job.submitter_user_id):
-                    # Acquire local limits before provider/global so local waiters do not hold scarce slots.
-                    async with self._get_provider_semaphore(job.provider):
-                        async with self._global_semaphore:
-                            await self._set_state(job, "running")
-                            self.store.mark_job_metrics_started(job.job_id)
-                            result = await self._execute_job(execute, job)
-                            if job.result_future and not job.result_future.done():
-                                job.result_future.set_result(result)
-                            await self._set_state(job, "completed")
-                            self.store.finalize_job_metrics(job.job_id, status="completed")
+            async with AsyncExitStack() as stack:
+                for semaphore in self._job_semaphores(job):
+                    await stack.enter_async_context(semaphore)
+                await self._set_state(job, "running")
+                self.store.mark_job_metrics_started(job.job_id)
+                result = await self._execute_job(execute, job)
+                if job.result_future and not job.result_future.done():
+                    job.result_future.set_result(result)
+                await self._set_state(job, "completed")
+                self.store.finalize_job_metrics(job.job_id, status="completed")
         except asyncio.CancelledError:
             self.store.update_job_status(job.job_id, "cancelled")
             self.store.finalize_job_metrics(job.job_id, status="cancelled")
@@ -379,6 +378,18 @@ class JobManager:
             self._provider_semaphores[provider] = existing
             self._provider_semaphore_limits[provider] = limit
         return existing
+
+    def _job_semaphores(self, job: SharedJob) -> list[asyncio.Semaphore]:
+        # Acquire local limits before provider/global so local waiters do not hold scarce slots.
+        semaphores = [
+            self._get_chat_semaphore(job.chat_id),
+            self._get_user_semaphore(job.chat_id, job.submitter_user_id),
+            self._get_provider_semaphore(job.provider),
+        ]
+        # Instagram may wait for account leases inside the executor; keep global capacity for ready work.
+        if job.provider != "instagram":
+            semaphores.append(self._global_semaphore)
+        return semaphores
 
     @staticmethod
     def _provider_limit(provider: str) -> int:
