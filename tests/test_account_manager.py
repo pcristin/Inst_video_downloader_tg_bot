@@ -108,6 +108,20 @@ def test_leasable_account_count_excludes_current_leases(monkeypatch, tmp_path: P
     assert manager.get_leasable_account_count() == 2
 
 
+def test_eligible_account_count_includes_current_leases(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    leased = manager.acquire_account()
+
+    assert leased is not None
+    assert manager.get_eligible_account_count() == 2
+    assert manager.get_eligible_account_count(excluded_usernames={leased.username}) == 1
+
+
 def test_below_threshold_failure_does_not_alert_when_pool_is_low(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)

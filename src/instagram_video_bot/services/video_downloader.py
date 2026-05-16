@@ -263,9 +263,14 @@ class VideoDownloader:
             account = manager.acquire_account(excluded_usernames=tried_accounts)
             if account:
                 return account
-            get_leasable_account_count = getattr(manager, "get_leasable_account_count", None)
-            if get_leasable_account_count and get_leasable_account_count(excluded_usernames=tried_accounts) == 0:
-                return None
+            get_eligible_account_count = getattr(manager, "get_eligible_account_count", None)
+            if get_eligible_account_count:
+                if get_eligible_account_count(excluded_usernames=tried_accounts) == 0:
+                    return None
+            else:
+                available_accounts = getattr(manager, "get_available_accounts", lambda: [])()
+                if not any(account.username not in tried_accounts for account in available_accounts):
+                    return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None

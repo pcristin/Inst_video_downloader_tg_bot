@@ -234,6 +234,16 @@ class AccountManager:
             if not acc.is_banned and acc.password and acc.totp_secret
         ]
 
+    def get_eligible_account_count(self, excluded_usernames: Optional[Set[str]] = None) -> int:
+        """Return how many healthy accounts are eligible, including currently leased accounts."""
+        excluded_usernames = excluded_usernames or set()
+        with self._lock:
+            return sum(
+                1
+                for account in self.get_available_accounts()
+                if account.username not in excluded_usernames
+            )
+
     def get_leasable_account_count(self, excluded_usernames: Optional[Set[str]] = None) -> int:
         """Return how many healthy accounts are not currently leased."""
         excluded_usernames = excluded_usernames or set()
