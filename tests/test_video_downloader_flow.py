@@ -710,3 +710,22 @@ async def test_leased_fallback_success_records_retry_metrics(monkeypatch, tmp_pa
     assert metrics.instagram_account_retries == 1
     assert metrics.retry_count == 1
     assert metrics.instagram_success_path == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_empty_leased_account_pool_sets_failure_class(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.get_account_manager",
+        lambda: _LeaseManager([]),
+    )
+
+    with pytest.raises(DownloadError, match="Download failed"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 0
+    assert metrics.failure_class == "no_instagram_accounts"

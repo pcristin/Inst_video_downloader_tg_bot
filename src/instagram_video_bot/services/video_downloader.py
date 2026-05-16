@@ -198,15 +198,18 @@ class VideoDownloader:
         """Download using a leased Instagram account for this job."""
         manager = get_account_manager()
         if not manager:
+            self.last_provider_metrics.failure_class = "no_instagram_accounts"
             raise DownloadError("No Instagram accounts available")
 
         last_error: Optional[Exception] = None
         tried_accounts: set[str] = set()
+        acquired_account = False
         max_attempts = max(1, len(manager.get_available_accounts()))
         for attempt in range(max_attempts):
             account = manager.acquire_account(excluded_usernames=tried_accounts)
             if not account:
                 break
+            acquired_account = True
             tried_accounts.add(account.username)
             self._record_instagram_account_attempt()
             try:
@@ -250,6 +253,8 @@ class VideoDownloader:
                 manager.release_account(account)
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
+        if not acquired_account and not last_error and not fast_error:
+            self.last_provider_metrics.failure_class = "no_instagram_accounts"
         self._raise_final_download_error(last_error, fast_error)
 
     async def _download_with_single_account(
