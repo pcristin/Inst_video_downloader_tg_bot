@@ -111,7 +111,8 @@ class StateStore:
                     instagram_account_attempts INTEGER NOT NULL DEFAULT 0,
                     instagram_account_retries INTEGER NOT NULL DEFAULT 0,
                     instagram_auth_failures INTEGER NOT NULL DEFAULT 0,
-                    instagram_success_path TEXT
+                    instagram_success_path TEXT,
+                    failure_class TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_chat_status
@@ -147,6 +148,14 @@ class StateStore:
             if "joined_existing" not in request_columns:
                 self._conn.execute(
                     "ALTER TABLE request_events ADD COLUMN joined_existing INTEGER NOT NULL DEFAULT 0"
+                )
+            performance_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(performance_metrics)").fetchall()
+            }
+            if "failure_class" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN failure_class TEXT"
                 )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
@@ -361,6 +370,7 @@ class StateStore:
         instagram_account_retries: int = 0,
         instagram_auth_failures: int = 0,
         instagram_success_path: str | None = None,
+        failure_class: str | None = None,
     ) -> None:
         self._safe_metrics_write(
             """
@@ -373,7 +383,8 @@ class StateStore:
                 instagram_account_attempts = ?,
                 instagram_account_retries = ?,
                 instagram_auth_failures = ?,
-                instagram_success_path = ?
+                instagram_success_path = ?,
+                failure_class = COALESCE(?, failure_class)
             WHERE job_id = ?
             """,
             (
@@ -386,6 +397,7 @@ class StateStore:
                 instagram_account_retries,
                 instagram_auth_failures,
                 instagram_success_path,
+                failure_class,
                 job_id,
             ),
         )
@@ -460,12 +472,20 @@ class StateStore:
             if row["delivery_duration_ms"] is not None
         ]
         instagram_rows = [row for row in rows if row["provider"] == "instagram"]
+        failure_classes = sorted(
+            {
+                row["failure_class"]
+                for row in rows
+                if row["failure_class"]
+            }
+        )
         return {
             "total_jobs": total_jobs,
             "cache_hits": cache_hits,
             "cache_hit_rate": cache_hits / total_jobs if total_jobs else 0.0,
             "providers": providers,
             "avg_delivery_ms": self._safe_average(delivery_durations),
+            "failure_classes": failure_classes,
             "instagram": {
                 "fast_failed": sum(
                     1 for row in instagram_rows if row["instagram_fast_status"] == "failed"

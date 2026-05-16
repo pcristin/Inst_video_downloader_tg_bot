@@ -6,9 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.instagram_video_bot.services.state_store import StateStore
+from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
 from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
 from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
-from src.instagram_video_bot.services.video_downloader import MediaItem, VideoInfo
+from src.instagram_video_bot.services.video_downloader import DownloadError, MediaItem, VideoInfo
 from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
@@ -975,3 +976,29 @@ async def test_admin_status_includes_performance_summary(monkeypatch, tmp_path):
     assert "Instagram fast-path" in text
     assert "acc" not in text
     assert "proxy" not in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_download_failure_records_provider_failure_class(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("https://www.instagram.com/reel/no-accounts/")
+    context = _FakeContext(_FakeBot())
+
+    class FakeDownloader:
+        def __init__(self):
+            self.last_account_health_event = None
+            self.last_provider_metrics = ProviderExecutionMetrics(
+                provider="instagram",
+                failure_class="no_instagram_accounts",
+            )
+
+        async def download_video(self, url: str, output_dir: Path):
+            raise DownloadError("No Instagram accounts available")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    summary = telegram_bot.state_store.get_performance_summary(77, limit=50)
+    assert "no_instagram_accounts" in summary["failure_classes"]
