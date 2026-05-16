@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -89,12 +92,37 @@ class StateStore:
                     expires_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS performance_metrics (
+                    job_id TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    normalized_url TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    cache_hit INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    download_duration_ms INTEGER,
+                    delivery_duration_ms INTEGER,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    instagram_fast_status TEXT,
+                    instagram_fast_duration_ms INTEGER,
+                    instagram_fallback_attempted INTEGER NOT NULL DEFAULT 0,
+                    instagram_account_attempts INTEGER NOT NULL DEFAULT 0,
+                    instagram_account_retries INTEGER NOT NULL DEFAULT 0,
+                    instagram_auth_failures INTEGER NOT NULL DEFAULT 0,
+                    instagram_success_path TEXT,
+                    failure_class TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_chat_status
                     ON jobs (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_requests_chat_status
                     ON request_events (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_cache_chat_url
                     ON recent_results (chat_id, normalized_url);
+                CREATE INDEX IF NOT EXISTS idx_perf_chat_finished
+                    ON performance_metrics (chat_id, finished_at);
                 """
             )
             existing_columns = {
@@ -120,6 +148,14 @@ class StateStore:
             if "joined_existing" not in request_columns:
                 self._conn.execute(
                     "ALTER TABLE request_events ADD COLUMN joined_existing INTEGER NOT NULL DEFAULT 0"
+                )
+            performance_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(performance_metrics)").fetchall()
+            }
+            if "failure_class" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN failure_class TEXT"
                 )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
@@ -276,6 +312,210 @@ class StateStore:
                 """,
                 (status, 1 if cache_hit else 0, now, request_id),
             )
+
+    def start_job_metrics(
+        self,
+        job_id: str,
+        chat_id: int,
+        provider: str,
+        normalized_url: str,
+    ) -> None:
+        now = _utc_now().isoformat()
+        self._safe_metrics_write(
+            """
+            INSERT INTO performance_metrics (
+                job_id, chat_id, provider, normalized_url, status, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                chat_id = excluded.chat_id,
+                provider = excluded.provider,
+                normalized_url = excluded.normalized_url
+            """,
+            (job_id, chat_id, provider, normalized_url, "queued", now),
+        )
+
+    def mark_job_metrics_started(self, job_id: str) -> None:
+        now = _utc_now().isoformat()
+        self._safe_metrics_write(
+            """
+            UPDATE performance_metrics
+            SET status = 'running',
+                started_at = COALESCE(started_at, ?)
+            WHERE job_id = ?
+            """,
+            (now, job_id),
+        )
+
+    def record_cache_hit(self, job_id: str) -> None:
+        self._safe_metrics_write(
+            """
+            UPDATE performance_metrics
+            SET cache_hit = 1
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        )
+
+    def record_download_metrics(
+        self,
+        job_id: str,
+        *,
+        download_duration_ms: int,
+        retry_count: int = 0,
+        instagram_fast_status: str | None = None,
+        instagram_fast_duration_ms: int | None = None,
+        instagram_fallback_attempted: bool = False,
+        instagram_account_attempts: int = 0,
+        instagram_account_retries: int = 0,
+        instagram_auth_failures: int = 0,
+        instagram_success_path: str | None = None,
+        failure_class: str | None = None,
+    ) -> None:
+        self._safe_metrics_write(
+            """
+            UPDATE performance_metrics
+            SET download_duration_ms = ?,
+                retry_count = ?,
+                instagram_fast_status = ?,
+                instagram_fast_duration_ms = ?,
+                instagram_fallback_attempted = ?,
+                instagram_account_attempts = ?,
+                instagram_account_retries = ?,
+                instagram_auth_failures = ?,
+                instagram_success_path = ?,
+                failure_class = COALESCE(?, failure_class)
+            WHERE job_id = ?
+            """,
+            (
+                download_duration_ms,
+                retry_count,
+                instagram_fast_status,
+                instagram_fast_duration_ms,
+                1 if instagram_fallback_attempted else 0,
+                instagram_account_attempts,
+                instagram_account_retries,
+                instagram_auth_failures,
+                instagram_success_path,
+                failure_class,
+                job_id,
+            ),
+        )
+
+    def record_delivery_metrics(self, job_id: str, *, delivery_duration_ms: int) -> None:
+        self._safe_metrics_write(
+            """
+            UPDATE performance_metrics
+            SET delivery_duration_ms = ?
+            WHERE job_id = ?
+            """,
+            (delivery_duration_ms, job_id),
+        )
+
+    def finalize_job_metrics(self, job_id: str, *, status: str) -> None:
+        now = _utc_now().isoformat()
+        self._safe_metrics_write(
+            """
+            UPDATE performance_metrics
+            SET status = ?,
+                finished_at = COALESCE(finished_at, ?)
+            WHERE job_id = ?
+            """,
+            (status, now, job_id),
+        )
+
+    def get_performance_summary(self, chat_id: int, limit: int = 50) -> dict[str, Any]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM performance_metrics
+                WHERE chat_id = ?
+                ORDER BY finished_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+
+        total_jobs = len(rows)
+        cache_hits = sum(1 for row in rows if row["cache_hit"])
+        providers: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            provider = row["provider"]
+            provider_summary = providers.setdefault(
+                provider,
+                {
+                    "jobs": 0,
+                    "avg_queue_wait_ms": 0,
+                    "avg_download_ms": 0,
+                    "avg_delivery_ms": 0,
+                    "_queue_wait_durations": [],
+                    "_download_durations": [],
+                    "_delivery_durations": [],
+                },
+            )
+            provider_summary["jobs"] += 1
+            queue_wait_ms = self._duration_between_ms(row["created_at"], row["started_at"])
+            if queue_wait_ms is not None:
+                provider_summary["_queue_wait_durations"].append(queue_wait_ms)
+            if row["download_duration_ms"] is not None:
+                provider_summary["_download_durations"].append(row["download_duration_ms"])
+            if row["delivery_duration_ms"] is not None:
+                provider_summary["_delivery_durations"].append(row["delivery_duration_ms"])
+
+        for provider_summary in providers.values():
+            provider_summary["avg_queue_wait_ms"] = self._safe_average(
+                provider_summary.pop("_queue_wait_durations")
+            )
+            provider_summary["avg_download_ms"] = self._safe_average(
+                provider_summary.pop("_download_durations")
+            )
+            provider_summary["avg_delivery_ms"] = self._safe_average(
+                provider_summary.pop("_delivery_durations")
+            )
+
+        delivery_durations = [
+            row["delivery_duration_ms"]
+            for row in rows
+            if row["delivery_duration_ms"] is not None
+        ]
+        queue_wait_durations = [
+            queue_wait_ms
+            for row in rows
+            if (queue_wait_ms := self._duration_between_ms(row["created_at"], row["started_at"]))
+            is not None
+        ]
+        instagram_rows = [row for row in rows if row["provider"] == "instagram"]
+        failure_classes = sorted(
+            {
+                row["failure_class"]
+                for row in rows
+                if row["failure_class"] and row["status"] == "failed"
+            }
+        )
+        return {
+            "total_jobs": total_jobs,
+            "cache_hits": cache_hits,
+            "cache_hit_rate": cache_hits / total_jobs if total_jobs else 0.0,
+            "providers": providers,
+            "avg_queue_wait_ms": self._safe_average(queue_wait_durations),
+            "avg_delivery_ms": self._safe_average(delivery_durations),
+            "failure_classes": failure_classes,
+            "instagram": {
+                "fast_failed": sum(
+                    1 for row in instagram_rows if row["instagram_fast_status"] == "failed"
+                ),
+                "fallback_count": sum(
+                    1 for row in instagram_rows if row["instagram_fallback_attempted"]
+                ),
+                "account_retries": sum(
+                    int(row["instagram_account_retries"] or 0) for row in instagram_rows
+                ),
+                "auth_failures": sum(
+                    int(row["instagram_auth_failures"] or 0) for row in instagram_rows
+                ),
+            },
+        }
 
     def get_cached_result(self, chat_id: int, normalized_url: str) -> CachedMediaEntry | None:
         now = _utc_now().isoformat()
@@ -483,3 +723,27 @@ class StateStore:
     @staticmethod
     def _cache_key(chat_id: int, normalized_url: str) -> str:
         return f"{chat_id}:{normalized_url}"
+
+    def _safe_metrics_write(self, query: str, params: tuple[Any, ...]) -> None:
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(query, params)
+        except sqlite3.Error as exc:
+            logger.warning("Performance metrics write failed: %s", exc)
+
+    @staticmethod
+    def _safe_average(values: list[int]) -> int:
+        if not values:
+            return 0
+        return round(sum(values) / len(values))
+
+    @staticmethod
+    def _duration_between_ms(start: str | None, end: str | None) -> int | None:
+        if not start or not end:
+            return None
+        try:
+            start_at = datetime.fromisoformat(start)
+            end_at = datetime.fromisoformat(end)
+        except ValueError:
+            return None
+        return max(0, round((end_at - start_at).total_seconds() * 1000))

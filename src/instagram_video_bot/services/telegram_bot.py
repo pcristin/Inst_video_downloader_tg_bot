@@ -24,6 +24,7 @@ from telegram.ext import (
 
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
+from .download_models import ProviderExecutionMetrics
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
@@ -273,6 +274,13 @@ class TelegramBot:
             f"{provider}:{status}={count}"
             for provider, status, count in admin_status["provider_job_counts"]
         ) or "нет"
+        performance = self.state_store.get_performance_summary(update.effective_chat.id, limit=50)
+        group_stats = self.state_store.get_group_stats(update.effective_chat.id)
+        performance["duplicate_joins"] = group_stats["duplicate_joins"]
+        performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
+            error_class
+            for _provider, _normalized_url, error_class, _finished_at in admin_status["recent_failures"]
+        ]
         failure_lines = "\n".join(
             f"  - {provider} | {error_class} | {normalized_url}"
             for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
@@ -295,7 +303,8 @@ class TelegramBot:
             f"- Кэш результатов: {self._ru_on_off(settings.RESULT_CACHE_ENABLED)}\n"
             f"- Менеджер очереди: {self._ru_on_off(settings.QUEUE_MANAGER_ENABLED)}\n"
             f"- Задачи по площадкам: {provider_lines}\n"
-            f"- Последние ошибки:\n{failure_lines}"
+            f"- Последние ошибки:\n{failure_lines}\n\n"
+            f"{self._format_performance_summary(performance)}"
         )
 
     async def _await_request(
@@ -312,8 +321,22 @@ class TelegramBot:
             while True:
                 if self.job_manager.is_delivery_request(job, request_context.request_id):
                     try:
+                        delivery_started_at = time.perf_counter()
                         await self._send_media(context, request_context, video_info)
+                        self.state_store.record_delivery_metrics(
+                            job.job_id,
+                            delivery_duration_ms=self._elapsed_ms(delivery_started_at),
+                        )
                     except Exception as error:
+                        self.state_store.record_delivery_metrics(
+                            job.job_id,
+                            delivery_duration_ms=self._elapsed_ms(delivery_started_at),
+                        )
+                        self.state_store.update_job_status(
+                            job.job_id,
+                            job.state,
+                            error.__class__.__name__,
+                        )
                         handed_off = self.job_manager.mark_delivery_failed(
                             job,
                             request_context.request_id,
@@ -382,11 +405,12 @@ class TelegramBot:
     ):
         """Create the underlying shared job executor closure."""
 
-        async def _execute() -> VideoInfo:
+        async def _execute(job: SharedJob) -> VideoInfo:
             cached = None
             if settings.RESULT_CACHE_ENABLED:
                 cached = self.state_store.get_cached_result(chat_id, parsed_link.normalized_url)
             if cached:
+                self.state_store.record_cache_hit(job.job_id)
                 return self._video_info_from_cache(cached)
 
             downloader = VideoDownloader()
@@ -402,14 +426,26 @@ class TelegramBot:
                 else settings.TEMP_DIR / parsed_link.provider
             )
             output_dir.mkdir(parents=True, exist_ok=True)
+            download_started_at = time.perf_counter()
             try:
                 video_info = await downloader.download_video(parsed_link.original_url, output_dir)
-            except Exception:
+            except Exception as error:
+                self._record_provider_metrics(
+                    job.job_id,
+                    getattr(downloader, "last_provider_metrics", None),
+                    download_duration_ms=self._elapsed_ms(download_started_at),
+                    failure_class=error.__class__.__name__,
+                )
                 await self._notify_owner_about_low_account_pool(
                     context,
                     getattr(downloader, "last_account_health_event", None),
                 )
                 raise
+            self._record_provider_metrics(
+                job.job_id,
+                getattr(downloader, "last_provider_metrics", None),
+                download_duration_ms=self._elapsed_ms(download_started_at),
+            )
             if settings.RESULT_CACHE_ENABLED:
                 self.state_store.save_cached_result(
                     chat_id=chat_id,
@@ -436,6 +472,86 @@ class TelegramBot:
             return video_info
 
         return _execute
+
+    def _record_provider_metrics(
+        self,
+        job_id: str,
+        provider_metrics: ProviderExecutionMetrics | None,
+        *,
+        download_duration_ms: int,
+        failure_class: str | None = None,
+    ) -> None:
+        """Persist provider execution metrics without leaking provider internals."""
+        metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
+        effective_failure_class = getattr(metrics, "failure_class", None) or failure_class
+        self.state_store.record_download_metrics(
+            job_id,
+            download_duration_ms=download_duration_ms,
+            retry_count=int(getattr(metrics, "retry_count", 0) or 0),
+            instagram_fast_status=getattr(metrics, "instagram_fast_status", None),
+            instagram_fast_duration_ms=getattr(metrics, "instagram_fast_duration_ms", None),
+            instagram_fallback_attempted=bool(getattr(metrics, "instagram_fallback_attempted", False)),
+            instagram_account_attempts=int(getattr(metrics, "instagram_account_attempts", 0) or 0),
+            instagram_account_retries=int(getattr(metrics, "instagram_account_retries", 0) or 0),
+            instagram_auth_failures=int(getattr(metrics, "instagram_auth_failures", 0) or 0),
+            instagram_success_path=getattr(metrics, "instagram_success_path", None),
+            failure_class=effective_failure_class,
+        )
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, round((time.perf_counter() - started_at) * 1000))
+
+    @staticmethod
+    def _format_performance_summary(performance: dict) -> str:
+        total_jobs = int(performance.get("total_jobs", 0) or 0)
+        cache_hits = int(performance.get("cache_hits", 0) or 0)
+        cache_rate = float(performance.get("cache_hit_rate", 0.0) or 0.0) * 100
+        duplicate_joins = int(performance.get("duplicate_joins", 0) or 0)
+        lines = [
+            "Производительность:",
+            f"- Окно: последние {total_jobs} задач",
+            f"- Кэш: {cache_hits} ({cache_rate:.0f}%)",
+            f"- Повторы: {duplicate_joins}",
+            f"- Queue wait avg: {int(performance.get('avg_queue_wait_ms', 0) or 0)}мс",
+            f"- Telegram delivery avg: {int(performance.get('avg_delivery_ms', 0) or 0)}мс",
+        ]
+
+        providers = performance.get("providers", {})
+        if providers:
+            for provider, provider_summary in sorted(providers.items()):
+                lines.append(
+                    "- "
+                    f"{ChaosText.provider_name(provider)}: "
+                    f"{provider_summary.get('jobs', 0)} задач, "
+                    f"queue avg {provider_summary.get('avg_queue_wait_ms', 0)}мс, "
+                    f"download avg {provider_summary.get('avg_download_ms', 0)}мс, "
+                    f"delivery avg {provider_summary.get('avg_delivery_ms', 0)}мс"
+                )
+        else:
+            lines.append("- Провайдеры: нет данных")
+
+        instagram = performance.get("instagram", {})
+        lines.append(
+            "- Instagram fast-path: "
+            f"ошибок {int(instagram.get('fast_failed', 0) or 0)}, "
+            f"fallback {int(instagram.get('fallback_count', 0) or 0)}, "
+            f"retries {int(instagram.get('account_retries', 0) or 0)}, "
+            f"auth {int(instagram.get('auth_failures', 0) or 0)}"
+        )
+
+        failure_classes = sorted(
+            {
+                str(error_class)
+                for error_class in performance.get("failure_classes", [])
+                if error_class and error_class != "unknown"
+            }
+        )
+        lines.append(
+            "- Классы ошибок: "
+            + (", ".join(failure_classes) if failure_classes else "нет")
+        )
+        return "\n".join(lines)
 
     async def _on_job_state_change(self, job: SharedJob) -> None:
         """Propagate shared job state changes to per-request status messages."""
