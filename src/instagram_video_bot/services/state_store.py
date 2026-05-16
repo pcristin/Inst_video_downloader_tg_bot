@@ -446,19 +446,27 @@ class StateStore:
                 provider,
                 {
                     "jobs": 0,
+                    "avg_queue_wait_ms": 0,
                     "avg_download_ms": 0,
                     "avg_delivery_ms": 0,
+                    "_queue_wait_durations": [],
                     "_download_durations": [],
                     "_delivery_durations": [],
                 },
             )
             provider_summary["jobs"] += 1
+            queue_wait_ms = self._duration_between_ms(row["created_at"], row["started_at"])
+            if queue_wait_ms is not None:
+                provider_summary["_queue_wait_durations"].append(queue_wait_ms)
             if row["download_duration_ms"] is not None:
                 provider_summary["_download_durations"].append(row["download_duration_ms"])
             if row["delivery_duration_ms"] is not None:
                 provider_summary["_delivery_durations"].append(row["delivery_duration_ms"])
 
         for provider_summary in providers.values():
+            provider_summary["avg_queue_wait_ms"] = self._safe_average(
+                provider_summary.pop("_queue_wait_durations")
+            )
             provider_summary["avg_download_ms"] = self._safe_average(
                 provider_summary.pop("_download_durations")
             )
@@ -471,12 +479,18 @@ class StateStore:
             for row in rows
             if row["delivery_duration_ms"] is not None
         ]
+        queue_wait_durations = [
+            queue_wait_ms
+            for row in rows
+            if (queue_wait_ms := self._duration_between_ms(row["created_at"], row["started_at"]))
+            is not None
+        ]
         instagram_rows = [row for row in rows if row["provider"] == "instagram"]
         failure_classes = sorted(
             {
                 row["failure_class"]
                 for row in rows
-                if row["failure_class"]
+                if row["failure_class"] and row["status"] == "failed"
             }
         )
         return {
@@ -484,6 +498,7 @@ class StateStore:
             "cache_hits": cache_hits,
             "cache_hit_rate": cache_hits / total_jobs if total_jobs else 0.0,
             "providers": providers,
+            "avg_queue_wait_ms": self._safe_average(queue_wait_durations),
             "avg_delivery_ms": self._safe_average(delivery_durations),
             "failure_classes": failure_classes,
             "instagram": {
@@ -721,3 +736,14 @@ class StateStore:
         if not values:
             return 0
         return round(sum(values) / len(values))
+
+    @staticmethod
+    def _duration_between_ms(start: str | None, end: str | None) -> int | None:
+        if not start or not end:
+            return None
+        try:
+            start_at = datetime.fromisoformat(start)
+            end_at = datetime.fromisoformat(end)
+        except ValueError:
+            return None
+        return max(0, round((end_at - start_at).total_seconds() * 1000))
