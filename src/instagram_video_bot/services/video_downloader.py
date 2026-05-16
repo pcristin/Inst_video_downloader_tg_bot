@@ -353,9 +353,14 @@ class VideoDownloader:
             return "unsupported_url"
         if "timeout" in text or "timed out" in text:
             return "provider_timeout"
-        if "connection" in text or "network" in text:
+        if (
+            "connection" in text
+            or "network" in text
+            or "temporarily" in text
+            or "temporary" in text
+        ):
             return "transient_network"
-        return error.__class__.__name__
+        return "unknown"
 
     @staticmethod
     def _is_twitter_url(url: str) -> bool:

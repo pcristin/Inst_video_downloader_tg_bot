@@ -874,6 +874,16 @@ class _FlakyTwitterAdapter:
         return self.result
 
 
+class _AlwaysFailingAdapter:
+    def __init__(self, message):
+        self.calls = 0
+        self.message = message
+
+    async def download(self, url, output_dir):
+        self.calls += 1
+        raise DownloadError(self.message)
+
+
 @pytest.mark.asyncio
 async def test_transient_provider_error_retries_once(monkeypatch, tmp_path):
     media_file = tmp_path / "twitter.mp4"
@@ -891,6 +901,60 @@ async def test_transient_provider_error_retries_once(monkeypatch, tmp_path):
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_RETRY_BACKOFF_SECONDS", 0)
 
     info = await downloader.download_video("https://x.com/a/status/123", tmp_path)
+
+    assert info.file_path == media_file
+    assert adapter.calls == 2
+    assert downloader.last_provider_metrics.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_error_exhaustion_records_failure_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    adapter = _AlwaysFailingAdapter("temporarily unavailable")
+    downloader.twitter_adapter = adapter
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+
+    with pytest.raises(DownloadError, match="temporarily unavailable"):
+        await downloader.download_video("https://x.com/a/status/123", tmp_path)
+
+    assert adapter.calls == 3
+    assert downloader.last_provider_metrics.retry_count == 2
+    assert downloader.last_provider_metrics.failure_class == "transient_network"
+
+
+@pytest.mark.asyncio
+async def test_non_transient_provider_error_does_not_retry_and_records_unknown(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    adapter = _AlwaysFailingAdapter("bad response")
+    downloader.twitter_adapter = adapter
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+
+    with pytest.raises(DownloadError, match="bad response"):
+        await downloader.download_video("https://x.com/a/status/123", tmp_path)
+
+    assert adapter.calls == 1
+    assert downloader.last_provider_metrics.retry_count == 0
+    assert downloader.last_provider_metrics.failure_class == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_youtube_transient_provider_error_uses_retry_wrapper(monkeypatch, tmp_path):
+    media_file = tmp_path / "short.mp4"
+    media_file.write_bytes(b"video")
+    result = VideoInfo(
+        file_path=media_file,
+        title="short",
+        media_items=[MediaItem(file_path=media_file, media_type="video")],
+        primary_media_type="video",
+    )
+    downloader = VideoDownloader()
+    adapter = _FlakyTwitterAdapter(result)
+    downloader.youtube_adapter = adapter
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+
+    info = await downloader.download_video("https://www.youtube.com/shorts/abc123XYZ90", tmp_path)
 
     assert info.file_path == media_file
     assert adapter.calls == 2
