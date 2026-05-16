@@ -108,6 +108,10 @@ class _LeaseManager:
         excluded_usernames = excluded_usernames or set()
         return sum(1 for account in self.accounts if account.username not in excluded_usernames)
 
+    def get_eligible_account_count(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        return sum(1 for account in self.accounts if account.username not in excluded_usernames)
+
     def acquire_account(self, excluded_usernames=None):
         excluded_usernames = excluded_usernames or set()
         for index, account in enumerate(self.accounts):
@@ -156,6 +160,35 @@ class _DelayedLeaseManager(_LeaseManager):
 
     def get_leasable_account_count(self, excluded_usernames=None):
         return len(self.accounts)
+
+
+class _TemporarilyLeasedManager(_LeaseManager):
+    def __init__(self, accounts):
+        super().__init__(accounts)
+        self.leased_usernames = {account.username for account in accounts}
+
+    def get_leasable_account_count(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        return sum(
+            1
+            for account in self.accounts
+            if account.username not in self.leased_usernames
+            and account.username not in excluded_usernames
+        )
+
+    def get_eligible_account_count(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        return sum(1 for account in self.accounts if account.username not in excluded_usernames)
+
+    def acquire_account(self, excluded_usernames=None):
+        excluded_usernames = excluded_usernames or set()
+        for index, account in enumerate(self.accounts):
+            if account.username not in self.leased_usernames and account.username not in excluded_usernames:
+                return self.accounts.pop(index)
+        return None
+
+    def release_username(self, username):
+        self.leased_usernames.discard(username)
 
 
 class _HealthEventLeaseManager(_LeaseManager):
@@ -811,3 +844,19 @@ async def test_acquire_account_with_wait_fails_promptly_when_all_accounts_exclud
     )
 
     assert account is None
+
+
+@pytest.mark.asyncio
+async def test_acquire_account_with_wait_waits_for_temporarily_leased_account(monkeypatch):
+    downloader = VideoDownloader()
+    manager = _TemporarilyLeasedManager([_Account("acc_wait")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 1.0)
+
+    acquire_task = asyncio.create_task(downloader._acquire_account_with_wait(manager, set()))
+    await asyncio.sleep(0.05)
+    manager.release_username("acc_wait")
+
+    account = await asyncio.wait_for(acquire_task, timeout=0.5)
+
+    assert account is not None
+    assert account.username == "acc_wait"
