@@ -913,3 +913,65 @@ async def test_admin_status_reports_owner_settings(monkeypatch, tmp_path):
     assert "Статистика: выключена" in reply
     assert "Лимит чата: 5" in reply
     assert "Лимит на пользователя: 2" in reply
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_records_performance_metrics(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate("https://www.instagram.com/reel/perf-cache/")
+    media_file = tmp_path / "perf-cache.mp4"
+    media_file.write_bytes(b"video")
+    telegram_bot.state_store.save_cached_result(
+        chat_id=77,
+        normalized_url="https://www.instagram.com/reel/perf-cache/",
+        provider="instagram",
+        title="cached",
+        media_items=[{"file_path": str(media_file), "media_type": "video", "caption": None, "duration": None}],
+        ttl_seconds=3600,
+    )
+
+    async def fail_download_video(self, url: str, output_dir: Path):
+        raise AssertionError("cache hit should skip downloader")
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    summary = telegram_bot.state_store.get_performance_summary(77, limit=50)
+    assert summary["cache_hits"] == 1
+    assert summary["avg_delivery_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_admin_status_includes_performance_summary(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_status")
+    context = _FakeContext(_FakeBot())
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    telegram_bot.state_store.start_job_metrics(
+        job_id="job-1",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+    )
+    telegram_bot.state_store.mark_job_metrics_started("job-1")
+    telegram_bot.state_store.record_download_metrics(
+        "job-1",
+        download_duration_ms=500,
+        instagram_fast_status="succeeded",
+        instagram_fast_duration_ms=250,
+        instagram_success_path="fast",
+    )
+    telegram_bot.state_store.record_delivery_metrics("job-1", delivery_duration_ms=200)
+    telegram_bot.state_store.finalize_job_metrics("job-1", status="completed")
+
+    await telegram_bot.admin_status_command(update, context)
+
+    text = update.message.replies[-1]
+    assert "Производительность:" in text
+    assert "Instagram fast-path" in text
+    assert "acc" not in text
+    assert "proxy" not in text.lower()
