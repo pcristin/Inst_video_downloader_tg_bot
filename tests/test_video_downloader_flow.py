@@ -575,3 +575,47 @@ async def test_youtube_shorts_url_routes_to_youtube_downloader(tmp_path):
     assert called["url"] == "https://www.youtube.com/shorts/abc123XYZ90"
     assert info.file_path == expected_path
     assert info.primary_media_type == "video"
+
+
+@pytest.mark.asyncio
+async def test_instagram_fast_success_records_provider_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+    expected_path = tmp_path / "fast-metrics.mp4"
+    expected_path.write_bytes(b"video")
+    downloader.fast_extractor = _FastExtractorSuccess(expected_path)
+
+    await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.provider == "instagram"
+    assert metrics.instagram_fast_status == "succeeded"
+    assert metrics.instagram_success_path == "fast"
+    assert metrics.instagram_fallback_attempted is False
+    assert metrics.instagram_fast_duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    expected_path = tmp_path / "legacy-metrics.mp4"
+    expected_path.write_bytes(b"video")
+    downloader.fast_extractor = _FastExtractorFailure()
+    monkeypatch.setattr(
+        downloader,
+        "_build_single_account_client",
+        lambda: _SuccessDownloadClient(expected_path, {"title": "legacy", "duration": 7}),
+    )
+
+    await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_fast_status == "failed"
+    assert metrics.instagram_fallback_attempted is True
+    assert metrics.instagram_success_path == "fallback"
