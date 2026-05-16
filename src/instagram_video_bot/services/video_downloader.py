@@ -206,7 +206,7 @@ class VideoDownloader:
         acquired_account = False
         max_attempts = max(1, len(manager.get_available_accounts()))
         for attempt in range(max_attempts):
-            account = manager.acquire_account(excluded_usernames=tried_accounts)
+            account = await self._acquire_account_with_wait(manager, tried_accounts)
             if not account:
                 break
             acquired_account = True
@@ -256,6 +256,17 @@ class VideoDownloader:
         if not acquired_account and not last_error and not fast_error:
             self.last_provider_metrics.failure_class = "no_instagram_accounts"
         self._raise_final_download_error(last_error, fast_error)
+
+    async def _acquire_account_with_wait(self, manager, tried_accounts: set[str]):
+        deadline = time.monotonic() + max(0.0, settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS)
+        while True:
+            account = manager.acquire_account(excluded_usernames=tried_accounts)
+            if account:
+                return account
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(0.25, remaining))
 
     async def _download_with_single_account(
         self, url: str, output_dir: Path, fast_error: Optional[Exception]
