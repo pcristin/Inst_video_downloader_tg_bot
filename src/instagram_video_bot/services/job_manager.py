@@ -6,10 +6,9 @@ import asyncio
 import inspect
 import logging
 import uuid
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from ..config.settings import settings
 from .state_store import StateStore
@@ -174,14 +173,18 @@ class JobManager:
 
     async def _run_job(self, job: SharedJob, execute: JobExecutor) -> None:
         try:
-            async with self._execution_slots(job):
-                await self._set_state(job, "running")
-                self.store.mark_job_metrics_started(job.job_id)
-                result = await self._execute_job(execute, job)
-                if job.result_future and not job.result_future.done():
-                    job.result_future.set_result(result)
-                await self._set_state(job, "completed")
-                self.store.finalize_job_metrics(job.job_id, status="completed")
+            async with self._get_chat_semaphore(job.chat_id):
+                async with self._get_user_semaphore(job.chat_id, job.submitter_user_id):
+                    # Acquire local limits before provider/global so local waiters do not hold scarce slots.
+                    async with self._get_provider_semaphore(job.provider):
+                        async with self._global_semaphore:
+                            await self._set_state(job, "running")
+                            self.store.mark_job_metrics_started(job.job_id)
+                            result = await self._execute_job(execute, job)
+                            if job.result_future and not job.result_future.done():
+                                job.result_future.set_result(result)
+                            await self._set_state(job, "completed")
+                            self.store.finalize_job_metrics(job.job_id, status="completed")
         except asyncio.CancelledError:
             self.store.update_job_status(job.job_id, "cancelled")
             self.store.finalize_job_metrics(job.job_id, status="cancelled")
@@ -367,46 +370,6 @@ class JobManager:
             self._user_semaphores[key] = current
             self._user_semaphore_limits[chat_id] = limit
         return current
-
-    @asynccontextmanager
-    async def _execution_slots(self, job: SharedJob) -> AsyncIterator[None]:
-        semaphores = [
-            self._get_chat_semaphore(job.chat_id),
-            self._get_user_semaphore(job.chat_id, job.submitter_user_id),
-            self._get_provider_semaphore(job.provider),
-            self._global_semaphore,
-        ]
-        acquired = await self._acquire_all_ready(semaphores)
-        try:
-            yield
-        finally:
-            for semaphore in reversed(acquired):
-                semaphore.release()
-
-    @staticmethod
-    async def _acquire_all_ready(semaphores: list[asyncio.Semaphore]) -> list[asyncio.Semaphore]:
-        while True:
-            acquired: list[asyncio.Semaphore] = []
-            blocking: asyncio.Semaphore | None = None
-            try:
-                for semaphore in semaphores:
-                    # locked() tells us acquire would block; partial slots are released before waiting.
-                    if semaphore.locked():
-                        blocking = semaphore
-                        break
-                    await semaphore.acquire()
-                    acquired.append(semaphore)
-                if blocking is None:
-                    return acquired
-            except BaseException:
-                for semaphore in reversed(acquired):
-                    semaphore.release()
-                raise
-
-            for semaphore in reversed(acquired):
-                semaphore.release()
-            await blocking.acquire()
-            blocking.release()
 
     def _get_provider_semaphore(self, provider: str) -> asyncio.Semaphore:
         limit = self._provider_limit(provider)
