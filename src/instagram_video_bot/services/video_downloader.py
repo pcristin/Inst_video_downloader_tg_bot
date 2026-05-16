@@ -344,7 +344,10 @@ class VideoDownloader:
     @staticmethod
     def _is_transient_download_error(error: Exception) -> bool:
         text = str(error).lower()
-        return any(token in text for token in ("timeout", "timed out", "temporarily", "connection", "network"))
+        return any(
+            token in text
+            for token in ("timeout", "timed out", "temporary", "temporarily", "connection", "network")
+        )
 
     @staticmethod
     def _classify_download_error(error: Exception) -> str:
