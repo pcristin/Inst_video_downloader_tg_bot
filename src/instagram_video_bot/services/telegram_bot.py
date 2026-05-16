@@ -513,6 +513,7 @@ class TelegramBot:
             f"- Окно: последние {total_jobs} задач",
             f"- Кэш: {cache_hits} ({cache_rate:.0f}%)",
             f"- Повторы: {duplicate_joins}",
+            f"- Queue wait avg: {int(performance.get('avg_queue_wait_ms', 0) or 0)}мс",
             f"- Telegram delivery avg: {int(performance.get('avg_delivery_ms', 0) or 0)}мс",
         ]
 
@@ -523,6 +524,7 @@ class TelegramBot:
                     "- "
                     f"{ChaosText.provider_name(provider)}: "
                     f"{provider_summary.get('jobs', 0)} задач, "
+                    f"queue avg {provider_summary.get('avg_queue_wait_ms', 0)}мс, "
                     f"download avg {provider_summary.get('avg_download_ms', 0)}мс, "
                     f"delivery avg {provider_summary.get('avg_delivery_ms', 0)}мс"
                 )
