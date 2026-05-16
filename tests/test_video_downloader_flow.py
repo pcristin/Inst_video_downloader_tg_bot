@@ -57,6 +57,23 @@ class _AuthFailClient:
         return None
 
 
+class _DownloadErrorClient:
+    username = "acc_error"
+    proxy = None
+
+    def login(self):
+        return True
+
+    def download_video(self, _url: str, _output_dir: Path):
+        raise DownloadError("legacy download failed")
+
+    def download_media(self, _url: str, _output_dir: Path):
+        raise DownloadError("legacy download failed")
+
+    def get_media_info(self, _url: str):
+        return None
+
+
 class _FastExtractorSuccess:
     def __init__(self, path: Path, media_type: str = "video"):
         self._path = path
@@ -620,3 +637,76 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     assert metrics.instagram_fallback_attempted is True
     assert metrics.instagram_success_path == "fallback"
     assert metrics.instagram_account_attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_single_account_terminal_auth_failure_counts_actual_retries(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    monkeypatch.setattr(downloader, "_build_single_account_client", lambda: _AuthFailClient())
+
+    with pytest.raises(DownloadError, match="Authentication failed"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 2
+    assert metrics.instagram_auth_failures == 2
+    assert metrics.instagram_account_retries == 1
+    assert metrics.retry_count == 1
+    assert metrics.failure_class == "auth_challenge"
+
+
+@pytest.mark.asyncio
+async def test_single_account_download_error_sets_failure_class(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    monkeypatch.setattr(downloader, "_build_single_account_client", lambda: _DownloadErrorClient())
+
+    with pytest.raises(DownloadError, match="legacy download failed"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 1
+    assert metrics.instagram_auth_failures == 0
+    assert metrics.instagram_account_retries == 0
+    assert metrics.retry_count == 0
+    assert metrics.failure_class == "download_failed"
+
+
+@pytest.mark.asyncio
+async def test_leased_fallback_success_records_retry_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "leased-retry-metrics.mp4"
+    expected_path.write_bytes(b"video")
+
+    manager = _LeaseManager([_Account("acc_fail"), _Account("acc_ok")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_fail": _AuthFailClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+
+    def _client_factory(**kwargs):
+        return clients[kwargs["username"]]
+
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.InstagramClient", _client_factory)
+
+    await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 2
+    assert metrics.instagram_auth_failures == 1
+    assert metrics.instagram_account_retries == 1
+    assert metrics.retry_count == 1
+    assert metrics.instagram_success_path == "fallback"

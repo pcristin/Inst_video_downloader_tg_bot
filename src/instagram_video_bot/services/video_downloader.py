@@ -120,6 +120,13 @@ class VideoDownloader:
             raise AuthenticationError("Failed to login to Instagram")
         return client
 
+    def _record_instagram_account_attempt(self) -> None:
+        """Record an Instagram account attempt and derived retry count."""
+        self.last_provider_metrics.instagram_account_attempts += 1
+        account_retries = max(0, self.last_provider_metrics.instagram_account_attempts - 1)
+        self.last_provider_metrics.instagram_account_retries = account_retries
+        self.last_provider_metrics.retry_count = account_retries
+
     async def download_video(self, url: str, output_dir: Path) -> VideoInfo:
         """Download media from supported providers."""
         if self._is_twitter_url(url):
@@ -201,7 +208,7 @@ class VideoDownloader:
             if not account:
                 break
             tried_accounts.add(account.username)
-            self.last_provider_metrics.instagram_account_attempts += 1
+            self._record_instagram_account_attempt()
             try:
                 await self._apply_instagram_throttle(account.username)
                 client = self._build_leased_client(account)
@@ -219,8 +226,6 @@ class VideoDownloader:
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
                 self.last_provider_metrics.instagram_auth_failures += 1
-                self.last_provider_metrics.instagram_account_retries += 1
-                self.last_provider_metrics.retry_count += 1
                 self.last_provider_metrics.failure_class = "auth_challenge"
                 logger.warning(
                     "Authentication-like failure during download",
@@ -236,8 +241,10 @@ class VideoDownloader:
                     self.last_account_health_event = event
             except Exception as error:
                 if isinstance(error, DownloadError):
+                    self.last_provider_metrics.failure_class = "download_failed"
                     raise
                 last_error = error
+                self.last_provider_metrics.failure_class = "download_failed"
                 raise DownloadError(f"Download failed: {str(error)}") from error
             finally:
                 manager.release_account(account)
@@ -251,7 +258,7 @@ class VideoDownloader:
         """Download with the configured single Instagram account."""
         last_error: Optional[Exception] = None
         for attempt in range(2):
-            self.last_provider_metrics.instagram_account_attempts += 1
+            self._record_instagram_account_attempt()
             try:
                 await self._apply_instagram_throttle("__single__")
                 client = self._build_single_account_client()
@@ -266,8 +273,6 @@ class VideoDownloader:
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error
                 self.last_provider_metrics.instagram_auth_failures += 1
-                self.last_provider_metrics.instagram_account_retries += 1
-                self.last_provider_metrics.retry_count += 1
                 self.last_provider_metrics.failure_class = "auth_challenge"
                 logger.warning(
                     "Authentication-like failure during single-account download",
@@ -275,8 +280,10 @@ class VideoDownloader:
                 )
             except Exception as error:
                 if isinstance(error, DownloadError):
+                    self.last_provider_metrics.failure_class = "download_failed"
                     raise
                 last_error = error
+                self.last_provider_metrics.failure_class = "download_failed"
                 raise DownloadError(f"Download failed: {str(error)}") from error
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
