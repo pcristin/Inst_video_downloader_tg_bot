@@ -138,6 +138,21 @@ class _DuplicateLeaseManager(_LeaseManager):
         return None
 
 
+class _DelayedLeaseManager(_LeaseManager):
+    def __init__(self, accounts):
+        super().__init__(accounts)
+        self.calls = 0
+
+    def acquire_account(self, excluded_usernames=None):
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        return super().acquire_account(excluded_usernames=excluded_usernames)
+
+    def get_leasable_account_count(self, excluded_usernames=None):
+        return len(self.accounts)
+
+
 class _HealthEventLeaseManager(_LeaseManager):
     def __init__(self, accounts, events):
         super().__init__(accounts)
@@ -175,6 +190,29 @@ def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path)
     assert media_item.duration == 12.4
     assert media_item.width == 720
     assert media_item.height == 1280
+
+
+@pytest.mark.asyncio
+async def test_instagram_fallback_waits_for_leased_account(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 1.0)
+    expected_path = tmp_path / "waited.mp4"
+    expected_path.write_bytes(b"video")
+    manager = _DelayedLeaseManager([_Account("acc_wait")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+    monkeypatch.setattr(
+        downloader,
+        "_build_leased_client",
+        lambda account: _SuccessDownloadClient(expected_path, {"title": "waited", "duration": 5}),
+    )
+
+    info = await downloader.download_video("https://www.instagram.com/reel/wait/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert manager.calls >= 2
 
 
 @pytest.mark.asyncio

@@ -233,6 +233,17 @@ class AccountManager:
             acc for acc in self.accounts 
             if not acc.is_banned and acc.password and acc.totp_secret
         ]
+
+    def get_leasable_account_count(self, excluded_usernames: Optional[Set[str]] = None) -> int:
+        """Return how many healthy accounts are not currently leased."""
+        excluded_usernames = excluded_usernames or set()
+        with self._lock:
+            return sum(
+                1
+                for account in self.get_available_accounts()
+                if account.username not in self._leased_accounts
+                and account.username not in excluded_usernames
+            )
     
     def get_next_account(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[Account]:
         """Get the next available account for rotation."""
