@@ -30,7 +30,7 @@ class ChaosText:
             "Поддерживаю: Instagram, Twitter/X и YouTube Shorts.\n"
             "Команды: /help, /status, /formats, /cancel, /stats, /chaos status\n"
             "Настройки владельца: /quiet on|off, /dupes on|off, /statsmode on|off, "
-            "/chatlimit <n>, /userlimit <n>, /admin_status\n"
+            "/chatlimit <n>, /userlimit <n>, /admin_status, /admin_global_status\n"
             f"{chaos_line}"
         )
 

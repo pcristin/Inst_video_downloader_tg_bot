@@ -424,18 +424,29 @@ class StateStore:
             (status, now, job_id),
         )
 
-    def get_performance_summary(self, chat_id: int, limit: int = 50) -> dict[str, Any]:
+    def get_performance_summary(self, chat_id: int | None, limit: int = 50) -> dict[str, Any]:
         with self._lock:
-            rows = self._conn.execute(
-                """
-                SELECT *
-                FROM performance_metrics
-                WHERE chat_id = ?
-                ORDER BY finished_at DESC, created_at DESC
-                LIMIT ?
-                """,
-                (chat_id, limit),
-            ).fetchall()
+            if chat_id is None:
+                rows = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM performance_metrics
+                    ORDER BY finished_at DESC, created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM performance_metrics
+                    WHERE chat_id = ?
+                    ORDER BY finished_at DESC, created_at DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, limit),
+                ).fetchall()
 
         total_jobs = len(rows)
         cache_hits = sum(1 for row in rows if row["cache_hit"])
@@ -706,6 +717,69 @@ class StateStore:
             "queued_jobs": int(queued),
             "running_jobs": int(running),
             "failed_jobs": int(failed_jobs),
+            "provider_job_counts": [
+                (row["provider"], row["status"], int(row["count"])) for row in provider_job_counts
+            ],
+            "recent_failures": [
+                (
+                    row["provider"],
+                    row["normalized_url"],
+                    row["error_class"] or "unknown",
+                    row["finished_at"] or "unknown",
+                )
+                for row in recent_failures
+            ],
+        }
+
+    def get_global_admin_status(self) -> dict[str, Any]:
+        """Return owner-facing operational state across all chats."""
+        with self._lock:
+            cache_entries = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM recent_results",
+            ).fetchone()["count"]
+            queued = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE status = 'queued'",
+            ).fetchone()["count"]
+            running = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE status = 'running'",
+            ).fetchone()["count"]
+            failed_jobs = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM jobs WHERE status = 'failed'",
+            ).fetchone()["count"]
+            chats_with_jobs = self._conn.execute(
+                "SELECT COUNT(DISTINCT chat_id) AS count FROM jobs",
+            ).fetchone()["count"]
+            users_with_requests = self._conn.execute(
+                "SELECT COUNT(DISTINCT user_id) AS count FROM request_events",
+            ).fetchone()["count"]
+            duplicate_joins = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM request_events WHERE joined_existing = 1",
+            ).fetchone()["count"]
+            provider_job_counts = self._conn.execute(
+                """
+                SELECT provider, status, COUNT(*) AS count
+                FROM jobs
+                GROUP BY provider, status
+                ORDER BY provider ASC, status ASC
+                """
+            ).fetchall()
+            recent_failures = self._conn.execute(
+                """
+                SELECT provider, normalized_url, error_class, finished_at
+                FROM jobs
+                WHERE status = 'failed'
+                ORDER BY finished_at DESC
+                LIMIT 5
+                """
+            ).fetchall()
+        return {
+            "cache_entries": int(cache_entries),
+            "queued_jobs": int(queued),
+            "running_jobs": int(running),
+            "failed_jobs": int(failed_jobs),
+            "chats_with_jobs": int(chats_with_jobs),
+            "users_with_requests": int(users_with_requests),
+            "duplicate_joins": int(duplicate_joins),
             "provider_job_counts": [
                 (row["provider"], row["status"], int(row["count"])) for row in provider_job_counts
             ],
