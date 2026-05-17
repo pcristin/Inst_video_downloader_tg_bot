@@ -9,7 +9,7 @@ import datetime as dtm
 import logging
 from pathlib import Path
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
 from telegram.error import NetworkError, TelegramError
@@ -269,18 +269,16 @@ class TelegramBot:
             return
         snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
         admin_status = self.state_store.get_admin_status(update.effective_chat.id)
+        performance = self._build_admin_performance_summary(
+            chat_id=update.effective_chat.id,
+            duplicate_joins=self.state_store.get_group_stats(update.effective_chat.id)["duplicate_joins"],
+            recent_failures=admin_status["recent_failures"],
+        )
         settings_row = admin_status["settings"]
         provider_lines = ", ".join(
             f"{provider}:{status}={count}"
             for provider, status, count in admin_status["provider_job_counts"]
         ) or "нет"
-        performance = self.state_store.get_performance_summary(update.effective_chat.id, limit=50)
-        group_stats = self.state_store.get_group_stats(update.effective_chat.id)
-        performance["duplicate_joins"] = group_stats["duplicate_joins"]
-        performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
-            error_class
-            for _provider, _normalized_url, error_class, _finished_at in admin_status["recent_failures"]
-        ]
         failure_lines = "\n".join(
             f"  - {provider} | {error_class} | {normalized_url}"
             for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
@@ -298,6 +296,46 @@ class TelegramBot:
             f"- Выполняется задач: {admin_status['running_jobs']}\n"
             f"- В очереди задач: {admin_status['queued_jobs']}\n"
             f"- Активные запросы: {snapshot['active_requests']}\n"
+            f"- Ошибочных задач: {admin_status['failed_jobs']}\n"
+            f"- Записей в кэше: {admin_status['cache_entries']}\n"
+            f"- Кэш результатов: {self._ru_on_off(settings.RESULT_CACHE_ENABLED)}\n"
+            f"- Менеджер очереди: {self._ru_on_off(settings.QUEUE_MANAGER_ENABLED)}\n"
+            f"- Задачи по площадкам: {provider_lines}\n"
+            f"- Последние ошибки:\n{failure_lines}\n\n"
+            f"{self._format_performance_summary(performance)}"
+        )
+
+    async def admin_global_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show owner-facing operational status across all chats."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        snapshot = self.job_manager.get_global_snapshot()
+        admin_status = self.state_store.get_global_admin_status()
+        performance = self._build_admin_performance_summary(
+            chat_id=None,
+            duplicate_joins=admin_status["duplicate_joins"],
+            recent_failures=admin_status["recent_failures"],
+        )
+        provider_lines = ", ".join(
+            f"{provider}:{status}={count}"
+            for provider, status, count in admin_status["provider_job_counts"]
+        ) or "нет"
+        failure_lines = "\n".join(
+            f"  - {provider} | {error_class} | {normalized_url}"
+            for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
+        ) or "  - нет"
+        uptime_seconds = int(time.time() - self.started_at)
+        await update.message.reply_text(
+            "Глобальный админ-статус:\n"
+            f"- Аптайм: {uptime_seconds}с\n"
+            f"- Чатов с задачами: {admin_status['chats_with_jobs']}\n"
+            f"- Пользователей с запросами: {admin_status['users_with_requests']}\n"
+            f"- Выполняется задач: {admin_status['running_jobs']}\n"
+            f"- В очереди задач: {admin_status['queued_jobs']}\n"
+            f"- Активные запросы: {snapshot['active_requests']}\n"
+            f"- Глобальный лимит: {snapshot['global_limit']}\n"
             f"- Ошибочных задач: {admin_status['failed_jobs']}\n"
             f"- Записей в кэше: {admin_status['cache_entries']}\n"
             f"- Кэш результатов: {self._ru_on_off(settings.RESULT_CACHE_ENABLED)}\n"
@@ -552,6 +590,21 @@ class TelegramBot:
             + (", ".join(failure_classes) if failure_classes else "нет")
         )
         return "\n".join(lines)
+
+    def _build_admin_performance_summary(
+        self,
+        *,
+        chat_id: int | None,
+        duplicate_joins: int,
+        recent_failures: list[tuple[str, str, str, str]],
+    ) -> dict[str, Any]:
+        performance = self.state_store.get_performance_summary(chat_id, limit=50)
+        performance["duplicate_joins"] = duplicate_joins
+        performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
+            error_class
+            for _provider, _normalized_url, error_class, _finished_at in recent_failures
+        ]
+        return performance
 
     async def _on_job_state_change(self, job: SharedJob) -> None:
         """Propagate shared job state changes to per-request status messages."""
@@ -940,6 +993,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("chatlimit", self.chatlimit_command))
         self.application.add_handler(CommandHandler("userlimit", self.userlimit_command))
         self.application.add_handler(CommandHandler("admin_status", self.admin_status_command))
+        self.application.add_handler(CommandHandler("admin_global_status", self.admin_global_status_command))
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
