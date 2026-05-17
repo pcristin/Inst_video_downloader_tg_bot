@@ -292,6 +292,24 @@ class JobManager:
             "user_limit": limits["user_max_active_jobs"],
         }
 
+    def get_global_snapshot(self) -> dict[str, int]:
+        active = 0
+        queued = 0
+        watchers = 0
+        for job in self._jobs.values():
+            if job.state == "running":
+                active += 1
+            elif job.state == "queued":
+                queued += 1
+            if job.state not in {"completed", "failed", "cancelled"}:
+                watchers += sum(1 for request in job.requesters.values() if request.active)
+        return {
+            "active_jobs": active,
+            "queued_jobs": queued,
+            "active_requests": watchers,
+            "global_limit": settings.GLOBAL_MAX_CONCURRENT_JOBS,
+        }
+
     def update_chat_limits(self, chat_id: int, *, chat_limit: int | None = None, user_limit: int | None = None) -> None:
         """Refresh in-memory semaphores for updated owner-defined limits."""
         if chat_limit is not None:

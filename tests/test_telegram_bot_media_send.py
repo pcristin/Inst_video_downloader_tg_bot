@@ -979,6 +979,50 @@ async def test_admin_status_includes_performance_summary(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_admin_global_status_reports_all_chats(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_global_status", chat_id=77)
+    context = _FakeContext(_FakeBot())
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    telegram_bot.state_store.create_job(
+        "job-current",
+        77,
+        "https://www.instagram.com/reel/current/",
+        "instagram",
+        "failed",
+    )
+    telegram_bot.state_store.create_job(
+        "job-other",
+        88,
+        "https://x.com/a/status/1",
+        "twitter",
+        "queued",
+    )
+
+    await telegram_bot.admin_global_status_command(update, context)
+
+    text = update.message.replies[-1]
+    assert "Глобальный админ-статус:" in text
+    assert "Чатов с задачами: 2" in text
+    assert "В очереди задач: 1" in text
+    assert "Ошибочных задач: 1" in text
+    assert "instagram:failed=1" in text
+    assert "twitter:queued=1" in text
+
+
+@pytest.mark.asyncio
+async def test_admin_global_status_requires_owner(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_global_status", user_id=2002)
+    context = _FakeContext(_FakeBot())
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+
+    await telegram_bot.admin_global_status_command(update, context)
+
+    assert update.message.replies[-1] == "Эта команда доступна только владельцу бота."
+
+
+@pytest.mark.asyncio
 async def test_download_failure_records_provider_failure_class(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("https://www.instagram.com/reel/no-accounts/")
