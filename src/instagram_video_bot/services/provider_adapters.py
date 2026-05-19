@@ -108,6 +108,12 @@ class InstagramProviderAdapter:
 
         file_path = self._download_with_legacy_client(client, url, output_dir)
         if not file_path:
+            failure_class = getattr(client, "last_failure_class", None)
+            if failure_class == "auth_challenge":
+                reason = getattr(client, "last_failure_reason", None) or failure_class
+                raise InstagramAuthError(str(reason))
+            if failure_class and failure_class != "download_failed":
+                raise DownloadError(f"Instagram download failed: {failure_class}")
             raise DownloadError("Failed to download video")
 
         media_info = {"title": "", "duration": 0}

@@ -44,6 +44,8 @@ class InstagramClient:
         )
         self.client = Client()
         self._session_settings: Optional[dict] = None
+        self.last_failure_class: Optional[str] = None
+        self.last_failure_reason: Optional[str] = None
         self._setup_proxy()
 
     def _redact_proxy(self, proxy: Optional[str]) -> str:
@@ -69,17 +71,45 @@ class InstagramClient:
             return "auth_challenge"
         if isinstance(error, LoginRequired) or "login_required" in error_str:
             return "auth_challenge"
+        if "login required" in error_str:
+            return "auth_challenge"
+        if (
+            "manual verification" in error_str
+            or "checkpoint" in error_str
+            or "ufac" in error_str
+            or "web bloks" in error_str
+        ):
+            return "auth_challenge"
         if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
             return "auth_challenge"
         if isinstance(error, PleaseWaitFewMinutes) or "please wait" in error_str:
             return "rate_limit"
         if "rate" in error_str and "limit" in error_str:
             return "rate_limit"
+        if (
+            "content isn't available to everyone" in error_str
+            or "certain audiences" in error_str
+            or "age-restricted" in error_str
+            or "age restricted" in error_str
+        ):
+            return "content_restricted"
         return "download_failed"
 
     def _is_auth_error(self, error: Exception) -> bool:
         """Whether this error should trigger auth recovery/rotation."""
         return self._classify_instagram_error(error) == "auth_challenge"
+
+    def _record_failure(self, error: Exception | str) -> str:
+        """Store the most specific recent provider failure for callers."""
+        if isinstance(error, Exception):
+            reason = str(error)
+            failure_class = self._classify_instagram_error(error)
+        else:
+            reason = error
+            failure_class = self._classify_instagram_error(Exception(error))
+        self.last_failure_class = failure_class
+        self.last_failure_reason = reason
+        return failure_class
 
     def _setup_proxy(self) -> None:
         """Configure proxy if available."""
@@ -182,6 +212,8 @@ class InstagramClient:
 
     def download_video(self, url: str, output_dir: Path) -> Optional[Path]:
         """Download video using instagrapi with validation error handling."""
+        self.last_failure_class = None
+        self.last_failure_reason = None
         try:
             # Extract media PK from URL
             media_pk = int(self.client.media_pk_from_url(url))
@@ -215,6 +247,7 @@ class InstagramClient:
                     return final_path
             except Exception as download_error:
                 failure_class = self._classify_instagram_error(download_error)
+                self._record_failure(download_error)
                 
                 # Check if this is a session expiration issue
                 if self._is_auth_error(download_error):
@@ -225,7 +258,9 @@ class InstagramClient:
                             video_path = self.client.video_download(media_pk, folder=output_dir)
                             logger.info(f"Video downloaded after re-login: {video_path}")
                             return video_path
-                        except Exception:
+                        except Exception as retry_error:
+                            if self._is_auth_error(retry_error):
+                                raise InstagramAuthError(str(retry_error)) from retry_error
                             logger.warning("Download still failed after re-login, trying fallbacks...")
                     else:
                         raise InstagramAuthError(str(download_error)) from download_error
@@ -253,6 +288,9 @@ class InstagramClient:
             raise
         except Exception as e:
             logger.error(f"Video download failed: {e}")
+            self._record_failure(e)
+            if self._is_auth_error(e):
+                raise InstagramAuthError(str(e)) from e
             return None
     
     def _get_media_dict_raw(self, media_pk: int) -> Optional[dict]:
@@ -547,6 +585,7 @@ class InstagramClient:
                 return output_file
             else:
                 if result.stderr:
+                    self._record_failure(result.stderr)
                     logger.warning(f"yt-dlp failed: {result.stderr}")
                 if output_file.exists():
                     output_file.unlink()
