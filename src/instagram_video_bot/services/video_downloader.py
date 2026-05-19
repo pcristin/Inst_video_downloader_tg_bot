@@ -250,7 +250,7 @@ class VideoDownloader:
                     self.last_account_health_event = event
             except Exception as error:
                 if isinstance(error, DownloadError):
-                    self.last_provider_metrics.failure_class = "download_failed"
+                    self.last_provider_metrics.failure_class = self._classify_instagram_fallback_error(error)
                     raise
                 last_error = error
                 self.last_provider_metrics.failure_class = "download_failed"
@@ -311,7 +311,7 @@ class VideoDownloader:
                 )
             except Exception as error:
                 if isinstance(error, DownloadError):
-                    self.last_provider_metrics.failure_class = "download_failed"
+                    self.last_provider_metrics.failure_class = self._classify_instagram_fallback_error(error)
                     raise
                 last_error = error
                 self.last_provider_metrics.failure_class = "download_failed"
@@ -359,6 +359,14 @@ class VideoDownloader:
     @staticmethod
     def _classify_download_error(error: Exception) -> str:
         text = str(error).lower()
+        if (
+            "content_restricted" in text
+            or "content isn't available to everyone" in text
+            or "certain audiences" in text
+            or "age-restricted" in text
+            or "age restricted" in text
+        ):
+            return "content_restricted"
         if "unsupported" in text:
             return "unsupported_url"
         if "timeout" in text or "timed out" in text:
@@ -371,6 +379,11 @@ class VideoDownloader:
         ):
             return "transient_network"
         return "unknown"
+
+    @classmethod
+    def _classify_instagram_fallback_error(cls, error: Exception) -> str:
+        failure_class = cls._classify_download_error(error)
+        return "download_failed" if failure_class == "unknown" else failure_class
 
     @staticmethod
     def _is_twitter_url(url: str) -> bool:
