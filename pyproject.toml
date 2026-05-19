@@ -10,13 +10,13 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "python-telegram-bot==22.7",
-  "instagrapi==2.5.15",
+  "instagrapi==2.7.0",
   "pydantic==2.13.4",
   "pydantic-settings==2.13.1",
   "python-dotenv==1.2.2",
   "yt-dlp==2026.3.17",
   "pyotp==2.9.0",
-  "requests==2.33.1",
+  "requests==2.34.2",
   "aiofiles==25.1.0",
   "tabulate==0.10.0",
   "pillow==12.2.0",
@@ -33,6 +33,7 @@ dev = [
 ]
 
 [tool.uv]
+environments = ["sys_platform != 'android'"]
 exclude-newer-package = { instagrapi = false, pydantic = false, pydantic-core = false }
 
 [tool.setuptools.package-dir]
