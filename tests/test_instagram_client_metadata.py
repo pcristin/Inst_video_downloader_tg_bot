@@ -47,6 +47,12 @@ def test_checkpoint_manual_verification_is_auth_challenge():
     assert InstagramClient._classify_instagram_error(error) == "auth_challenge"
 
 
+def test_content_restriction_with_403_is_not_auth_challenge():
+    error = Exception("403 This content isn't available to everyone")
+
+    assert InstagramClient._classify_instagram_error(error) == "content_restricted"
+
+
 def test_download_video_propagates_checkpoint_after_relogin_attempt(monkeypatch, tmp_path):
     client = InstagramClient(username="u", password="p")
     client.client = _CheckpointDownloadClient()

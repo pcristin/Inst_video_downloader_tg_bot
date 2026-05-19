@@ -80,12 +80,6 @@ class InstagramClient:
             or "web bloks" in error_str
         ):
             return "auth_challenge"
-        if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
-            return "auth_challenge"
-        if isinstance(error, PleaseWaitFewMinutes) or "please wait" in error_str:
-            return "rate_limit"
-        if "rate" in error_str and "limit" in error_str:
-            return "rate_limit"
         if (
             "content isn't available to everyone" in error_str
             or "certain audiences" in error_str
@@ -93,6 +87,12 @@ class InstagramClient:
             or "age restricted" in error_str
         ):
             return "content_restricted"
+        if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
+            return "auth_challenge"
+        if isinstance(error, PleaseWaitFewMinutes) or "please wait" in error_str:
+            return "rate_limit"
+        if "rate" in error_str and "limit" in error_str:
+            return "rate_limit"
         return "download_failed"
 
     def _is_auth_error(self, error: Exception) -> bool:
