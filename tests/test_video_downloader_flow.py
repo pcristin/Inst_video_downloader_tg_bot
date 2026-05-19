@@ -75,6 +75,44 @@ class _DownloadErrorClient:
         return None
 
 
+class _ContentRestrictedClient:
+    username = "acc_restricted"
+    proxy = None
+    last_failure_class = "content_restricted"
+    last_failure_reason = "This content isn't available to everyone"
+
+    def login(self):
+        return True
+
+    def download_video(self, _url: str, _output_dir: Path):
+        return None
+
+    def download_media(self, _url: str, _output_dir: Path):
+        return None
+
+    def get_media_info(self, _url: str):
+        return None
+
+
+class _AuthChallengeResultClient:
+    username = "acc_challenge"
+    proxy = None
+    last_failure_class = "auth_challenge"
+    last_failure_reason = "login required"
+
+    def login(self):
+        return True
+
+    def download_video(self, _url: str, _output_dir: Path):
+        return None
+
+    def download_media(self, _url: str, _output_dir: Path):
+        return None
+
+    def get_media_info(self, _url: str):
+        return None
+
+
 class _FastExtractorSuccess:
     def __init__(self, path: Path, media_type: str = "video"):
         self._path = path
@@ -753,6 +791,61 @@ async def test_single_account_download_error_sets_failure_class(monkeypatch, tmp
     assert metrics.instagram_account_retries == 0
     assert metrics.retry_count == 0
     assert metrics.failure_class == "download_failed"
+
+
+@pytest.mark.asyncio
+async def test_leased_content_restriction_is_not_recorded_as_account_failure(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    manager = _LeaseManager([_Account("acc_restricted")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.InstagramClient",
+        lambda **_kwargs: _ContentRestrictedClient(),
+    )
+
+    with pytest.raises(DownloadError, match="content_restricted"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_account_attempts == 1
+    assert metrics.instagram_auth_failures == 0
+    assert metrics.failure_class == "content_restricted"
+    assert manager.failures == []
+
+
+@pytest.mark.asyncio
+async def test_leased_auth_challenge_failure_class_rotates_account(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "after-auth-challenge.mp4"
+    expected_path.write_bytes(b"video")
+
+    manager = _LeaseManager([_Account("acc_challenge"), _Account("acc_ok")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_challenge": _AuthChallengeResultClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.InstagramClient",
+        lambda **kwargs: clients[kwargs["username"]],
+    )
+
+    info = await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert downloader.last_provider_metrics.instagram_auth_failures == 1
+    assert downloader.last_provider_metrics.failure_class == "auth_challenge"
+    assert manager.failures == [("acc_challenge", "auth_challenge")]
+    assert manager.successes == ["acc_ok"]
 
 
 @pytest.mark.asyncio
