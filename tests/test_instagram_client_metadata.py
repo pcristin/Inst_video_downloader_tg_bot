@@ -27,6 +27,16 @@ class _CheckpointDownloadClient:
         )
 
 
+class _MissingVideoDownloadClient:
+    user_agent = "test-agent"
+
+    def media_pk_from_url(self, _url: str) -> int:
+        return 123456
+
+    def video_download(self, _media_pk: int, folder=None):
+        return None
+
+
 def test_get_media_info_returns_minimal_fallback_when_all_lookups_fail():
     client = InstagramClient(username="u", password="p")
     client.client = _FailingMediaAPIClient()
@@ -61,3 +71,17 @@ def test_download_video_propagates_checkpoint_after_relogin_attempt(monkeypatch,
 
     with pytest.raises(InstagramAuthError, match="Manual verification required"):
         client.download_video("https://www.instagram.com/reel/test/", tmp_path)
+
+
+def test_initial_ytdlp_403_does_not_stick_when_authenticated_download_returns_no_file(tmp_path):
+    client = InstagramClient(username="u", password="p")
+    client.client = _MissingVideoDownloadClient()
+
+    def _failed_ytdlp(*_args):
+        client._record_failure("ERROR: 403 Forbidden")
+        return None
+
+    client._download_with_ytdlp_first = _failed_ytdlp
+
+    assert client.download_video("https://www.instagram.com/reel/test/", tmp_path) is None
+    assert client.last_failure_class != "auth_challenge"

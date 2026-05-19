@@ -234,6 +234,9 @@ class InstagramClient:
                     },
                 )
                 return video_path
+            if self.last_failure_class == "auth_challenge":
+                self.last_failure_class = None
+                self.last_failure_reason = None
             
             try:
                 # Try the standard video_download without folder first (like in the example)
