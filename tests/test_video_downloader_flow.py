@@ -268,6 +268,37 @@ def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path)
     assert media_item.height == 1280
 
 
+def test_instagram_adapter_maps_legacy_album_paths_to_media_items(tmp_path):
+    first = tmp_path / "one.jpg"
+    second = tmp_path / "two.png"
+    first.write_bytes(b"photo")
+    second.write_bytes(b"photo")
+
+    class _AlbumClient:
+        username = "acc_album"
+        proxy = None
+
+        def download_media(self, _url: str, _output_dir: Path):
+            return [first, second]
+
+        def get_media_info(self, _url: str):
+            return {"title": "album caption", "duration": 0}
+
+    adapter = InstagramProviderAdapter(fast_extractor=None)
+
+    info = adapter.download_with_instagram_client(
+        client=_AlbumClient(),
+        url="https://www.instagram.com/p/album/",
+        output_dir=tmp_path,
+        redact_proxy=lambda proxy: proxy,
+    )
+
+    assert info.file_path == first
+    assert info.primary_media_type == "photo"
+    assert [item.file_path for item in info.media_items] == [first, second]
+    assert [item.media_type for item in info.media_items] == ["photo", "photo"]
+
+
 @pytest.mark.asyncio
 async def test_instagram_fallback_waits_for_leased_account(monkeypatch, tmp_path):
     downloader = VideoDownloader()
