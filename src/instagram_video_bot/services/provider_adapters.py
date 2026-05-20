@@ -106,8 +106,8 @@ class InstagramProviderAdapter:
             },
         )
 
-        file_path = self._download_with_legacy_client(client, url, output_dir)
-        if not file_path:
+        downloaded_paths = self._download_with_legacy_client(client, url, output_dir)
+        if not downloaded_paths:
             failure_class = getattr(client, "last_failure_class", None)
             if failure_class == "auth_challenge":
                 reason = getattr(client, "last_failure_reason", None) or failure_class
@@ -115,6 +115,11 @@ class InstagramProviderAdapter:
             if failure_class and failure_class != "download_failed":
                 raise DownloadError(f"Instagram download failed: {failure_class}")
             raise DownloadError("Failed to download video")
+
+        if isinstance(downloaded_paths, list):
+            file_paths = downloaded_paths
+        else:
+            file_paths = [downloaded_paths]
 
         media_info = {"title": "", "duration": 0}
         try:
@@ -140,20 +145,25 @@ class InstagramProviderAdapter:
                 },
             )
 
-        media_type = self._infer_media_type(file_path)
-        media_item = self._build_media_item(
-            file_path=file_path,
-            media_type=media_type,
-            caption=media_info.get("title") or None,
-            duration=media_info.get("duration"),
-        )
+        media_items = []
+        for file_path in file_paths:
+            media_type = self._infer_media_type(file_path)
+            media_items.append(
+                self._build_media_item(
+                    file_path=file_path,
+                    media_type=media_type,
+                    caption=media_info.get("title") or None,
+                    duration=media_info.get("duration"),
+                )
+            )
+        primary_item = media_items[0]
         return VideoInfo(
-            file_path=file_path,
+            file_path=primary_item.file_path,
             title=media_info.get("title", ""),
-            duration=media_item.duration,
+            duration=primary_item.duration,
             description=media_info.get("title", ""),
-            media_items=[media_item],
-            primary_media_type=media_type,
+            media_items=media_items,
+            primary_media_type=primary_item.media_type,
         )
 
     def is_story_url(self, url: str) -> bool:
@@ -163,7 +173,7 @@ class InstagramProviderAdapter:
     @staticmethod
     def _download_with_legacy_client(
         client: InstagramClient, url: str, output_dir: Path
-    ) -> Optional[Path]:
+    ) -> Optional[Path | list[Path]]:
         """Download media using existing authenticated client path."""
         if hasattr(client, "download_media"):
             return client.download_media(url, output_dir)
