@@ -156,11 +156,161 @@ class InstagramClient:
 
         return False
 
-    def download_media(self, url: str, output_dir: Path) -> Optional[Path]:
-        """Download media by URL, including authenticated story handling."""
+    def download_media(self, url: str, output_dir: Path) -> Optional[Path | list[Path]]:
+        """Download media by URL, including authenticated story/post handling."""
         if "/stories/" in url.lower():
             return self._download_story_media(url, output_dir)
-        return self.download_video(url, output_dir)
+        return self._download_post_media(url, output_dir)
+
+    def _download_post_media(self, url: str, output_dir: Path) -> Optional[Path | list[Path]]:
+        """Download a regular post, preserving photo posts and carousel albums."""
+        self.last_failure_class = None
+        self.last_failure_reason = None
+
+        try:
+            media_pk = int(self.client.media_pk_from_url(url))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            raw_item = self._get_media_dict_raw(media_pk) or {}
+            media_type = self._safe_int(raw_item.get("media_type"))
+
+            if media_type == 8 or raw_item.get("carousel_media"):
+                album_paths = self._download_album_media(media_pk, raw_item, output_dir)
+                if album_paths:
+                    return album_paths
+                return None
+
+            if media_type == 1:
+                photo_path = self._download_photo_media(media_pk, raw_item, output_dir)
+                if photo_path:
+                    return photo_path
+                return None
+
+            return self.download_video(url, output_dir)
+
+        except InstagramAuthError:
+            raise
+        except Exception as error:
+            logger.error(f"Post media download failed: {error}")
+            self._record_failure(error)
+            if self._is_auth_error(error):
+                raise InstagramAuthError(str(error)) from error
+            return None
+
+    def _download_album_media(
+        self,
+        media_pk: int,
+        raw_item: dict,
+        output_dir: Path,
+    ) -> Optional[list[Path]]:
+        """Download all resources from a carousel post."""
+        try:
+            paths = self.client.album_download(media_pk, folder=output_dir)
+            if paths:
+                logger.info(f"Album downloaded: {paths}")
+                return paths
+        except Exception as album_error:
+            if self._is_auth_error(album_error):
+                logger.warning("Session expired during album download, attempting re-login...")
+                if not self._relogin():
+                    raise InstagramAuthError(str(album_error)) from album_error
+                try:
+                    paths = self.client.album_download(media_pk, folder=output_dir)
+                    if paths:
+                        logger.info(f"Album downloaded after re-login: {paths}")
+                        return paths
+                except Exception as retry_error:
+                    if self._is_auth_error(retry_error):
+                        raise InstagramAuthError(str(retry_error)) from retry_error
+                    logger.warning(f"Album download retry failed: {retry_error}")
+            else:
+                logger.warning(f"Album download failed: {album_error}")
+
+        return self._download_album_from_raw_item(media_pk, raw_item, output_dir)
+
+    def _download_photo_media(
+        self,
+        media_pk: int,
+        raw_item: dict,
+        output_dir: Path,
+    ) -> Optional[Path]:
+        """Download a single photo post."""
+        try:
+            photo_path = self.client.photo_download(media_pk, folder=output_dir)
+            if photo_path and photo_path.exists():
+                logger.info(f"Photo downloaded: {photo_path}")
+                return photo_path
+        except Exception as photo_error:
+            if self._is_auth_error(photo_error):
+                logger.warning("Session expired during photo download, attempting re-login...")
+                if not self._relogin():
+                    raise InstagramAuthError(str(photo_error)) from photo_error
+                try:
+                    photo_path = self.client.photo_download(media_pk, folder=output_dir)
+                    if photo_path and photo_path.exists():
+                        logger.info(f"Photo downloaded after re-login: {photo_path}")
+                        return photo_path
+                except Exception as retry_error:
+                    if self._is_auth_error(retry_error):
+                        raise InstagramAuthError(str(retry_error)) from retry_error
+                    logger.warning(f"Photo download retry failed: {retry_error}")
+            else:
+                logger.warning(f"Photo download failed: {photo_error}")
+
+        image_url = self._pick_image_url(raw_item)
+        if not image_url:
+            return None
+        try:
+            return self.client.photo_download_by_url(
+                image_url,
+                f"photo_{media_pk}",
+                output_dir,
+            )
+        except Exception as raw_error:
+            logger.warning(f"Raw photo URL download failed: {raw_error}")
+            self._record_failure(raw_error)
+            return None
+
+    def _download_album_from_raw_item(
+        self,
+        media_pk: int,
+        raw_item: dict,
+        output_dir: Path,
+    ) -> Optional[list[Path]]:
+        """Download carousel resources from raw mobile API payload."""
+        carousel = raw_item.get("carousel_media")
+        if not isinstance(carousel, list) or not carousel:
+            return None
+
+        paths: list[Path] = []
+        for index, resource in enumerate(carousel, start=1):
+            if not isinstance(resource, dict):
+                continue
+            try:
+                video_url = self._pick_video_url(resource)
+                if video_url:
+                    path = self.client.video_download_by_url(
+                        video_url,
+                        f"album_{media_pk}_{index}",
+                        output_dir,
+                    )
+                else:
+                    image_url = self._pick_image_url(resource)
+                    if not image_url:
+                        continue
+                    path = self.client.photo_download_by_url(
+                        image_url,
+                        f"album_{media_pk}_{index}",
+                        output_dir,
+                    )
+                if path and path.exists():
+                    paths.append(path)
+            except Exception as raw_error:
+                logger.warning(f"Raw carousel item {index} download failed: {raw_error}")
+
+        if paths:
+            logger.info(f"Album downloaded from raw item: {paths}")
+            return paths
+        return None
 
     def _download_story_media(self, url: str, output_dir: Path) -> Optional[Path]:
         """Download Instagram story media using authenticated instagrapi APIs."""
@@ -317,6 +467,62 @@ class InstagramClient:
         except Exception as e:
             logger.warning(f"Failed to get raw media dict: {e}")
             return None
+
+    @staticmethod
+    def _safe_int(value) -> Optional[int]:
+        """Convert an Instagram payload value to int when possible."""
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _pick_video_url(item: dict) -> Optional[str]:
+        """Pick the best direct video URL from a raw media item."""
+        video_versions = item.get("video_versions")
+        if isinstance(video_versions, list) and video_versions:
+            candidates = [
+                candidate
+                for candidate in video_versions
+                if isinstance(candidate, dict) and candidate.get("url")
+            ]
+            if candidates:
+                best = max(
+                    candidates,
+                    key=lambda candidate: int(candidate.get("width") or 0)
+                    * int(candidate.get("height") or 0),
+                )
+                return str(best["url"])
+        video_url = item.get("video_url")
+        if video_url:
+            return str(video_url)
+        return None
+
+    @staticmethod
+    def _pick_image_url(item: dict) -> Optional[str]:
+        """Pick the best direct image URL from a raw media item."""
+        image_versions = item.get("image_versions2")
+        if isinstance(image_versions, dict):
+            candidates = image_versions.get("candidates")
+            if isinstance(candidates, list) and candidates:
+                parsed_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if isinstance(candidate, dict) and candidate.get("url")
+                ]
+                if parsed_candidates:
+                    best = max(
+                        parsed_candidates,
+                        key=lambda candidate: int(candidate.get("width") or 0)
+                        * int(candidate.get("height") or 0),
+                    )
+                    return str(best["url"])
+        thumbnail_url = item.get("thumbnail_url")
+        if thumbnail_url:
+            return str(thumbnail_url)
+        return None
     
     def _get_video_url_raw(self, media_pk: int) -> Optional[str]:
         """Get video URL from raw API data, bypassing Pydantic validation."""
