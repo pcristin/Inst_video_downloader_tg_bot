@@ -356,6 +356,16 @@ class AccountManager:
                 should_alert_owner=threshold_reached and self.should_alert_low_pool(),
             )
 
+    def mark_account_unavailable(self, account: Account, reason: str) -> None:
+        """Mark an account unavailable and remove any active lease."""
+        with self._lock:
+            account.is_banned = True
+            account.ban_reason = reason
+            account.banned_at = datetime.now()
+            self._leased_accounts.discard(account.username)
+            logger.warning(f"Account {account.username} marked as unavailable: {reason}")
+            self._save_state()
+
     def should_alert_low_pool(self) -> bool:
         """Return true when the available account pool is below watermark and cooldown elapsed."""
         with self._lock:
@@ -429,11 +439,7 @@ class AccountManager:
     
     def _mark_account_temporarily_unavailable(self, account: Account, reason: str) -> None:
         """Mark an account as temporarily unavailable with a reason."""
-        account.is_banned = True
-        account.ban_reason = reason  # Store the reason
-        account.banned_at = datetime.now()  # Store when it was banned
-        logger.warning(f"Account {account.username} marked as unavailable: {reason}")
-        self._save_state()
+        self.mark_account_unavailable(account, reason)
     
     def rotate_account(self) -> bool:
         """Rotate to the next available account, trying multiple accounts if needed."""
