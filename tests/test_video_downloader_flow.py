@@ -626,6 +626,63 @@ async def test_instagram_stale_timeout_retires_and_releases_account(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_instagram_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+
+    expected_path = tmp_path / "recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_stuck"), _Account("acc_ok")])
+    stuck_provider_can_finish = threading.Event()
+    ok_provider_started = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _provider_call(account, _url, _output_dir):
+        if account.username == "acc_stuck":
+            stuck_provider_can_finish.wait(timeout=1)
+        else:
+            ok_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    for _ in range(20):
+        if manager.unavailable == [("acc_stuck", "provider_timeout_stale")]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.unavailable == [("acc_stuck", "provider_timeout_stale")]
+
+    info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert ok_provider_started.is_set()
+    assert manager.successes == ["acc_ok"]
+
+    stuck_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
 async def test_download_with_account_lease_retries_after_auth_failure(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
