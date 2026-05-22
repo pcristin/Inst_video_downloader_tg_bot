@@ -494,7 +494,8 @@ class VideoDownloader:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
         loop = asyncio.get_running_loop()
-        future = self._get_instagram_provider_executor().submit(operation)
+        executor = self._get_instagram_provider_executor()
+        future = executor.submit(operation)
         deadline = loop.time() + timeout_seconds
         try:
             while True:
@@ -507,6 +508,7 @@ class VideoDownloader:
         except asyncio.CancelledError:
             self._detach_instagram_future(
                 future,
+                executor=executor,
                 on_timeout_finish=on_timeout_finish,
                 on_timeout_stale=on_timeout_stale,
             )
@@ -515,6 +517,7 @@ class VideoDownloader:
 
         self._detach_instagram_future(
             future,
+            executor=executor,
             on_timeout_finish=on_timeout_finish,
             on_timeout_stale=on_timeout_stale,
         )
@@ -537,6 +540,7 @@ class VideoDownloader:
         self,
         future,
         *,
+        executor: ThreadPoolExecutor,
         on_timeout_finish: Callable[[], None] | None = None,
         on_timeout_stale: Callable[[], None] | None = None,
     ) -> None:
@@ -566,6 +570,7 @@ class VideoDownloader:
                 return
             logger.warning("Timed-out Instagram worker exceeded detached lease window")
             run_cleanup(on_timeout_stale or on_timeout_finish)
+            self._recycle_instagram_provider_executor(executor)
 
         if on_timeout_stale:
             stale_timer = threading.Timer(self._get_detached_instagram_lease_seconds(), stale_cleanup)
@@ -609,6 +614,15 @@ class VideoDownloader:
             if record_failure:
                 record_failure(account, "provider_timeout_stale")
         manager.release_account(account)
+
+    @classmethod
+    def _recycle_instagram_provider_executor(cls, stale_executor: ThreadPoolExecutor) -> None:
+        with cls._instagram_provider_executor_lock:
+            if cls._instagram_provider_executor is not stale_executor:
+                return
+            logger.warning("Recycling Instagram provider executor after stale worker")
+            stale_executor.shutdown(wait=False, cancel_futures=True)
+            cls._instagram_provider_executor = None
 
     @classmethod
     def _get_instagram_provider_executor(cls) -> ThreadPoolExecutor:
