@@ -233,6 +233,7 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
+                    release_account_on_exit = False
                     result = await self._run_instagram_sync(
                         lambda account=account: self._download_with_leased_account_sync(
                             account,
@@ -240,13 +241,19 @@ class VideoDownloader:
                             output_dir,
                         ),
                         on_timeout_finish=lambda account=account, manager=manager: manager.release_account(account),
+                        on_timeout_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
+                            manager,
+                            account,
+                        ),
                     )
+                    release_account_on_exit = True
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
                     self.last_account_health_event = None
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
+                release_account_on_exit = True
                 last_error = auth_error
                 self.last_provider_metrics.instagram_auth_failures += 1
                 self.last_provider_metrics.failure_class = "auth_challenge"
@@ -265,6 +272,8 @@ class VideoDownloader:
             except Exception as error:
                 if isinstance(error, InstagramProviderTimeoutError):
                     release_account_on_exit = False
+                else:
+                    release_account_on_exit = True
                 if isinstance(error, DownloadError):
                     self.last_provider_metrics.failure_class = self._classify_instagram_fallback_error(error)
                     raise
@@ -480,34 +489,98 @@ class VideoDownloader:
         operation: Callable[[], T],
         *,
         on_timeout_finish: Callable[[], None] | None = None,
+        on_timeout_stale: Callable[[], None] | None = None,
     ) -> T:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
         loop = asyncio.get_running_loop()
         future = self._get_instagram_provider_executor().submit(operation)
         deadline = loop.time() + timeout_seconds
-        while True:
-            if future.done():
-                return future.result()
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(0.05, remaining))
-
-        if future.cancel():
-            self._consume_late_instagram_result(future, on_timeout_finish=on_timeout_finish)
-        else:
-            future.add_done_callback(
-                lambda completed_future: self._consume_late_instagram_result(
-                    completed_future,
-                    on_timeout_finish=on_timeout_finish,
-                )
+        try:
+            while True:
+                if future.done():
+                    return future.result()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.05, remaining))
+        except asyncio.CancelledError:
+            self._detach_instagram_future(
+                future,
+                on_timeout_finish=on_timeout_finish,
+                on_timeout_stale=on_timeout_stale,
             )
+            self.last_provider_metrics.failure_class = "provider_cancelled"
+            raise
+
+        self._detach_instagram_future(
+            future,
+            on_timeout_finish=on_timeout_finish,
+            on_timeout_stale=on_timeout_stale,
+        )
 
         self.last_provider_metrics.failure_class = "provider_timeout"
         raise InstagramProviderTimeoutError(
             f"Instagram provider timed out after {timeout_seconds:g} seconds"
         )
+
+    @staticmethod
+    def _get_detached_instagram_lease_seconds() -> float:
+        configured_seconds = getattr(
+            settings,
+            "INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+            settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS,
+        )
+        return max(0.1, float(configured_seconds))
+
+    def _detach_instagram_future(
+        self,
+        future,
+        *,
+        on_timeout_finish: Callable[[], None] | None = None,
+        on_timeout_stale: Callable[[], None] | None = None,
+    ) -> None:
+        cleanup_lock = threading.Lock()
+        cleanup_done = False
+        stale_timer: threading.Timer | None = None
+
+        def run_cleanup(callback: Callable[[], None] | None) -> None:
+            nonlocal cleanup_done
+            with cleanup_lock:
+                if cleanup_done:
+                    return
+                cleanup_done = True
+            if callback:
+                try:
+                    callback()
+                except Exception as error:
+                    logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
+
+        def finish_cleanup() -> None:
+            if stale_timer is not None:
+                stale_timer.cancel()
+            run_cleanup(on_timeout_finish)
+
+        def stale_cleanup() -> None:
+            if future.done():
+                return
+            logger.warning("Timed-out Instagram worker exceeded detached lease window")
+            run_cleanup(on_timeout_stale or on_timeout_finish)
+
+        if on_timeout_stale:
+            stale_timer = threading.Timer(self._get_detached_instagram_lease_seconds(), stale_cleanup)
+            stale_timer.daemon = True
+            stale_timer.start()
+
+        if future.cancel():
+            self._consume_late_instagram_result(future, on_timeout_finish=finish_cleanup)
+        else:
+            future.add_done_callback(
+                lambda completed_future: self._consume_late_instagram_result(
+                    completed_future,
+                    on_timeout_finish=finish_cleanup,
+                )
+            )
 
     @staticmethod
     def _consume_late_instagram_result(
@@ -525,6 +598,17 @@ class VideoDownloader:
                     on_timeout_finish()
                 except Exception as error:
                     logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
+
+    @staticmethod
+    def _retire_stale_instagram_account(manager, account) -> None:
+        mark_unavailable = getattr(manager, "mark_account_unavailable", None)
+        if mark_unavailable:
+            mark_unavailable(account, "provider_timeout_stale")
+        else:
+            record_failure = getattr(manager, "record_account_failure", None)
+            if record_failure:
+                record_failure(account, "provider_timeout_stale")
+        manager.release_account(account)
 
     @classmethod
     def _get_instagram_provider_executor(cls) -> ThreadPoolExecutor:
