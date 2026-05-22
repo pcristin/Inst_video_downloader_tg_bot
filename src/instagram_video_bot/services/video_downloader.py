@@ -36,11 +36,18 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+class InstagramProviderTimeoutError(DownloadError):
+    """Raised when a blocking Instagram provider operation exceeds its budget."""
+
+
 class VideoDownloader:
     """Service for downloading Instagram videos using instagrapi."""
 
     _throttle_lock = threading.Lock()
     _last_instagram_download_by_key: dict[str, float] = {}
+    _instagram_provider_executor: ThreadPoolExecutor | None = None
+    _instagram_provider_executor_limit: int | None = None
+    _instagram_provider_executor_lock = threading.Lock()
     _instagram_provider_semaphore: asyncio.Semaphore | None = None
     _instagram_provider_semaphore_limit: int | None = None
     _instagram_provider_semaphore_loop: asyncio.AbstractEventLoop | None = None
@@ -222,6 +229,7 @@ class VideoDownloader:
             acquired_account = True
             tried_accounts.add(account.username)
             self._record_instagram_account_attempt()
+            release_account_on_exit = True
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
@@ -230,7 +238,8 @@ class VideoDownloader:
                             account,
                             url,
                             output_dir,
-                        )
+                        ),
+                        on_timeout_finish=lambda account=account, manager=manager: manager.release_account(account),
                     )
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
@@ -254,6 +263,8 @@ class VideoDownloader:
                 if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
                     self.last_account_health_event = event
             except Exception as error:
+                if isinstance(error, InstagramProviderTimeoutError):
+                    release_account_on_exit = False
                 if isinstance(error, DownloadError):
                     self.last_provider_metrics.failure_class = self._classify_instagram_fallback_error(error)
                     raise
@@ -261,7 +272,8 @@ class VideoDownloader:
                 self.last_provider_metrics.failure_class = "download_failed"
                 raise DownloadError(f"Download failed: {str(error)}") from error
             finally:
-                manager.release_account(account)
+                if release_account_on_exit:
+                    manager.release_account(account)
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
         if not acquired_account and not last_error:
@@ -463,36 +475,73 @@ class VideoDownloader:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
 
-    async def _run_instagram_sync(self, operation: Callable[[], T]) -> T:
+    async def _run_instagram_sync(
+        self,
+        operation: Callable[[], T],
+        *,
+        on_timeout_finish: Callable[[], None] | None = None,
+    ) -> T:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
         loop = asyncio.get_running_loop()
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="instagram-provider")
-        try:
-            future = executor.submit(operation)
-            deadline = loop.time() + timeout_seconds
-            while True:
-                if future.done():
-                    return future.result()
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(0.05, remaining))
+        future = self._get_instagram_provider_executor().submit(operation)
+        deadline = loop.time() + timeout_seconds
+        while True:
+            if future.done():
+                return future.result()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(0.05, remaining))
 
-            future.add_done_callback(self._consume_late_instagram_result)
-            self.last_provider_metrics.failure_class = "provider_timeout"
-            raise DownloadError(
-                f"Instagram provider timed out after {timeout_seconds:g} seconds"
+        if future.cancel():
+            self._consume_late_instagram_result(future, on_timeout_finish=on_timeout_finish)
+        else:
+            future.add_done_callback(
+                lambda completed_future: self._consume_late_instagram_result(
+                    completed_future,
+                    on_timeout_finish=on_timeout_finish,
+                )
             )
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+
+        self.last_provider_metrics.failure_class = "provider_timeout"
+        raise InstagramProviderTimeoutError(
+            f"Instagram provider timed out after {timeout_seconds:g} seconds"
+        )
 
     @staticmethod
-    def _consume_late_instagram_result(future) -> None:
+    def _consume_late_instagram_result(
+        future,
+        *,
+        on_timeout_finish: Callable[[], None] | None = None,
+    ) -> None:
         try:
             future.result()
         except Exception as error:
             logger.debug("Timed-out Instagram worker finished with error: %s", error)
+        finally:
+            if on_timeout_finish:
+                try:
+                    on_timeout_finish()
+                except Exception as error:
+                    logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
+
+    @classmethod
+    def _get_instagram_provider_executor(cls) -> ThreadPoolExecutor:
+        limit = max(1, settings.INSTAGRAM_MAX_CONCURRENT_JOBS)
+        with cls._instagram_provider_executor_lock:
+            if (
+                cls._instagram_provider_executor is None
+                or cls._instagram_provider_executor_limit != limit
+            ):
+                if cls._instagram_provider_executor is not None:
+                    cls._instagram_provider_executor.shutdown(wait=False, cancel_futures=True)
+                cls._instagram_provider_executor = ThreadPoolExecutor(
+                    max_workers=limit,
+                    thread_name_prefix="instagram-provider",
+                )
+                cls._instagram_provider_executor_limit = limit
+            return cls._instagram_provider_executor
 
     def _download_with_leased_account_sync(self, account, url: str, output_dir: Path) -> VideoInfo:
         client = self._build_leased_client(account)

@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -474,6 +475,48 @@ async def test_instagram_fallback_login_timeout_becomes_download_error(monkeypat
         await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
 
     assert downloader.last_provider_metrics.failure_class == "provider_timeout"
+
+
+@pytest.mark.asyncio
+async def test_instagram_timeout_keeps_account_leased_until_worker_finishes(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.05)
+
+    expected_path = tmp_path / "late.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_slow")])
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert manager.released == []
+
+    provider_can_finish.set()
+    for _ in range(20):
+        if manager.released == ["acc_slow"]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.released == ["acc_slow"]
 
 
 @pytest.mark.asyncio
