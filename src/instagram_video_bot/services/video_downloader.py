@@ -4,10 +4,12 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, TypeVar
 from urllib.parse import urlparse
 
 from .download_models import (
@@ -31,6 +33,7 @@ from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class VideoDownloader:
@@ -170,7 +173,9 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(lease_key)
-                    fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
+                    fast_result = await self._run_instagram_sync(
+                        lambda: self.instagram_adapter.download_with_fast_method(url, output_dir)
+                    )
                 self.last_provider_metrics.instagram_fast_status = "succeeded"
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
                     (perf_counter() - fast_started_at) * 1000
@@ -220,12 +225,12 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
-                    client = self._build_leased_client(account)
-                    result = self.instagram_adapter.download_with_instagram_client(
-                        client=client,
-                        url=url,
-                        output_dir=output_dir,
-                        redact_proxy=self._redact_proxy,
+                    result = await self._run_instagram_sync(
+                        lambda account=account: self._download_with_leased_account_sync(
+                            account,
+                            url,
+                            output_dir,
+                        )
                     )
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
@@ -292,12 +297,8 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle("__single__")
-                    client = self._build_single_account_client()
-                    result = self.instagram_adapter.download_with_instagram_client(
-                        client=client,
-                        url=url,
-                        output_dir=output_dir,
-                        redact_proxy=self._redact_proxy,
+                    result = await self._run_instagram_sync(
+                        lambda: self._download_with_single_account_sync(url, output_dir)
                     )
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
@@ -461,6 +462,55 @@ class VideoDownloader:
         if fast_error:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
+
+    async def _run_instagram_sync(self, operation: Callable[[], T]) -> T:
+        """Run blocking Instagram provider code away from the Telegram event loop."""
+        timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="instagram-provider")
+        try:
+            future = executor.submit(operation)
+            deadline = loop.time() + timeout_seconds
+            while True:
+                if future.done():
+                    return future.result()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.05, remaining))
+
+            future.add_done_callback(self._consume_late_instagram_result)
+            self.last_provider_metrics.failure_class = "provider_timeout"
+            raise DownloadError(
+                f"Instagram provider timed out after {timeout_seconds:g} seconds"
+            )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _consume_late_instagram_result(future) -> None:
+        try:
+            future.result()
+        except Exception as error:
+            logger.debug("Timed-out Instagram worker finished with error: %s", error)
+
+    def _download_with_leased_account_sync(self, account, url: str, output_dir: Path) -> VideoInfo:
+        client = self._build_leased_client(account)
+        return self.instagram_adapter.download_with_instagram_client(
+            client=client,
+            url=url,
+            output_dir=output_dir,
+            redact_proxy=self._redact_proxy,
+        )
+
+    def _download_with_single_account_sync(self, url: str, output_dir: Path) -> VideoInfo:
+        client = self._build_single_account_client()
+        return self.instagram_adapter.download_with_instagram_client(
+            client=client,
+            url=url,
+            output_dir=output_dir,
+            redact_proxy=self._redact_proxy,
+        )
 
     @staticmethod
     def _is_youtube_shorts_url(url: str) -> bool:

@@ -12,6 +12,22 @@ from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _redact_proxy(proxy: Optional[str]) -> str:
+    """Return proxy value with credentials removed for logs."""
+    if not proxy:
+        return "None"
+    if "@" not in proxy:
+        return proxy
+    scheme_sep = "://"
+    if scheme_sep in proxy:
+        scheme, remainder = proxy.split(scheme_sep, 1)
+        if "@" in remainder:
+            _, host_part = remainder.split("@", 1)
+            return f"{scheme}://***@{host_part}"
+    _, host_part = proxy.split("@", 1)
+    return f"***@{host_part}"
+
 @dataclass
 class Account:
     """Represents an Instagram account with its configuration."""
@@ -157,7 +173,7 @@ class AccountManager:
                             session_file=session_file
                         )
                         self.accounts.append(account)
-                        logger.info(f"Loaded account: {username} with proxy: {proxy or 'None'}")
+                        logger.info(f"Loaded account: {username} with proxy: {_redact_proxy(proxy)}")
                     else:
                         logger.warning(f"Invalid format on line {line_num}: Expected username|password|totp_secret")
                         
@@ -381,7 +397,9 @@ class AccountManager:
                 account.last_used = datetime.now()
                 self.current_account = account
                 self._save_state()
-                logger.info(f"Successfully logged in: {account.username} with proxy: {account.proxy or 'None'}")
+                logger.info(
+                    f"Successfully logged in: {account.username} with proxy: {_redact_proxy(account.proxy)}"
+                )
                 return True
             else:
                 logger.error(f"Failed to login: {account.username}")
