@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -19,6 +20,24 @@ def test_get_account_manager_ignores_directory_placeholder(monkeypatch, tmp_path
     manager = account_manager_module.get_account_manager()
 
     assert manager is None
+
+
+def test_load_accounts_redacts_proxy_credentials_in_logs(monkeypatch, tmp_path: Path, caplog):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        account_manager_module.settings,
+        "PROXIES",
+        "proxy-user:proxy-pass@proxy.example:1234",
+    )
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+
+    with caplog.at_level(logging.INFO):
+        AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    assert "proxy-user:proxy-pass" not in caplog.text
+    assert "http://***@proxy.example:1234" in caplog.text
 
 
 def test_account_failure_counter_quarantines_after_threshold(monkeypatch, tmp_path: Path):

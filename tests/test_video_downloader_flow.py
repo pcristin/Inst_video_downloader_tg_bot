@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -129,6 +130,20 @@ class _FastExtractorSuccess:
 class _FastExtractorFailure:
     def extract_and_download(self, _url: str, _output_dir: Path) -> FastExtractorDownloadResult:
         raise InstagramFastExtractorError("fast-failed")
+
+
+class _SlowFastExtractorSuccess:
+    def __init__(self, path: Path, delay_seconds: float = 0.2):
+        self._path = path
+        self._delay_seconds = delay_seconds
+
+    def extract_and_download(self, _url: str, _output_dir: Path) -> FastExtractorDownloadResult:
+        time.sleep(self._delay_seconds)
+        return FastExtractorDownloadResult(
+            shortcode="abc",
+            caption="slow-fast-caption",
+            media_items=[DownloadedMedia(file_path=self._path, media_type="photo")],
+        )
 
 
 class _LeaseManager:
@@ -354,6 +369,28 @@ async def test_fast_method_success_skips_legacy(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_instagram_fast_path_does_not_block_event_loop(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+
+    expected_path = tmp_path / "slow-fast.jpg"
+    expected_path.write_bytes(b"video")
+    downloader.fast_extractor = _SlowFastExtractorSuccess(expected_path)
+
+    started_at = time.perf_counter()
+    task = asyncio.create_task(
+        downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+    )
+    await asyncio.sleep(0)
+
+    assert time.perf_counter() - started_at < 0.1
+    info = await task
+    assert info.file_path == expected_path
+
+
+@pytest.mark.asyncio
 async def test_fast_failure_falls_back_to_single_account(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
@@ -404,6 +441,39 @@ async def test_story_url_routes_directly_to_legacy(monkeypatch, tmp_path):
 
     assert info.file_path == expected_path
     assert info.primary_media_type == "photo"
+
+
+@pytest.mark.asyncio
+async def test_instagram_fallback_login_timeout_becomes_download_error(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.05)
+
+    expected_path = tmp_path / "too-slow.jpg"
+    expected_path.write_bytes(b"video")
+    manager = _LeaseManager([_Account("acc_slow")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        time.sleep(0.2)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert downloader.last_provider_metrics.failure_class == "provider_timeout"
 
 
 @pytest.mark.asyncio
