@@ -519,6 +519,7 @@ class VideoDownloader:
             executor=executor,
             on_timeout_finish=on_timeout_finish,
             on_timeout_stale=on_timeout_stale,
+            recycle_on_stale=True,
         )
 
         self.last_provider_metrics.failure_class = "provider_timeout"
@@ -542,6 +543,7 @@ class VideoDownloader:
         executor: ThreadPoolExecutor,
         on_timeout_finish: Callable[[], None] | None = None,
         on_timeout_stale: Callable[[], None] | None = None,
+        recycle_on_stale: bool = False,
     ) -> None:
         cleanup_lock = threading.Lock()
         cleanup_done = False
@@ -571,7 +573,7 @@ class VideoDownloader:
             run_cleanup(on_timeout_stale or on_timeout_finish)
             self._recycle_instagram_provider_executor(executor)
 
-        if on_timeout_stale:
+        if on_timeout_stale or recycle_on_stale:
             stale_timer = threading.Timer(self._get_detached_instagram_lease_seconds(), stale_cleanup)
             stale_timer.daemon = True
             stale_timer.start()
