@@ -12,6 +12,22 @@ from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _redact_proxy(proxy: Optional[str]) -> str:
+    """Return proxy value with credentials removed for logs."""
+    if not proxy:
+        return "None"
+    if "@" not in proxy:
+        return proxy
+    scheme_sep = "://"
+    if scheme_sep in proxy:
+        scheme, remainder = proxy.split(scheme_sep, 1)
+        if "@" in remainder:
+            _, host_part = remainder.split("@", 1)
+            return f"{scheme}://***@{host_part}"
+    _, host_part = proxy.split("@", 1)
+    return f"***@{host_part}"
+
 @dataclass
 class Account:
     """Represents an Instagram account with its configuration."""
@@ -157,7 +173,7 @@ class AccountManager:
                             session_file=session_file
                         )
                         self.accounts.append(account)
-                        logger.info(f"Loaded account: {username} with proxy: {proxy or 'None'}")
+                        logger.info(f"Loaded account: {username} with proxy: {_redact_proxy(proxy)}")
                     else:
                         logger.warning(f"Invalid format on line {line_num}: Expected username|password|totp_secret")
                         
@@ -340,6 +356,16 @@ class AccountManager:
                 should_alert_owner=threshold_reached and self.should_alert_low_pool(),
             )
 
+    def mark_account_unavailable(self, account: Account, reason: str) -> None:
+        """Mark an account unavailable and remove any active lease."""
+        with self._lock:
+            account.is_banned = True
+            account.ban_reason = reason
+            account.banned_at = datetime.now()
+            self._leased_accounts.discard(account.username)
+            logger.warning(f"Account {account.username} marked as unavailable: {reason}")
+            self._save_state()
+
     def should_alert_low_pool(self) -> bool:
         """Return true when the available account pool is below watermark and cooldown elapsed."""
         with self._lock:
@@ -381,7 +407,9 @@ class AccountManager:
                 account.last_used = datetime.now()
                 self.current_account = account
                 self._save_state()
-                logger.info(f"Successfully logged in: {account.username} with proxy: {account.proxy or 'None'}")
+                logger.info(
+                    f"Successfully logged in: {account.username} with proxy: {_redact_proxy(account.proxy)}"
+                )
                 return True
             else:
                 logger.error(f"Failed to login: {account.username}")
@@ -411,11 +439,7 @@ class AccountManager:
     
     def _mark_account_temporarily_unavailable(self, account: Account, reason: str) -> None:
         """Mark an account as temporarily unavailable with a reason."""
-        account.is_banned = True
-        account.ban_reason = reason  # Store the reason
-        account.banned_at = datetime.now()  # Store when it was banned
-        logger.warning(f"Account {account.username} marked as unavailable: {reason}")
-        self._save_state()
+        self.mark_account_unavailable(account, reason)
     
     def rotate_account(self) -> bool:
         """Rotate to the next available account, trying multiple accounts if needed."""

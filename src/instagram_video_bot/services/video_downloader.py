@@ -4,10 +4,12 @@ import logging
 import random
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, TypeVar
 from urllib.parse import urlparse
 
 from .download_models import (
@@ -31,6 +33,11 @@ from ..config.settings import settings
 from ..utils.account_manager import get_account_manager
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+class InstagramProviderTimeoutError(DownloadError):
+    """Raised when a blocking Instagram provider operation exceeds its budget."""
 
 
 class VideoDownloader:
@@ -38,6 +45,9 @@ class VideoDownloader:
 
     _throttle_lock = threading.Lock()
     _last_instagram_download_by_key: dict[str, float] = {}
+    _instagram_provider_executor: ThreadPoolExecutor | None = None
+    _instagram_provider_executor_limit: int | None = None
+    _instagram_provider_executor_lock = threading.Lock()
     _instagram_provider_semaphore: asyncio.Semaphore | None = None
     _instagram_provider_semaphore_limit: int | None = None
     _instagram_provider_semaphore_loop: asyncio.AbstractEventLoop | None = None
@@ -170,7 +180,9 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(lease_key)
-                    fast_result = self.instagram_adapter.download_with_fast_method(url, output_dir)
+                    fast_result = await self._run_instagram_sync(
+                        lambda: self.instagram_adapter.download_with_fast_method(url, output_dir)
+                    )
                 self.last_provider_metrics.instagram_fast_status = "succeeded"
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
                     (perf_counter() - fast_started_at) * 1000
@@ -217,22 +229,36 @@ class VideoDownloader:
             acquired_account = True
             tried_accounts.add(account.username)
             self._record_instagram_account_attempt()
+            release_account_on_exit = True
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
-                    client = self._build_leased_client(account)
-                    result = self.instagram_adapter.download_with_instagram_client(
-                        client=client,
-                        url=url,
-                        output_dir=output_dir,
-                        redact_proxy=self._redact_proxy,
+                    release_account_on_exit = False
+                    result = await self._run_instagram_sync(
+                        lambda account=account: self._download_with_leased_account_sync(
+                            account,
+                            url,
+                            output_dir,
+                        ),
+                        on_timeout_finish=lambda account=account, manager=manager: manager.release_account(account),
+                        on_timeout_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
+                            manager,
+                            account,
+                        ),
+                        on_cancel_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
+                            manager,
+                            account,
+                            reason="provider_cancelled_stale",
+                        ),
                     )
+                    release_account_on_exit = True
                 manager.record_account_success(account)
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
                     self.last_account_health_event = None
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
+                release_account_on_exit = True
                 last_error = auth_error
                 self.last_provider_metrics.instagram_auth_failures += 1
                 self.last_provider_metrics.failure_class = "auth_challenge"
@@ -249,6 +275,10 @@ class VideoDownloader:
                 if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
                     self.last_account_health_event = event
             except Exception as error:
+                if isinstance(error, InstagramProviderTimeoutError):
+                    release_account_on_exit = False
+                else:
+                    release_account_on_exit = True
                 if isinstance(error, DownloadError):
                     self.last_provider_metrics.failure_class = self._classify_instagram_fallback_error(error)
                     raise
@@ -256,7 +286,8 @@ class VideoDownloader:
                 self.last_provider_metrics.failure_class = "download_failed"
                 raise DownloadError(f"Download failed: {str(error)}") from error
             finally:
-                manager.release_account(account)
+                if release_account_on_exit:
+                    manager.release_account(account)
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
         if not acquired_account and not last_error:
@@ -292,12 +323,8 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle("__single__")
-                    client = self._build_single_account_client()
-                    result = self.instagram_adapter.download_with_instagram_client(
-                        client=client,
-                        url=url,
-                        output_dir=output_dir,
-                        redact_proxy=self._redact_proxy,
+                    result = await self._run_instagram_sync(
+                        lambda: self._download_with_single_account_sync(url, output_dir)
                     )
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 return result
@@ -461,6 +488,204 @@ class VideoDownloader:
         if fast_error:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
+
+    async def _run_instagram_sync(
+        self,
+        operation: Callable[[], T],
+        *,
+        on_timeout_finish: Callable[[], None] | None = None,
+        on_timeout_stale: Callable[[], None] | None = None,
+        on_cancel_stale: Callable[[], None] | None = None,
+    ) -> T:
+        """Run blocking Instagram provider code away from the Telegram event loop."""
+        timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
+        loop = asyncio.get_running_loop()
+        executor, future = self._submit_instagram_operation(operation)
+        deadline = loop.time() + timeout_seconds
+        try:
+            while True:
+                if future.done():
+                    return future.result()
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.05, remaining))
+        except asyncio.CancelledError:
+            self._detach_instagram_future(
+                future,
+                executor=executor,
+                on_timeout_finish=on_timeout_finish,
+                on_timeout_stale=on_cancel_stale,
+                recycle_on_stale=True,
+            )
+            self.last_provider_metrics.failure_class = "provider_cancelled"
+            raise
+
+        self._detach_instagram_future(
+            future,
+            executor=executor,
+            on_timeout_finish=on_timeout_finish,
+            on_timeout_stale=on_timeout_stale,
+            recycle_on_stale=True,
+        )
+
+        self.last_provider_metrics.failure_class = "provider_timeout"
+        raise InstagramProviderTimeoutError(
+            f"Instagram provider timed out after {timeout_seconds:g} seconds"
+        )
+
+    @classmethod
+    def _submit_instagram_operation(cls, operation: Callable[[], T]):
+        last_error: RuntimeError | None = None
+        for attempt in range(2):
+            executor = cls._get_instagram_provider_executor()
+            try:
+                return executor, executor.submit(operation)
+            except RuntimeError as error:
+                if "shutdown" not in str(error).lower():
+                    raise
+                last_error = error
+                logger.warning("Instagram provider executor shut down during submit; retrying")
+                if attempt == 0:
+                    continue
+                raise
+        assert last_error is not None
+        raise last_error
+
+    @staticmethod
+    def _get_detached_instagram_lease_seconds() -> float:
+        configured_seconds = getattr(
+            settings,
+            "INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+            settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS,
+        )
+        return max(0.1, float(configured_seconds))
+
+    def _detach_instagram_future(
+        self,
+        future,
+        *,
+        executor: ThreadPoolExecutor,
+        on_timeout_finish: Callable[[], None] | None = None,
+        on_timeout_stale: Callable[[], None] | None = None,
+        recycle_on_stale: bool = False,
+    ) -> None:
+        cleanup_lock = threading.Lock()
+        cleanup_done = False
+        stale_timer: threading.Timer | None = None
+
+        def run_cleanup(callback: Callable[[], None] | None) -> None:
+            nonlocal cleanup_done
+            with cleanup_lock:
+                if cleanup_done:
+                    return
+                cleanup_done = True
+            if callback:
+                try:
+                    callback()
+                except Exception as error:
+                    logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
+
+        def finish_cleanup() -> None:
+            if stale_timer is not None:
+                stale_timer.cancel()
+            run_cleanup(on_timeout_finish)
+
+        def stale_cleanup() -> None:
+            if future.done():
+                return
+            logger.warning("Timed-out Instagram worker exceeded detached lease window")
+            run_cleanup(on_timeout_stale or on_timeout_finish)
+            self._recycle_instagram_provider_executor(executor)
+
+        if on_timeout_stale or recycle_on_stale:
+            stale_timer = threading.Timer(self._get_detached_instagram_lease_seconds(), stale_cleanup)
+            stale_timer.daemon = True
+            stale_timer.start()
+
+        if future.cancel():
+            self._consume_late_instagram_result(future, on_timeout_finish=finish_cleanup)
+        else:
+            future.add_done_callback(
+                lambda completed_future: self._consume_late_instagram_result(
+                    completed_future,
+                    on_timeout_finish=finish_cleanup,
+                )
+            )
+
+    @staticmethod
+    def _consume_late_instagram_result(
+        future,
+        *,
+        on_timeout_finish: Callable[[], None] | None = None,
+    ) -> None:
+        try:
+            future.result()
+        except Exception as error:
+            logger.debug("Timed-out Instagram worker finished with error: %s", error)
+        finally:
+            if on_timeout_finish:
+                try:
+                    on_timeout_finish()
+                except Exception as error:
+                    logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
+
+    @staticmethod
+    def _retire_stale_instagram_account(
+        manager, account, *, reason: str = "provider_timeout_stale"
+    ) -> None:
+        mark_unavailable = getattr(manager, "mark_account_unavailable", None)
+        if mark_unavailable:
+            mark_unavailable(account, reason)
+        else:
+            record_failure = getattr(manager, "record_account_failure", None)
+            if record_failure:
+                record_failure(account, reason)
+        manager.release_account(account)
+
+    @classmethod
+    def _recycle_instagram_provider_executor(cls, stale_executor: ThreadPoolExecutor) -> None:
+        with cls._instagram_provider_executor_lock:
+            if cls._instagram_provider_executor is not stale_executor:
+                return
+            logger.warning("Recycling Instagram provider executor after stale worker")
+            stale_executor.shutdown(wait=False, cancel_futures=True)
+            cls._instagram_provider_executor = None
+
+    @classmethod
+    def _get_instagram_provider_executor(cls) -> ThreadPoolExecutor:
+        limit = max(1, settings.INSTAGRAM_MAX_CONCURRENT_JOBS)
+        with cls._instagram_provider_executor_lock:
+            if (
+                cls._instagram_provider_executor is None
+                or cls._instagram_provider_executor_limit != limit
+            ):
+                if cls._instagram_provider_executor is not None:
+                    cls._instagram_provider_executor.shutdown(wait=False, cancel_futures=True)
+                cls._instagram_provider_executor = ThreadPoolExecutor(
+                    max_workers=limit,
+                    thread_name_prefix="instagram-provider",
+                )
+                cls._instagram_provider_executor_limit = limit
+            return cls._instagram_provider_executor
+
+    def _download_with_leased_account_sync(self, account, url: str, output_dir: Path) -> VideoInfo:
+        client = self._build_leased_client(account)
+        return self.instagram_adapter.download_with_instagram_client(
+            client=client,
+            url=url,
+            output_dir=output_dir,
+            redact_proxy=self._redact_proxy,
+        )
+
+    def _download_with_single_account_sync(self, url: str, output_dir: Path) -> VideoInfo:
+        client = self._build_single_account_client()
+        return self.instagram_adapter.download_with_instagram_client(
+            client=client,
+            url=url,
+            output_dir=output_dir,
+            redact_proxy=self._redact_proxy,
+        )
 
     @staticmethod
     def _is_youtube_shorts_url(url: str) -> bool:
