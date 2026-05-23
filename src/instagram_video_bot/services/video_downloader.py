@@ -245,6 +245,11 @@ class VideoDownloader:
                             manager,
                             account,
                         ),
+                        on_cancel_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
+                            manager,
+                            account,
+                            reason="provider_cancelled_stale",
+                        ),
                     )
                     release_account_on_exit = True
                 manager.record_account_success(account)
@@ -490,6 +495,7 @@ class VideoDownloader:
         *,
         on_timeout_finish: Callable[[], None] | None = None,
         on_timeout_stale: Callable[[], None] | None = None,
+        on_cancel_stale: Callable[[], None] | None = None,
     ) -> T:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
@@ -510,6 +516,8 @@ class VideoDownloader:
                 future,
                 executor=executor,
                 on_timeout_finish=on_timeout_finish,
+                on_timeout_stale=on_cancel_stale,
+                recycle_on_stale=True,
             )
             self.last_provider_metrics.failure_class = "provider_cancelled"
             raise
@@ -606,14 +614,16 @@ class VideoDownloader:
                     logger.warning("Timed-out Instagram worker cleanup failed: %s", error)
 
     @staticmethod
-    def _retire_stale_instagram_account(manager, account) -> None:
+    def _retire_stale_instagram_account(
+        manager, account, *, reason: str = "provider_timeout_stale"
+    ) -> None:
         mark_unavailable = getattr(manager, "mark_account_unavailable", None)
         if mark_unavailable:
-            mark_unavailable(account, "provider_timeout_stale")
+            mark_unavailable(account, reason)
         else:
             record_failure = getattr(manager, "record_account_failure", None)
             if record_failure:
-                record_failure(account, "provider_timeout_stale")
+                record_failure(account, reason)
         manager.release_account(account)
 
     @classmethod

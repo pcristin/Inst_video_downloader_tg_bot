@@ -577,7 +577,7 @@ async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes
 
 
 @pytest.mark.asyncio
-async def test_instagram_cancellation_does_not_retire_account_after_detached_window(monkeypatch, tmp_path):
+async def test_instagram_cancellation_retires_account_as_cancelled_stale_after_detached_window(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
@@ -624,16 +624,13 @@ async def test_instagram_cancellation_does_not_retire_account_after_detached_win
 
     await asyncio.sleep(0.15)
 
-    assert manager.unavailable == []
-    assert manager.released == []
+    assert manager.unavailable == [("acc_cancel_window", "provider_cancelled_stale")]
+    assert manager.released == ["acc_cancel_window"]
 
     provider_can_finish.set()
-    for _ in range(20):
-        if manager.released == ["acc_cancel_window"]:
-            break
-        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)
 
-    assert manager.unavailable == []
+    assert manager.unavailable == [("acc_cancel_window", "provider_cancelled_stale")]
     assert manager.released == ["acc_cancel_window"]
 
 
@@ -767,7 +764,7 @@ async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypa
         nonlocal calls
         calls += 1
         if calls == 1:
-            first_provider_can_finish.wait(timeout=1)
+            first_provider_can_finish.wait(timeout=5)
         else:
             second_provider_started.set()
         return VideoInfo(
@@ -788,12 +785,78 @@ async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypa
 
     await asyncio.sleep(0.15)
 
-    info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+    try:
+        info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
 
-    assert info.file_path == expected_path
-    assert second_provider_started.is_set()
+        assert info.file_path == expected_path
+        assert second_provider_started.is_set()
+    finally:
+        first_provider_can_finish.set()
 
-    first_provider_can_finish.set()
+
+@pytest.mark.asyncio
+async def test_single_account_cancellation_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+
+    expected_path = tmp_path / "single-cancel-recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    first_provider_started = threading.Event()
+    first_provider_can_finish = threading.Event()
+    second_provider_started = threading.Event()
+    calls = 0
+
+    def _provider_call(_url, _output_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_provider_started.set()
+            first_provider_can_finish.wait(timeout=5)
+        else:
+            second_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="single-cancel-recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_single_account_sync",
+        _provider_call,
+    )
+
+    task = asyncio.create_task(downloader.download_video("https://www.instagram.com/reel/a/", tmp_path))
+    for _ in range(20):
+        if first_provider_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+
+    assert first_provider_started.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.15)
+
+    try:
+        info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+        assert info.file_path == expected_path
+        assert second_provider_started.is_set()
+    finally:
+        first_provider_can_finish.set()
 
 
 @pytest.mark.asyncio
