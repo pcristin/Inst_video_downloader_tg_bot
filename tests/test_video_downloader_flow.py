@@ -1,5 +1,8 @@
 import asyncio
+from concurrent.futures import Future
 from pathlib import Path
+import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -131,11 +134,26 @@ class _FastExtractorFailure:
         raise InstagramFastExtractorError("fast-failed")
 
 
+class _SlowFastExtractorSuccess:
+    def __init__(self, path: Path, delay_seconds: float = 0.2):
+        self._path = path
+        self._delay_seconds = delay_seconds
+
+    def extract_and_download(self, _url: str, _output_dir: Path) -> FastExtractorDownloadResult:
+        time.sleep(self._delay_seconds)
+        return FastExtractorDownloadResult(
+            shortcode="abc",
+            caption="slow-fast-caption",
+            media_items=[DownloadedMedia(file_path=self._path, media_type="photo")],
+        )
+
+
 class _LeaseManager:
     def __init__(self, accounts):
         self.accounts = list(accounts)
         self.released = []
         self.banned = []
+        self.unavailable = []
         self.failures = []
         self.successes = []
 
@@ -163,6 +181,9 @@ class _LeaseManager:
 
     def mark_account_banned(self, account):
         self.banned.append(account.username)
+
+    def mark_account_unavailable(self, account, reason):
+        self.unavailable.append((account.username, reason))
 
     def record_account_failure(self, account, reason):
         self.failures.append((account.username, reason))
@@ -246,6 +267,26 @@ class _Account:
         self.proxy = None
         self.totp_secret = "totp"
         self.session_file = None
+
+
+class _ShutdownOnceExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+
+    def submit(self, _operation):
+        self.submit_calls += 1
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+
+class _ImmediateExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+
+    def submit(self, operation):
+        self.submit_calls += 1
+        future = Future()
+        future.set_result(operation())
+        return future
 
 
 def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path):
@@ -354,6 +395,28 @@ async def test_fast_method_success_skips_legacy(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_instagram_fast_path_does_not_block_event_loop(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+
+    expected_path = tmp_path / "slow-fast.jpg"
+    expected_path.write_bytes(b"video")
+    downloader.fast_extractor = _SlowFastExtractorSuccess(expected_path)
+
+    started_at = time.perf_counter()
+    task = asyncio.create_task(
+        downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+    )
+    await asyncio.sleep(0)
+
+    assert time.perf_counter() - started_at < 0.1
+    info = await task
+    assert info.file_path == expected_path
+
+
+@pytest.mark.asyncio
 async def test_fast_failure_falls_back_to_single_account(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
@@ -404,6 +467,437 @@ async def test_story_url_routes_directly_to_legacy(monkeypatch, tmp_path):
 
     assert info.file_path == expected_path
     assert info.primary_media_type == "photo"
+
+
+@pytest.mark.asyncio
+async def test_instagram_fallback_login_timeout_becomes_download_error(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.05)
+
+    expected_path = tmp_path / "too-slow.jpg"
+    expected_path.write_bytes(b"video")
+    manager = _LeaseManager([_Account("acc_slow")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        time.sleep(0.2)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert downloader.last_provider_metrics.failure_class == "provider_timeout"
+
+
+@pytest.mark.asyncio
+async def test_instagram_timeout_keeps_account_leased_until_worker_finishes(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.05)
+
+    expected_path = tmp_path / "late.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_slow")])
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert manager.released == []
+
+    provider_can_finish.set()
+    for _ in range(20):
+        if manager.released == ["acc_slow"]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.released == ["acc_slow"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 5.0)
+
+    expected_path = tmp_path / "cancelled.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_cancel")])
+    provider_started = threading.Event()
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        provider_started.set()
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    task = asyncio.create_task(downloader.download_video("https://www.instagram.com/reel/a/", tmp_path))
+    for _ in range(20):
+        if provider_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+
+    assert provider_started.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert manager.released == []
+
+    provider_can_finish.set()
+    for _ in range(20):
+        if manager.released == ["acc_cancel"]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.released == ["acc_cancel"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_cancellation_retires_account_as_cancelled_stale_after_detached_window(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+
+    expected_path = tmp_path / "cancelled-window.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_cancel_window")])
+    provider_started = threading.Event()
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        provider_started.set()
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    task = asyncio.create_task(downloader.download_video("https://www.instagram.com/reel/a/", tmp_path))
+    for _ in range(20):
+        if provider_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+
+    assert provider_started.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.15)
+
+    assert manager.unavailable == [("acc_cancel_window", "provider_cancelled_stale")]
+    assert manager.released == ["acc_cancel_window"]
+
+    provider_can_finish.set()
+    await asyncio.sleep(0.1)
+
+    assert manager.unavailable == [("acc_cancel_window", "provider_cancelled_stale")]
+    assert manager.released == ["acc_cancel_window"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_stale_timeout_retires_and_releases_account(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+
+    expected_path = tmp_path / "stale.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_stale")])
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _stale_provider_call(_account, _url, _output_dir):
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _stale_provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    for _ in range(20):
+        if manager.unavailable == [("acc_stale", "provider_timeout_stale")]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.unavailable == [("acc_stale", "provider_timeout_stale")]
+    assert manager.released == ["acc_stale"]
+
+    provider_can_finish.set()
+    await asyncio.sleep(0.1)
+
+    assert manager.released == ["acc_stale"]
+
+
+@pytest.mark.asyncio
+async def test_instagram_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+
+    expected_path = tmp_path / "recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_stuck"), _Account("acc_ok")])
+    stuck_provider_can_finish = threading.Event()
+    ok_provider_started = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _provider_call(account, _url, _output_dir):
+        if account.username == "acc_stuck":
+            stuck_provider_can_finish.wait(timeout=1)
+        else:
+            ok_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    for _ in range(20):
+        if manager.unavailable == [("acc_stuck", "provider_timeout_stale")]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.unavailable == [("acc_stuck", "provider_timeout_stale")]
+
+    info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert ok_provider_started.is_set()
+    assert manager.successes == ["acc_ok"]
+
+    stuck_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
+async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+
+    expected_path = tmp_path / "single-recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    first_provider_can_finish = threading.Event()
+    second_provider_started = threading.Event()
+    calls = 0
+
+    def _provider_call(_url, _output_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_provider_can_finish.wait(timeout=5)
+        else:
+            second_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="single-recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_single_account_sync",
+        _provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    await asyncio.sleep(0.15)
+
+    try:
+        info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+        assert info.file_path == expected_path
+        assert second_provider_started.is_set()
+    finally:
+        first_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
+async def test_single_account_cancellation_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+
+    expected_path = tmp_path / "single-cancel-recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    first_provider_started = threading.Event()
+    first_provider_can_finish = threading.Event()
+    second_provider_started = threading.Event()
+    calls = 0
+
+    def _provider_call(_url, _output_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_provider_started.set()
+            first_provider_can_finish.wait(timeout=5)
+        else:
+            second_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="single-cancel-recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_single_account_sync",
+        _provider_call,
+    )
+
+    task = asyncio.create_task(downloader.download_video("https://www.instagram.com/reel/a/", tmp_path))
+    for _ in range(20):
+        if first_provider_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+
+    assert first_provider_started.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.15)
+
+    try:
+        info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+        assert info.file_path == expected_path
+        assert second_provider_started.is_set()
+    finally:
+        first_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
+async def test_instagram_sync_retries_submit_after_executor_shutdown(monkeypatch):
+    downloader = VideoDownloader()
+    stale_executor = _ShutdownOnceExecutor()
+    fresh_executor = _ImmediateExecutor()
+    executors = [stale_executor, fresh_executor]
+
+    monkeypatch.setattr(
+        VideoDownloader,
+        "_get_instagram_provider_executor",
+        classmethod(lambda cls: executors.pop(0)),
+    )
+
+    result = await downloader._run_instagram_sync(lambda: "ok")
+
+    assert result == "ok"
+    assert stale_executor.submit_calls == 1
+    assert fresh_executor.submit_calls == 1
 
 
 @pytest.mark.asyncio
