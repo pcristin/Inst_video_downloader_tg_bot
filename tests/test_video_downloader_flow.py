@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import Future
 from pathlib import Path
 import time
 import threading
@@ -266,6 +267,26 @@ class _Account:
         self.proxy = None
         self.totp_secret = "totp"
         self.session_file = None
+
+
+class _ShutdownOnceExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+
+    def submit(self, _operation):
+        self.submit_calls += 1
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+
+class _ImmediateExecutor:
+    def __init__(self):
+        self.submit_calls = 0
+
+    def submit(self, operation):
+        self.submit_calls += 1
+        future = Future()
+        future.set_result(operation())
+        return future
 
 
 def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path):
@@ -857,6 +878,26 @@ async def test_single_account_cancellation_recycles_saturated_executor(monkeypat
         assert second_provider_started.is_set()
     finally:
         first_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
+async def test_instagram_sync_retries_submit_after_executor_shutdown(monkeypatch):
+    downloader = VideoDownloader()
+    stale_executor = _ShutdownOnceExecutor()
+    fresh_executor = _ImmediateExecutor()
+    executors = [stale_executor, fresh_executor]
+
+    monkeypatch.setattr(
+        VideoDownloader,
+        "_get_instagram_provider_executor",
+        classmethod(lambda cls: executors.pop(0)),
+    )
+
+    result = await downloader._run_instagram_sync(lambda: "ok")
+
+    assert result == "ok"
+    assert stale_executor.submit_calls == 1
+    assert fresh_executor.submit_calls == 1
 
 
 @pytest.mark.asyncio

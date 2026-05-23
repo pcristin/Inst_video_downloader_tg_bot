@@ -500,8 +500,7 @@ class VideoDownloader:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
         loop = asyncio.get_running_loop()
-        executor = self._get_instagram_provider_executor()
-        future = executor.submit(operation)
+        executor, future = self._submit_instagram_operation(operation)
         deadline = loop.time() + timeout_seconds
         try:
             while True:
@@ -534,6 +533,24 @@ class VideoDownloader:
         raise InstagramProviderTimeoutError(
             f"Instagram provider timed out after {timeout_seconds:g} seconds"
         )
+
+    @classmethod
+    def _submit_instagram_operation(cls, operation: Callable[[], T]):
+        last_error: RuntimeError | None = None
+        for attempt in range(2):
+            executor = cls._get_instagram_provider_executor()
+            try:
+                return executor, executor.submit(operation)
+            except RuntimeError as error:
+                if "shutdown" not in str(error).lower():
+                    raise
+                last_error = error
+                logger.warning("Instagram provider executor shut down during submit; retrying")
+                if attempt == 0:
+                    continue
+                raise
+        assert last_error is not None
+        raise last_error
 
     @staticmethod
     def _get_detached_instagram_lease_seconds() -> float:
