@@ -577,6 +577,67 @@ async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes
 
 
 @pytest.mark.asyncio
+async def test_instagram_cancellation_does_not_retire_account_after_detached_window(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 5.0)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+
+    expected_path = tmp_path / "cancelled-window.jpg"
+    expected_path.write_bytes(b"photo")
+    manager = _LeaseManager([_Account("acc_cancel_window")])
+    provider_started = threading.Event()
+    provider_can_finish = threading.Event()
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    def _slow_provider_call(_account, _url, _output_dir):
+        provider_started.set()
+        provider_can_finish.wait(timeout=1)
+        return VideoInfo(
+            file_path=expected_path,
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_leased_account_sync",
+        _slow_provider_call,
+    )
+
+    task = asyncio.create_task(downloader.download_video("https://www.instagram.com/reel/a/", tmp_path))
+    for _ in range(20):
+        if provider_started.is_set():
+            break
+        await asyncio.sleep(0.05)
+
+    assert provider_started.is_set()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.15)
+
+    assert manager.unavailable == []
+    assert manager.released == []
+
+    provider_can_finish.set()
+    for _ in range(20):
+        if manager.released == ["acc_cancel_window"]:
+            break
+        await asyncio.sleep(0.05)
+
+    assert manager.unavailable == []
+    assert manager.released == ["acc_cancel_window"]
+
+
+@pytest.mark.asyncio
 async def test_instagram_stale_timeout_retires_and_releases_account(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0

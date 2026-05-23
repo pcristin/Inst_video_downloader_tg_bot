@@ -510,7 +510,6 @@ class VideoDownloader:
                 future,
                 executor=executor,
                 on_timeout_finish=on_timeout_finish,
-                on_timeout_stale=on_timeout_stale,
             )
             self.last_provider_metrics.failure_class = "provider_cancelled"
             raise
