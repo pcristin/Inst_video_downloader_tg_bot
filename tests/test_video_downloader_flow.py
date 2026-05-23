@@ -744,6 +744,59 @@ async def test_instagram_stale_timeout_recycles_saturated_executor(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_DETACHED_WORKER_LEASE_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+
+    expected_path = tmp_path / "single-recovered.jpg"
+    expected_path.write_bytes(b"photo")
+    first_provider_can_finish = threading.Event()
+    second_provider_started = threading.Event()
+    calls = 0
+
+    def _provider_call(_url, _output_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_provider_can_finish.wait(timeout=1)
+        else:
+            second_provider_started.set()
+        return VideoInfo(
+            file_path=expected_path,
+            title="single-recovered",
+            media_items=[MediaItem(file_path=expected_path, media_type="photo")],
+            primary_media_type="photo",
+        )
+
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_single_account_sync",
+        _provider_call,
+    )
+
+    with pytest.raises(DownloadError, match="Instagram provider timed out"):
+        await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    await asyncio.sleep(0.15)
+
+    info = await downloader.download_video("https://www.instagram.com/reel/b/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert second_provider_started.is_set()
+
+    first_provider_can_finish.set()
+
+
+@pytest.mark.asyncio
 async def test_download_with_account_lease_retries_after_auth_failure(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
