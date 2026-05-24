@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from src.instagram_video_bot import __main__ as main_module
@@ -18,6 +20,16 @@ def test_check_environment_allows_missing_instagram_credentials(monkeypatch):
     monkeypatch.setattr(main_module.os.path, "exists", lambda _path: False)
 
     main_module.check_environment()
+
+
+def test_setup_logging_suppresses_noisy_request_loggers(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "LOG_LEVEL", "INFO", raising=False)
+
+    main_module.setup_logging()
+
+    assert logging.getLogger("instagrapi").level == logging.WARNING
+    assert logging.getLogger("private_request").level == logging.WARNING
+    assert logging.getLogger("public_request").level == logging.WARNING
 
 
 def test_main_multi_account_startup_does_not_login_before_bot_run(monkeypatch, tmp_path):

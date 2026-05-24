@@ -35,7 +35,7 @@ class StateStore:
 
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path or settings.STATE_DB_PATH
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._initialize()
@@ -235,6 +235,109 @@ class StateStore:
             "chat_max_concurrent_jobs": settings_row["chat_max_concurrent_jobs"],
             "user_max_active_jobs": settings_row["user_max_active_jobs"],
         }
+
+    def reconcile_interrupted_jobs(self, *, reason: str = "process_restarted") -> int:
+        """Cancel persisted active jobs that cannot survive a process restart."""
+        now = _utc_now().isoformat()
+        active_statuses = ("queued", "running")
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled',
+                    error_class = COALESCE(error_class, ?),
+                    finished_at = COALESCE(finished_at, ?)
+                WHERE status IN (?, ?)
+                """,
+                (reason, now, *active_statuses),
+            )
+            interrupted_count = cursor.rowcount
+            self._conn.execute(
+                """
+                UPDATE request_events
+                SET status = 'cancelled',
+                    updated_at = ?
+                WHERE status IN (?, ?)
+                """,
+                (now, *active_statuses),
+            )
+            self._conn.execute(
+                """
+                UPDATE performance_metrics
+                SET status = 'cancelled',
+                    failure_class = COALESCE(failure_class, ?),
+                    finished_at = COALESCE(finished_at, ?)
+                WHERE status IN (?, ?)
+                """,
+                (reason, now, *active_statuses),
+            )
+        return int(interrupted_count)
+
+    def get_stale_active_job_count(
+        self,
+        *,
+        older_than_seconds: float,
+        chat_id: int | None = None,
+    ) -> int:
+        """Return active persisted jobs older than the allowed runtime window."""
+        cutoff = (_utc_now() - timedelta(seconds=max(0.0, older_than_seconds))).isoformat()
+        with self._lock:
+            if chat_id is None:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM jobs
+                    WHERE status = 'running'
+                      AND COALESCE(started_at, created_at) < ?
+                    """,
+                    (cutoff,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM jobs
+                    WHERE chat_id = ?
+                      AND status = 'running'
+                      AND COALESCE(started_at, created_at) < ?
+                    """,
+                    (chat_id, cutoff),
+                ).fetchone()
+        return int(row["count"] or 0)
+
+    def get_recent_provider_timeout_count(
+        self,
+        *,
+        chat_id: int | None = None,
+        window_seconds: float = 60 * 60,
+    ) -> int:
+        """Return recent provider timeout failures from performance metrics."""
+        cutoff = (_utc_now() - timedelta(seconds=max(0.0, window_seconds))).isoformat()
+        with self._lock:
+            if chat_id is None:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM performance_metrics
+                    WHERE status = 'failed'
+                      AND failure_class = 'provider_timeout'
+                      AND finished_at >= ?
+                    """,
+                    (cutoff,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM performance_metrics
+                    WHERE chat_id = ?
+                      AND status = 'failed'
+                      AND failure_class = 'provider_timeout'
+                      AND finished_at >= ?
+                    """,
+                    (chat_id, cutoff),
+                ).fetchone()
+        return int(row["count"] or 0)
 
     def create_job(self, job_id: str, chat_id: int, normalized_url: str, provider: str, status: str) -> None:
         now = _utc_now().isoformat()
@@ -716,6 +819,11 @@ class StateStore:
             "cache_entries": int(cache_entries),
             "queued_jobs": int(queued),
             "running_jobs": int(running),
+            "stale_active_jobs": self.get_stale_active_job_count(
+                older_than_seconds=settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS * 2,
+                chat_id=chat_id,
+            ),
+            "recent_provider_timeouts": self.get_recent_provider_timeout_count(chat_id=chat_id),
             "failed_jobs": int(failed_jobs),
             "provider_job_counts": [
                 (row["provider"], row["status"], int(row["count"])) for row in provider_job_counts
@@ -776,6 +884,10 @@ class StateStore:
             "cache_entries": int(cache_entries),
             "queued_jobs": int(queued),
             "running_jobs": int(running),
+            "stale_active_jobs": self.get_stale_active_job_count(
+                older_than_seconds=settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS * 2
+            ),
+            "recent_provider_timeouts": self.get_recent_provider_timeout_count(),
             "failed_jobs": int(failed_jobs),
             "chats_with_jobs": int(chats_with_jobs),
             "users_with_requests": int(users_with_requests),
