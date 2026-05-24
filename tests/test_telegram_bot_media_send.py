@@ -218,6 +218,34 @@ async def test_send_carousel_uses_media_group(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_send_large_carousel_respects_telegram_album_limit(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    media_items = []
+    for index in range(11):
+        media_file = tmp_path / f"{index}.jpg"
+        media_file.write_bytes(b"photo")
+        media_items.append(MediaItem(file_path=media_file, media_type="photo"))
+
+    info = VideoInfo(
+        file_path=media_items[0].file_path,
+        title="Large album",
+        media_items=media_items,
+        primary_media_type="photo",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    assert len(fake_bot.group_calls) == 1
+    assert len(fake_bot.group_calls[0]["media"]) == 10
+    assert len(fake_bot.photo_calls) == 1
+    assert fake_bot.photo_calls[0]["caption"] is None
+
+
+@pytest.mark.asyncio
 async def test_send_media_group_video_includes_probe_metadata(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
@@ -914,6 +942,29 @@ async def test_admin_status_reports_owner_settings(monkeypatch, tmp_path):
     assert "Статистика: выключена" in reply
     assert "Лимит чата: 5" in reply
     assert "Лимит на пользователя: 2" in reply
+
+
+@pytest.mark.asyncio
+async def test_admin_status_reports_stale_active_jobs(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_status")
+    context = _FakeContext(_FakeBot())
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    telegram_bot.state_store.create_job(
+        "stale-job",
+        77,
+        "https://www.instagram.com/reel/stale/",
+        "instagram",
+        "running",
+    )
+    with telegram_bot.state_store._lock, telegram_bot.state_store._conn:
+        telegram_bot.state_store._conn.execute(
+            "UPDATE jobs SET created_at = '2026-01-01T00:00:00+00:00', started_at = '2026-01-01T00:00:00+00:00' WHERE job_id = 'stale-job'"
+        )
+
+    await telegram_bot.admin_status_command(update, context)
+
+    assert "Зависших активных задач: 1" in update.message.replies[-1]
 
 
 @pytest.mark.asyncio

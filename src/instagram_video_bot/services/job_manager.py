@@ -79,6 +79,12 @@ class JobManager:
         self._jobs: dict[str, SharedJob] = {}
         self._active_jobs: dict[tuple[int, str], SharedJob] = {}
         self._listeners: list[StateListener] = []
+        interrupted = self.store.reconcile_interrupted_jobs()
+        if interrupted:
+            logger.warning(
+                "Reconciled interrupted persisted jobs",
+                extra={"interrupted_jobs": interrupted, "failure_class": "process_restarted"},
+            )
 
     def add_state_listener(self, listener: StateListener) -> None:
         self._listeners.append(listener)

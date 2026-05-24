@@ -22,6 +22,53 @@ async def _wait_for_start_count(started: list[tuple[str, int] | str], count: int
     await asyncio.wait_for(_wait(), timeout=1)
 
 
+def test_job_manager_reconciles_interrupted_persisted_jobs_on_startup(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_job("running-job", 77, "https://www.instagram.com/reel/running/", "instagram", "running")
+    store.create_request(
+        "running-request",
+        "running-job",
+        77,
+        1001,
+        "alice",
+        "instagram",
+        "https://www.instagram.com/reel/running/",
+        "running",
+    )
+    store.start_job_metrics(
+        job_id="running-job",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/running/",
+    )
+    store.mark_job_metrics_started("running-job")
+    store.create_job("queued-job", 77, "https://www.instagram.com/reel/queued/", "instagram", "queued")
+
+    JobManager(store)
+
+    with store._lock:
+        jobs = {
+            row["job_id"]: dict(row)
+            for row in store._conn.execute(
+                "SELECT job_id, status, error_class, finished_at FROM jobs ORDER BY job_id"
+            ).fetchall()
+        }
+        request = store._conn.execute(
+            "SELECT status FROM request_events WHERE request_id = 'running-request'"
+        ).fetchone()
+        metrics = store._conn.execute(
+            "SELECT status, failure_class, finished_at FROM performance_metrics WHERE job_id = 'running-job'"
+        ).fetchone()
+
+    assert jobs["running-job"]["status"] == "cancelled"
+    assert jobs["running-job"]["error_class"] == "process_restarted"
+    assert jobs["running-job"]["finished_at"] is not None
+    assert jobs["queued-job"]["status"] == "cancelled"
+    assert request["status"] == "cancelled"
+    assert metrics["status"] == "cancelled"
+    assert metrics["failure_class"] == "process_restarted"
+
+
 @pytest.mark.asyncio
 async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_path):
     store = StateStore(tmp_path / "state.db")
