@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from ..config.settings import settings
+from ..services.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,23 @@ def check_health() -> bool:
         ):
             logger.error("Instagram credentials are not set")
             return False
+
+        state_db_path = getattr(settings, "STATE_DB_PATH", None)
+        if state_db_path:
+            try:
+                store = StateStore(Path(state_db_path))
+                stale_active_jobs = store.get_stale_active_job_count(
+                    older_than_seconds=getattr(settings, "INSTAGRAM_PROVIDER_TIMEOUT_SECONDS", 180) * 2
+                )
+                if stale_active_jobs:
+                    logger.error("State database has %s stale active jobs", stale_active_jobs)
+                    return False
+                recent_timeouts = store.get_recent_provider_timeout_count(window_seconds=60 * 60)
+                if recent_timeouts:
+                    logger.warning("Recent provider timeouts in the last hour: %s", recent_timeouts)
+            except Exception as error:
+                logger.error("Cannot inspect state database: %s", error)
+                return False
 
         logger.info("Health check passed")
         return True
