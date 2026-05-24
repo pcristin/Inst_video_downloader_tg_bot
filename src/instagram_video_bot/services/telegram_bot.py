@@ -55,6 +55,7 @@ class TelegramBot:
 
     INSTAGRAM_VIDEO_PATTERN = RequestParser.URL_PATTERN
     MAX_MEDIA_CAPTION_LENGTH = 1024
+    TELEGRAM_MEDIA_GROUP_LIMIT = 10
 
     def __init__(self, state_store: StateStore | None = None):
         self.application: Optional[Application] = None
@@ -295,6 +296,8 @@ class TelegramBot:
             f"- Лимит на пользователя: {settings_row['user_max_active_jobs']}\n"
             f"- Выполняется задач: {admin_status['running_jobs']}\n"
             f"- В очереди задач: {admin_status['queued_jobs']}\n"
+            f"- Зависших активных задач: {admin_status['stale_active_jobs']}\n"
+            f"- Provider timeout за час: {admin_status['recent_provider_timeouts']}\n"
             f"- Активные запросы: {snapshot['active_requests']}\n"
             f"- Ошибочных задач: {admin_status['failed_jobs']}\n"
             f"- Записей в кэше: {admin_status['cache_entries']}\n"
@@ -334,6 +337,8 @@ class TelegramBot:
             f"- Пользователей с запросами: {admin_status['users_with_requests']}\n"
             f"- Выполняется задач: {admin_status['running_jobs']}\n"
             f"- В очереди задач: {admin_status['queued_jobs']}\n"
+            f"- Зависших активных задач: {admin_status['stale_active_jobs']}\n"
+            f"- Provider timeout за час: {admin_status['recent_provider_timeouts']}\n"
             f"- Активные запросы: {snapshot['active_requests']}\n"
             f"- Глобальный лимит: {snapshot['global_limit']}\n"
             f"- Ошибочных задач: {admin_status['failed_jobs']}\n"
@@ -672,25 +677,64 @@ class TelegramBot:
 
         if len(media_items) == 1:
             media_item = media_items[0]
-            with open(media_item.file_path, "rb") as media_file:
-                if media_item.media_type == "video":
-                    video_kwargs = self._telegram_video_kwargs(media_item)
-                    await context.bot.send_video(
-                        chat_id=request_context.chat_id,
-                        video=media_file,
-                        caption=caption_text,
-                        reply_to_message_id=request_context.original_message_id,
-                        **video_kwargs,
-                    )
-                else:
-                    await context.bot.send_photo(
-                        chat_id=request_context.chat_id,
-                        photo=media_file,
-                        caption=caption_text,
-                        reply_to_message_id=request_context.original_message_id,
-                    )
+            await self._send_single_media_item(
+                context,
+                request_context,
+                media_item,
+                caption_text,
+            )
             return
 
+        caption_available = caption_text
+        for offset in range(0, len(media_items), self.TELEGRAM_MEDIA_GROUP_LIMIT):
+            chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
+            chunk_caption = caption_available if offset == 0 else None
+            if len(chunk) == 1:
+                await self._send_single_media_item(
+                    context,
+                    request_context,
+                    chunk[0],
+                    chunk_caption,
+                )
+            else:
+                await self._send_media_group_chunk(
+                    context,
+                    request_context,
+                    chunk,
+                    chunk_caption,
+                )
+
+    async def _send_single_media_item(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        media_item: MediaItem,
+        caption_text: str | None,
+    ) -> None:
+        with open(media_item.file_path, "rb") as media_file:
+            if media_item.media_type == "video":
+                await context.bot.send_video(
+                    chat_id=request_context.chat_id,
+                    video=media_file,
+                    caption=caption_text,
+                    reply_to_message_id=request_context.original_message_id,
+                    **self._telegram_video_kwargs(media_item),
+                )
+            else:
+                await context.bot.send_photo(
+                    chat_id=request_context.chat_id,
+                    photo=media_file,
+                    caption=caption_text,
+                    reply_to_message_id=request_context.original_message_id,
+                )
+
+    async def _send_media_group_chunk(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        media_items: list[MediaItem],
+        caption_text: str | None,
+    ) -> None:
         with ExitStack() as stack:
             media_group = []
             for index, media_item in enumerate(media_items):
@@ -706,7 +750,6 @@ class TelegramBot:
                     )
                 else:
                     media_group.append(InputMediaPhoto(media=media_file, caption=item_caption))
-
             await context.bot.send_media_group(
                 chat_id=request_context.chat_id,
                 media=media_group,

@@ -21,7 +21,9 @@ def setup_logging() -> None:
     # Set external loggers to WARNING level
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)
-    logging.getLogger("instagrapi").setLevel(logging.INFO)  # Add instagrapi logging
+    logging.getLogger("instagrapi").setLevel(logging.WARNING)
+    logging.getLogger("private_request").setLevel(logging.WARNING)
+    logging.getLogger("public_request").setLevel(logging.WARNING)
 
 def check_environment() -> None:
     """Verify that all required environment variables exist."""
