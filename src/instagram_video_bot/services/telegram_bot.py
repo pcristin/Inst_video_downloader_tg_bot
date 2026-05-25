@@ -12,7 +12,7 @@ import time
 from typing import Any, List, Optional
 
 from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
-from telegram.error import NetworkError, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -722,40 +722,59 @@ class TelegramBot:
         caption_text: str | None,
     ) -> str | None:
         if media_item.telegram_file_id:
-            if media_item.media_type == "video":
-                message = await context.bot.send_video(
-                    chat_id=request_context.chat_id,
-                    video=media_item.telegram_file_id,
-                    caption=caption_text,
-                    reply_to_message_id=request_context.original_message_id,
-                    **self._telegram_video_kwargs(media_item),
+            try:
+                message = await self._send_single_media_value(
+                    context,
+                    request_context,
+                    media_item,
+                    caption_text,
+                    media_item.telegram_file_id,
                 )
-            else:
-                message = await context.bot.send_photo(
-                    chat_id=request_context.chat_id,
-                    photo=media_item.telegram_file_id,
-                    caption=caption_text,
-                    reply_to_message_id=request_context.original_message_id,
+                return self._extract_telegram_file_id(message, media_item.media_type)
+            except BadRequest as exc:
+                if not self._is_rejected_telegram_file_id(exc):
+                    raise
+                logger.info(
+                    "Cached Telegram file_id rejected; retrying local media upload",
+                    extra={
+                        "chat_id": request_context.chat_id,
+                        "media_type": media_item.media_type,
+                        "failure_class": "telegram_file_id_rejected",
+                    },
                 )
-            return self._extract_telegram_file_id(message, media_item.media_type)
 
         with open(media_item.file_path, "rb") as media_file:
-            if media_item.media_type == "video":
-                message = await context.bot.send_video(
-                    chat_id=request_context.chat_id,
-                    video=media_file,
-                    caption=caption_text,
-                    reply_to_message_id=request_context.original_message_id,
-                    **self._telegram_video_kwargs(media_item),
-                )
-            else:
-                message = await context.bot.send_photo(
-                    chat_id=request_context.chat_id,
-                    photo=media_file,
-                    caption=caption_text,
-                    reply_to_message_id=request_context.original_message_id,
-                )
+            message = await self._send_single_media_value(
+                context,
+                request_context,
+                media_item,
+                caption_text,
+                media_file,
+            )
         return self._extract_telegram_file_id(message, media_item.media_type)
+
+    async def _send_single_media_value(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        media_item: MediaItem,
+        caption_text: str | None,
+        media_value: Any,
+    ) -> Message:
+        if media_item.media_type == "video":
+            return await context.bot.send_video(
+                chat_id=request_context.chat_id,
+                video=media_value,
+                caption=caption_text,
+                reply_to_message_id=request_context.original_message_id,
+                **self._telegram_video_kwargs(media_item),
+            )
+        return await context.bot.send_photo(
+            chat_id=request_context.chat_id,
+            photo=media_value,
+            caption=caption_text,
+            reply_to_message_id=request_context.original_message_id,
+        )
 
     async def _send_media_group_chunk(
         self,
@@ -764,10 +783,49 @@ class TelegramBot:
         media_items: list[MediaItem],
         caption_text: str | None,
     ) -> list[str | None]:
+        try:
+            messages = await self._send_media_group_values(
+                context,
+                request_context,
+                media_items,
+                caption_text,
+            )
+        except BadRequest as exc:
+            if not any(item.telegram_file_id for item in media_items) or not self._is_rejected_telegram_file_id(exc):
+                raise
+            logger.info(
+                "Cached Telegram file_id rejected in media group; retrying local media upload",
+                extra={
+                    "chat_id": request_context.chat_id,
+                    "media_count": len(media_items),
+                    "failure_class": "telegram_file_id_rejected",
+                },
+            )
+            messages = await self._send_media_group_values(
+                context,
+                request_context,
+                media_items,
+                caption_text,
+                force_local_upload=True,
+            )
+        return [
+            self._extract_telegram_file_id(message, media_item.media_type)
+            for message, media_item in zip(messages or [], media_items)
+        ]
+
+    async def _send_media_group_values(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        media_items: list[MediaItem],
+        caption_text: str | None,
+        *,
+        force_local_upload: bool = False,
+    ) -> list[Message]:
         with ExitStack() as stack:
             media_group = []
             for index, media_item in enumerate(media_items):
-                media_value = media_item.telegram_file_id
+                media_value = None if force_local_upload else media_item.telegram_file_id
                 if not media_value:
                     media_value = stack.enter_context(open(media_item.file_path, "rb"))
                 item_caption = caption_text if index == 0 else None
@@ -781,15 +839,23 @@ class TelegramBot:
                     )
                 else:
                     media_group.append(InputMediaPhoto(media=media_value, caption=item_caption))
-            messages = await context.bot.send_media_group(
+            return await context.bot.send_media_group(
                 chat_id=request_context.chat_id,
                 media=media_group,
                 reply_to_message_id=request_context.original_message_id,
             )
-        return [
-            self._extract_telegram_file_id(message, media_item.media_type)
-            for message, media_item in zip(messages or [], media_items)
-        ]
+
+    @staticmethod
+    def _is_rejected_telegram_file_id(error: TelegramError) -> bool:
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in (
+                "wrong file identifier",
+                "file_id_invalid",
+                "file reference expired",
+            )
+        )
 
     def _persist_telegram_file_ids(
         self,
