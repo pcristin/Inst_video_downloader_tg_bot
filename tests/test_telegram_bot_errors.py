@@ -32,6 +32,15 @@ def test_run_registers_global_error_handler(monkeypatch):
         def token(self, _token):
             return self
 
+        def concurrent_updates(self, _updates):
+            return self
+
+        def connection_pool_size(self, _size):
+            return self
+
+        def media_write_timeout(self, _timeout):
+            return self
+
         def build(self):
             return FakeApplication()
 

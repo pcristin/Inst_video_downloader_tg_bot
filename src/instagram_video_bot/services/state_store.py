@@ -691,6 +691,39 @@ class StateStore:
                 ),
             )
 
+    def update_cached_telegram_file_ids(
+        self,
+        chat_id: int,
+        normalized_url: str,
+        telegram_file_ids: list[str | None],
+    ) -> None:
+        """Persist Telegram file IDs for cached media so repeats can skip uploads."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                """
+                SELECT media_json
+                FROM recent_results
+                WHERE cache_key = ?
+                """,
+                (self._cache_key(chat_id, normalized_url),),
+            ).fetchone()
+            if row is None:
+                return
+
+            media_items = json.loads(row["media_json"])
+            for media_item, file_id in zip(media_items, telegram_file_ids):
+                if file_id:
+                    media_item["telegram_file_id"] = file_id
+
+            self._conn.execute(
+                """
+                UPDATE recent_results
+                SET media_json = ?
+                WHERE cache_key = ?
+                """,
+                (json.dumps(media_items), self._cache_key(chat_id, normalized_url)),
+            )
+
     def purge_expired_results(self) -> list[Path]:
         now = _utc_now().isoformat()
         expired_paths: list[Path] = []
