@@ -1,5 +1,6 @@
 """Instagram video downloading service using instagrapi."""
 import asyncio
+import json
 import logging
 import random
 import threading
@@ -66,6 +67,11 @@ class VideoDownloader:
         fast_extractor = InstagramFastExtractor(
             timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
             timeout_read=settings.IG_FAST_TIMEOUT_READ,
+            metadata_timeout=(
+                settings.IG_FAST_METADATA_TIMEOUT_CONNECT_SECONDS,
+                settings.IG_FAST_METADATA_TIMEOUT_READ_SECONDS,
+            ),
+            total_budget_seconds=settings.IG_FAST_TOTAL_BUDGET_SECONDS,
         )
         self.instagram_adapter = InstagramProviderAdapter(fast_extractor)
         self.twitter_adapter = TwitterProviderAdapter(
@@ -198,6 +204,12 @@ class VideoDownloader:
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
                     (perf_counter() - fast_started_at) * 1000
                 )
+                self.last_provider_metrics.instagram_fast_budget_exhausted = bool(
+                    getattr(self.fast_extractor, "last_budget_exhausted", False)
+                )
+                self.last_provider_metrics.instagram_fast_endpoint_timings_json = json.dumps(
+                    getattr(self.fast_extractor, "last_endpoint_timings", [])
+                )
                 self.last_provider_metrics.instagram_success_path = "fast"
                 return fast_result
             except Exception as error:
@@ -205,6 +217,12 @@ class VideoDownloader:
                 self.last_provider_metrics.instagram_fast_status = "failed"
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
                     (perf_counter() - fast_started_at) * 1000
+                )
+                self.last_provider_metrics.instagram_fast_budget_exhausted = bool(
+                    getattr(self.fast_extractor, "last_budget_exhausted", False)
+                )
+                self.last_provider_metrics.instagram_fast_endpoint_timings_json = json.dumps(
+                    getattr(self.fast_extractor, "last_endpoint_timings", [])
                 )
                 self.last_provider_metrics.failure_class = "fast_path_failed"
                 logger.warning(

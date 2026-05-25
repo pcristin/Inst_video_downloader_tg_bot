@@ -21,7 +21,7 @@ def test_extract_post_via_oembed_and_mobile_info(monkeypatch, tmp_path):
     out_file = tmp_path / "video.mp4"
     out_file.write_bytes(b"video")
 
-    def fake_request_json(method, url, headers, data=None):
+    def fake_request_json(method, url, headers, data=None, timeout=None):
         if "oembed" in url:
             return {"media_id": "123_999"}
         if "/media/123/info/" in url:
@@ -159,3 +159,43 @@ def test_extract_raises_when_all_fast_sources_fail(monkeypatch, tmp_path):
 
     with pytest.raises(InstagramFastExtractorError, match="Failed to extract media"):
         extractor.extract_and_download("https://www.instagram.com/p/abc123/", tmp_path)
+
+
+def test_fast_extractor_budget_stops_later_endpoint_attempts(monkeypatch, tmp_path):
+    extractor = InstagramFastExtractor(total_budget_seconds=0.01)
+    calls = []
+
+    def fake_get_media_id(_canonical_url):
+        calls.append("media_id")
+        time.sleep(0.02)
+        return None
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("later endpoint should not run after budget is exhausted")
+
+    monkeypatch.setattr(extractor, "_get_media_id", fake_get_media_id)
+    monkeypatch.setattr(extractor, "_request_embed_data", fail_if_called)
+    monkeypatch.setattr(extractor, "_request_graphql_data", fail_if_called)
+
+    with pytest.raises(InstagramFastExtractorError, match="fast_path_budget_exhausted"):
+        extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert calls == ["media_id"]
+    assert extractor.last_budget_exhausted is True
+    assert extractor.last_endpoint_timings[0]["name"] == "media_id"
+
+
+def test_fast_extractor_records_endpoint_timings(monkeypatch, tmp_path):
+    extractor = InstagramFastExtractor(total_budget_seconds=5.0)
+
+    monkeypatch.setattr(extractor, "_get_media_id", lambda _canonical_url: None)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda _shortcode: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda _shortcode: {})
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    names = [item["name"] for item in extractor.last_endpoint_timings]
+    assert names == ["media_id", "embed", "graphql"]
+    assert all("duration_ms" in item for item in extractor.last_endpoint_timings)
+    assert all(item["status"] in {"miss", "failed"} for item in extractor.last_endpoint_timings)

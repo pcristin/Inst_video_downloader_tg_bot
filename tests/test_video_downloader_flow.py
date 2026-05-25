@@ -1,4 +1,5 @@
 import asyncio
+import json
 from concurrent.futures import Future
 from pathlib import Path
 import time
@@ -1270,7 +1271,12 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
     expected_path = tmp_path / "legacy-metrics.mp4"
     expected_path.write_bytes(b"video")
-    downloader.fast_extractor = _FastExtractorFailure()
+    fast_extractor = _FastExtractorFailure()
+    fast_extractor.last_budget_exhausted = True
+    fast_extractor.last_endpoint_timings = [
+        {"name": "media_id", "status": "miss", "duration_ms": 12}
+    ]
+    downloader.fast_extractor = fast_extractor
     monkeypatch.setattr(
         downloader,
         "_build_single_account_client",
@@ -1284,6 +1290,10 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     assert metrics.instagram_fallback_attempted is True
     assert metrics.instagram_success_path == "fallback"
     assert metrics.instagram_account_attempts == 1
+    assert metrics.instagram_fast_budget_exhausted is True
+    assert json.loads(metrics.instagram_fast_endpoint_timings_json) == [
+        {"name": "media_id", "status": "miss", "duration_ms": 12}
+    ]
 
 
 @pytest.mark.asyncio
