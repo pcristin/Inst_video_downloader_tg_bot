@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     IG_FAST_METHOD_ENABLED: bool = True
     IG_FAST_TIMEOUT_CONNECT: int = 10
     IG_FAST_TIMEOUT_READ: int = 45
+    IG_FAST_MIN_DELAY_BETWEEN_DOWNLOADS: float = 0.5
+    IG_FAST_RANDOM_DELAY_MIN_SECONDS: float = 0.0
+    IG_FAST_RANDOM_DELAY_MAX_SECONDS: float = 0.0
+    IG_FAST_MAX_MEDIA_DOWNLOAD_WORKERS: int = 4
     
     # Proxy settings (single proxy for backward compatibility)
     PROXY_HOST: Optional[str] = None
@@ -76,6 +80,9 @@ class Settings(BaseSettings):
     INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS: float = 20.0
     RECENT_RESULT_TTL_SECONDS: int = 60 * 60 * 4
     MAX_LINKS_PER_MESSAGE: int = 5
+    TELEGRAM_CONCURRENT_UPDATES: int = 4
+    TELEGRAM_CONNECTION_POOL_SIZE: int = 16
+    TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS: float = 60.0
     
     # Docker-specific settings
     RUNNING_IN_DOCKER: bool = os.path.exists('/.dockerenv')
