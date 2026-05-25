@@ -120,11 +120,14 @@ class InstagramProviderAdapter:
                 raise DownloadError(f"Instagram download failed: {failure_class}")
             raise DownloadError("Failed to download video")
 
+        fallback_path = None
+        structured_metadata_reused = False
+        metadata_reused_for_final_result = False
         structured_file_paths = getattr(download_result, "file_paths", None)
         if structured_file_paths is not None:
             file_paths = list(structured_file_paths)
-            self.last_fallback_path = getattr(download_result, "fallback_path", None)
-            self.last_metadata_reused = bool(getattr(download_result, "metadata_reused", False))
+            fallback_path = getattr(download_result, "fallback_path", None)
+            structured_metadata_reused = bool(getattr(download_result, "metadata_reused", False))
             media_info = getattr(download_result, "metadata", None) or {
                 "title": "",
                 "duration": 0,
@@ -142,11 +145,12 @@ class InstagramProviderAdapter:
         if not media_info:
             media_info = {"title": "", "duration": 0}
 
-        if (
+        should_lookup_metadata = (
             structured_file_paths is None
-            or not self.last_metadata_reused
+            or not structured_metadata_reused
             or not self._has_useful_metadata(media_info)
-        ):
+        )
+        if should_lookup_metadata:
             try:
                 info = client.get_media_info(url)
                 if info:
@@ -169,6 +173,11 @@ class InstagramProviderAdapter:
                         "error": str(metadata_error),
                     },
                 )
+        else:
+            metadata_reused_for_final_result = True
+
+        self.last_fallback_path = fallback_path
+        self.last_metadata_reused = metadata_reused_for_final_result
 
         title = media_info.get("title") or media_info.get("caption") or ""
         media_items = []
@@ -192,6 +201,8 @@ class InstagramProviderAdapter:
             description=title,
             media_items=media_items,
             primary_media_type=primary_item.media_type,
+            instagram_fallback_path=fallback_path,
+            instagram_metadata_reused=metadata_reused_for_final_result,
         )
 
     def is_story_url(self, url: str) -> bool:

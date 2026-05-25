@@ -352,6 +352,8 @@ def test_instagram_adapter_uses_structured_download_result_metadata(tmp_path):
     assert calls["get_media_info"] == 0
     assert adapter.last_fallback_path == "raw_direct"
     assert adapter.last_metadata_reused is True
+    assert info.instagram_fallback_path == "raw_direct"
+    assert info.instagram_metadata_reused is True
 
 
 def test_instagram_adapter_fetches_metadata_when_structured_metadata_is_not_useful(tmp_path):
@@ -389,7 +391,9 @@ def test_instagram_adapter_fetches_metadata_when_structured_metadata_is_not_usef
     assert info.duration == 9
     assert calls["get_media_info"] == 1
     assert adapter.last_fallback_path == "yt_dlp"
-    assert adapter.last_metadata_reused is True
+    assert adapter.last_metadata_reused is False
+    assert info.instagram_fallback_path == "yt_dlp"
+    assert info.instagram_metadata_reused is False
 
 
 def test_instagram_client_uses_raw_direct_video_before_ytdlp(tmp_path):
@@ -1498,6 +1502,39 @@ async def test_single_account_fallback_success_records_adapter_result_metrics(mo
     monkeypatch.setattr(downloader, "_build_single_account_client", lambda: _StructuredClient())
 
     await downloader.download_video("https://www.instagram.com/reel/single-raw/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_success_path == "fallback"
+    assert metrics.instagram_fallback_path == "raw_direct"
+    assert metrics.instagram_metadata_reused is True
+
+
+@pytest.mark.asyncio
+async def test_single_account_fallback_metrics_use_result_when_adapter_state_changes(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    expected_path = tmp_path / "single-result-metrics.mp4"
+    expected_path.write_bytes(b"video")
+
+    async def _run_instagram_sync(_operation, **_kwargs):
+        result = VideoInfo(
+            file_path=expected_path,
+            title="result metrics",
+            media_items=[MediaItem(file_path=expected_path, media_type="video")],
+            primary_media_type="video",
+        )
+        result.instagram_fallback_path = "raw_direct"
+        result.instagram_metadata_reused = True
+        downloader.instagram_adapter.last_fallback_path = "yt_dlp"
+        downloader.instagram_adapter.last_metadata_reused = False
+        return result
+
+    monkeypatch.setattr(downloader, "_run_instagram_sync", _run_instagram_sync)
+
+    await downloader.download_video("https://www.instagram.com/reel/result-metrics/", tmp_path)
 
     metrics = downloader.last_provider_metrics
     assert metrics.instagram_success_path == "fallback"

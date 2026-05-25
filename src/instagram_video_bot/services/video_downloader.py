@@ -286,10 +286,10 @@ class VideoDownloader:
                     self.last_account_health_event = None
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 self.last_provider_metrics.instagram_fallback_path = getattr(
-                    self.instagram_adapter, "last_fallback_path", None
+                    result, "instagram_fallback_path", None
                 )
                 self.last_provider_metrics.instagram_metadata_reused = bool(
-                    getattr(self.instagram_adapter, "last_metadata_reused", False)
+                    getattr(result, "instagram_metadata_reused", False)
                 )
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
@@ -363,10 +363,10 @@ class VideoDownloader:
                     )
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 self.last_provider_metrics.instagram_fallback_path = getattr(
-                    self.instagram_adapter, "last_fallback_path", None
+                    result, "instagram_fallback_path", None
                 )
                 self.last_provider_metrics.instagram_metadata_reused = bool(
-                    getattr(self.instagram_adapter, "last_metadata_reused", False)
+                    getattr(result, "instagram_metadata_reused", False)
                 )
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:

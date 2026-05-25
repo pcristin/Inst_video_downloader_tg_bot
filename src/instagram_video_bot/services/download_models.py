@@ -31,6 +31,8 @@ class VideoInfo:
     media_items: List[MediaItem] = field(default_factory=list)
     primary_media_type: Literal["video", "photo"] = "video"
     from_cache: bool = False
+    instagram_fallback_path: Optional[str] = None
+    instagram_metadata_reused: bool = False
 
 
 @dataclass
