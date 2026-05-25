@@ -151,14 +151,17 @@ def test_download_media_uses_photo_download_for_photo_posts(tmp_path):
     client = InstagramClient(username="u", password="p")
     client.client = _PhotoPostClient(photo_path)
 
-    assert client.download_media("https://www.instagram.com/p/photo/", tmp_path) == photo_path
+    result = client.download_media("https://www.instagram.com/p/photo/", tmp_path)
+
+    assert result.file_paths == [photo_path]
+    assert result.fallback_path == "photo"
 
 
 def test_download_media_preserves_carousel_items_from_raw_payload(tmp_path):
     client = InstagramClient(username="u", password="p")
     client.client = _CarouselPostClient(tmp_path)
 
-    paths = client.download_media("https://www.instagram.com/p/album/", tmp_path)
+    result = client.download_media("https://www.instagram.com/p/album/", tmp_path)
 
-    assert isinstance(paths, list)
-    assert [path.suffix for path in paths] == [".jpg", ".mp4"]
+    assert result.fallback_path == "album"
+    assert [path.suffix for path in result.file_paths] == [".jpg", ".mp4"]

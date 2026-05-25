@@ -1,8 +1,9 @@
 """Instagram client using instagrapi."""
 import logging
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import requests
 from instagrapi import Client
@@ -22,6 +23,18 @@ logger = logging.getLogger(__name__)
 
 class InstagramAuthError(Exception):
     """Raised when Instagram authentication/challenge errors are detected."""
+
+
+@dataclass
+class InstagramDownloadResult:
+    """Structured result for authenticated Instagram downloads."""
+
+    file_paths: list[Path]
+    fallback_path: Literal[
+        "raw_direct", "instagrapi_native", "yt_dlp", "album", "photo", "story"
+    ]
+    metadata: dict = field(default_factory=dict)
+    metadata_reused: bool = False
 
 
 class InstagramClient:
@@ -156,13 +169,15 @@ class InstagramClient:
 
         return False
 
-    def download_media(self, url: str, output_dir: Path) -> Optional[Path | list[Path]]:
+    def download_media(self, url: str, output_dir: Path) -> Optional[InstagramDownloadResult]:
         """Download media by URL, including authenticated story/post handling."""
         if "/stories/" in url.lower():
             return self._download_story_media(url, output_dir)
         return self._download_post_media(url, output_dir)
 
-    def _download_post_media(self, url: str, output_dir: Path) -> Optional[Path | list[Path]]:
+    def _download_post_media(
+        self, url: str, output_dir: Path
+    ) -> Optional[InstagramDownloadResult]:
         """Download a regular post, preserving photo posts and carousel albums."""
         self.last_failure_class = None
         self.last_failure_reason = None
@@ -171,21 +186,34 @@ class InstagramClient:
             media_pk = int(self.client.media_pk_from_url(url))
             output_dir.mkdir(parents=True, exist_ok=True)
             raw_item = self._get_media_dict_raw(media_pk) or {}
+            metadata = self._metadata_from_raw_item(raw_item)
             media_type = self._safe_int(raw_item.get("media_type"))
 
             if media_type == 8 or raw_item.get("carousel_media"):
                 album_paths = self._download_album_media(media_pk, raw_item, output_dir)
                 if album_paths:
-                    return album_paths
+                    return InstagramDownloadResult(
+                        file_paths=album_paths,
+                        fallback_path="album",
+                        metadata=metadata,
+                        metadata_reused=bool(metadata),
+                    )
                 return None
 
             if media_type == 1:
                 photo_path = self._download_photo_media(media_pk, raw_item, output_dir)
                 if photo_path:
-                    return photo_path
+                    return InstagramDownloadResult(
+                        file_paths=[photo_path],
+                        fallback_path="photo",
+                        metadata=metadata,
+                        metadata_reused=bool(metadata),
+                    )
                 return None
 
-            return self.download_video(url, output_dir)
+            return self.download_video(
+                url, output_dir, media_pk=media_pk, raw_item=raw_item
+            )
 
         except InstagramAuthError:
             raise
@@ -312,14 +340,18 @@ class InstagramClient:
             return paths
         return None
 
-    def _download_story_media(self, url: str, output_dir: Path) -> Optional[Path]:
+    def _download_story_media(
+        self, url: str, output_dir: Path
+    ) -> Optional[InstagramDownloadResult]:
         """Download Instagram story media using authenticated instagrapi APIs."""
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
             story_path = self.client.story_download_by_url(url, folder=output_dir)
             if story_path and story_path.exists():
                 logger.info(f"Story downloaded: {story_path}")
-                return story_path
+                return InstagramDownloadResult(
+                    file_paths=[story_path], fallback_path="story"
+                )
         except Exception as story_error:
             failure_class = self._classify_instagram_error(story_error)
             if self._is_auth_error(story_error):
@@ -330,7 +362,9 @@ class InstagramClient:
                     story_path = self.client.story_download_by_url(url, folder=output_dir)
                     if story_path and story_path.exists():
                         logger.info(f"Story downloaded after re-login: {story_path}")
-                        return story_path
+                        return InstagramDownloadResult(
+                            file_paths=[story_path], fallback_path="story"
+                        )
                 except Exception as retry_error:
                     if self._is_auth_error(retry_error):
                         raise InstagramAuthError(str(retry_error)) from retry_error
@@ -352,7 +386,9 @@ class InstagramClient:
                 story_path = self.client.story_download(story_pk, folder=output_dir)
                 if story_path and story_path.exists():
                     logger.info(f"Story downloaded by story_pk: {story_path}")
-                    return story_path
+                    return InstagramDownloadResult(
+                        file_paths=[story_path], fallback_path="story"
+                    )
         except Exception as pk_error:
             if self._is_auth_error(pk_error):
                 raise InstagramAuthError(str(pk_error)) from pk_error
@@ -360,83 +396,71 @@ class InstagramClient:
 
         return None
 
-    def download_video(self, url: str, output_dir: Path) -> Optional[Path]:
-        """Download video using instagrapi with validation error handling."""
+    def download_video(
+        self,
+        url: str,
+        output_dir: Path,
+        *,
+        media_pk: int | None = None,
+        raw_item: dict | None = None,
+    ) -> Optional[InstagramDownloadResult]:
+        """Download video using raw direct URL, then native APIs, then yt-dlp."""
         self.last_failure_class = None
         self.last_failure_reason = None
         try:
-            # Extract media PK from URL
-            media_pk = int(self.client.media_pk_from_url(url))
+            if media_pk is None:
+                media_pk = int(self.client.media_pk_from_url(url))
             logger.info(f"Extracted media PK: {media_pk}")
-            
-            # Download video directly
             output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # First, try yt-dlp as it's more reliable for reels
+
+            if raw_item is None:
+                raw_item = self._get_media_dict_raw(media_pk) or {}
+            metadata = self._metadata_from_raw_item(raw_item)
+
+            video_url = self._pick_video_url(raw_item) if raw_item else None
+            if video_url:
+                video_path = self._download_video_manually(video_url, media_pk, output_dir)
+                if video_path:
+                    logger.info(
+                        "Video downloaded via raw direct URL",
+                        extra={
+                            "username": self.username,
+                            "proxy": self._redact_proxy(self.proxy),
+                            "failure_class": "none",
+                        },
+                    )
+                    return InstagramDownloadResult(
+                        file_paths=[video_path],
+                        fallback_path="raw_direct",
+                        metadata=metadata,
+                        metadata_reused=True,
+                    )
+
+            video_path = self._download_video_native(media_pk, output_dir)
+            if video_path:
+                return InstagramDownloadResult(
+                    file_paths=[video_path],
+                    fallback_path="instagrapi_native",
+                    metadata=metadata,
+                    metadata_reused=bool(metadata),
+                )
+
             video_path = self._download_with_ytdlp_first(url, media_pk, output_dir)
             if video_path:
-                logger.info(
-                    "Video downloaded via yt-dlp",
-                    extra={
-                        "username": self.username,
-                        "proxy": self._redact_proxy(self.proxy),
-                        "failure_class": "none",
-                    },
+                logger.info(f"Video downloaded via yt-dlp fallback: {video_path}")
+                return InstagramDownloadResult(
+                    file_paths=[video_path],
+                    fallback_path="yt_dlp",
+                    metadata=metadata,
+                    metadata_reused=bool(metadata),
                 )
-                return video_path
             if self.last_failure_class == "auth_challenge":
                 self.last_failure_class = None
                 self.last_failure_reason = None
-            
-            try:
-                # Try the standard video_download without folder first (like in the example)
-                video_path = self.client.video_download(media_pk)
-                if video_path and video_path.exists():
-                    # Move to output directory
-                    import shutil
-                    final_path = output_dir / video_path.name
-                    shutil.move(str(video_path), str(final_path))
-                    logger.info(f"Video downloaded: {final_path}")
-                    return final_path
-            except Exception as download_error:
-                failure_class = self._classify_instagram_error(download_error)
-                self._record_failure(download_error)
-                
-                # Check if this is a session expiration issue
-                if self._is_auth_error(download_error):
-                    logger.warning("Session expired during download, attempting re-login...")
-                    if self._relogin():
-                        # Retry download after successful re-login
-                        try:
-                            video_path = self.client.video_download(media_pk, folder=output_dir)
-                            logger.info(f"Video downloaded after re-login: {video_path}")
-                            return video_path
-                        except Exception as retry_error:
-                            if self._is_auth_error(retry_error):
-                                raise InstagramAuthError(str(retry_error)) from retry_error
-                            logger.warning("Download still failed after re-login, trying fallbacks...")
-                    else:
-                        raise InstagramAuthError(str(download_error)) from download_error
-                
-                logger.warning(
-                    "Standard video download failed",
-                    extra={
-                        "username": self.username,
-                        "proxy": self._redact_proxy(self.proxy),
-                        "failure_class": failure_class,
-                    },
-                )
-                
-                # If standard download fails, use yt-dlp as fallback
-                logger.warning("Standard download failed, using yt-dlp fallback...")
-                video_path = self._download_with_ytdlp_first(url, media_pk, output_dir)
-                if video_path:
-                    logger.info(f"Video downloaded via yt-dlp fallback: {video_path}")
-                    return video_path
-                
-                logger.error(f"All download methods failed")
-                raise download_error  # Re-raise the original error
-                    
+
+            logger.error("All download methods failed")
+            return None
+
         except InstagramAuthError:
             raise
         except Exception as e:
@@ -445,7 +469,48 @@ class InstagramClient:
             if self._is_auth_error(e):
                 raise InstagramAuthError(str(e)) from e
             return None
-    
+
+    def _download_video_native(self, media_pk: int, output_dir: Path) -> Optional[Path]:
+        """Download video through instagrapi native APIs with relogin handling."""
+        try:
+            video_path = self.client.video_download(media_pk)
+            if video_path and video_path.exists():
+                import shutil
+
+                final_path = output_dir / video_path.name
+                if video_path != final_path:
+                    shutil.move(str(video_path), str(final_path))
+                logger.info(f"Video downloaded: {final_path}")
+                return final_path
+        except Exception as download_error:
+            failure_class = self._classify_instagram_error(download_error)
+            self._record_failure(download_error)
+
+            if self._is_auth_error(download_error):
+                logger.warning("Session expired during download, attempting re-login...")
+                if not self._relogin():
+                    raise InstagramAuthError(str(download_error)) from download_error
+                try:
+                    video_path = self.client.video_download(media_pk, folder=output_dir)
+                    if video_path and video_path.exists():
+                        logger.info(f"Video downloaded after re-login: {video_path}")
+                        return video_path
+                except Exception as retry_error:
+                    if self._is_auth_error(retry_error):
+                        raise InstagramAuthError(str(retry_error)) from retry_error
+                    logger.warning(f"Download retry failed after re-login: {retry_error}")
+
+            logger.warning(
+                "Standard video download failed",
+                extra={
+                    "username": self.username,
+                    "proxy": self._redact_proxy(self.proxy),
+                    "failure_class": failure_class,
+                },
+            )
+
+        return None
+
     def _get_media_dict_raw(self, media_pk: int) -> Optional[dict]:
         """Get raw media dictionary from API, bypassing Pydantic validation."""
         try:
@@ -457,15 +522,20 @@ class InstagramClient:
                 if self._relogin():
                     data = self.client.private_request(endpoint)
                 else:
-                    return None
+                    raise InstagramAuthError("login_required")
             
             if isinstance(data, dict) and 'items' in data:
                 items = data.get('items', [])
                 if items:
                     return items[0]
             return None
+        except AttributeError as e:
+            logger.warning(f"Raw media dict unavailable: {e}")
+            return None
         except Exception as e:
             logger.warning(f"Failed to get raw media dict: {e}")
+            if self._is_auth_error(e):
+                raise InstagramAuthError(str(e)) from e
             return None
 
     @staticmethod
@@ -477,6 +547,54 @@ class InstagramClient:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _safe_float(value) -> Optional[float]:
+        """Convert an Instagram payload value to float when possible."""
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _metadata_from_raw_item(self, raw_item: dict) -> dict:
+        """Extract reusable media metadata from a raw mobile API item."""
+        if not isinstance(raw_item, dict) or not raw_item:
+            return {}
+
+        metadata: dict = {}
+        caption = raw_item.get("caption")
+        if isinstance(caption, dict):
+            metadata["title"] = caption.get("text") or ""
+        elif isinstance(caption, str):
+            metadata["title"] = caption
+        elif raw_item.get("caption_text") is not None:
+            metadata["title"] = str(raw_item.get("caption_text") or "")
+
+        duration = None
+        for duration_key in (
+            "video_duration",
+            "duration",
+            "playback_duration_secs",
+        ):
+            if raw_item.get(duration_key) is not None:
+                duration = self._safe_float(raw_item.get(duration_key))
+                break
+        if duration is not None:
+            metadata["duration"] = duration
+
+        user = raw_item.get("user")
+        if isinstance(user, dict):
+            metadata["user"] = user.get("username") or user.get("pk") or "unknown"
+        elif user is not None:
+            metadata["user"] = str(user)
+
+        pk = self._safe_int(raw_item.get("pk") or raw_item.get("id"))
+        if pk is not None:
+            metadata["pk"] = pk
+
+        return metadata
 
     @staticmethod
     def _pick_video_url(item: dict) -> Optional[str]:
@@ -787,7 +905,12 @@ class InstagramClient:
                 cmd.extend(["--add-header", f"Cookie: {cookie_string}"])
             
             # Run yt-dlp
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+            )
             
             if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 1000:
                 logger.info(f"yt-dlp successfully downloaded video: {output_file}")

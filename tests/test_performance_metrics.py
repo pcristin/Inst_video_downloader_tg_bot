@@ -151,3 +151,34 @@ def test_summary_includes_queue_wait_averages(tmp_path):
     assert summary["avg_queue_wait_ms"] == 2000
     assert summary["providers"]["instagram"]["avg_queue_wait_ms"] == 1000
     assert summary["providers"]["twitter"]["avg_queue_wait_ms"] == 3000
+
+
+def test_metrics_records_cold_instagram_latency_breakdown(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.start_job_metrics(
+        job_id="job-cold",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/cold/",
+    )
+    store.mark_job_metrics_started("job-cold")
+    store.record_download_metrics(
+        "job-cold",
+        download_duration_ms=9000,
+        instagram_fast_status="failed",
+        instagram_fast_duration_ms=2200,
+        instagram_fast_budget_exhausted=True,
+        instagram_fast_endpoint_timings_json='[{"name":"mobile_info","status":"miss","duration_ms":1500}]',
+        instagram_fallback_attempted=True,
+        instagram_success_path="fallback",
+        instagram_fallback_path="raw_direct",
+        instagram_metadata_reused=True,
+    )
+    store.finalize_job_metrics("job-cold", status="completed")
+
+    summary = store.get_performance_summary(77, limit=50)
+
+    assert summary["instagram"]["fast_budget_exhausted"] == 1
+    assert summary["instagram"]["fallback_paths"]["raw_direct"] == 1
+    assert summary["instagram"]["metadata_reused"] == 1
+

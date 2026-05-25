@@ -31,6 +31,10 @@ class VideoInfo:
     media_items: List[MediaItem] = field(default_factory=list)
     primary_media_type: Literal["video", "photo"] = "video"
     from_cache: bool = False
+    instagram_fallback_path: Optional[str] = None
+    instagram_metadata_reused: bool = False
+    instagram_fast_budget_exhausted: bool = False
+    instagram_fast_endpoint_timings_json: Optional[str] = None
 
 
 @dataclass
@@ -42,11 +46,15 @@ class ProviderExecutionMetrics:
     failure_class: Optional[str] = None
     instagram_fast_status: Optional[str] = None
     instagram_fast_duration_ms: Optional[int] = None
+    instagram_fast_budget_exhausted: bool = False
+    instagram_fast_endpoint_timings_json: Optional[str] = None
     instagram_fallback_attempted: bool = False
     instagram_account_attempts: int = 0
     instagram_account_retries: int = 0
     instagram_auth_failures: int = 0
     instagram_success_path: Optional[str] = None
+    instagram_fallback_path: Optional[str] = None
+    instagram_metadata_reused: bool = False
 
 
 class VideoDownloadError(Exception):
