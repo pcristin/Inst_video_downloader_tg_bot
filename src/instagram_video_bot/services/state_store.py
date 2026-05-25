@@ -107,11 +107,15 @@ class StateStore:
                     retry_count INTEGER NOT NULL DEFAULT 0,
                     instagram_fast_status TEXT,
                     instagram_fast_duration_ms INTEGER,
+                    instagram_fast_budget_exhausted INTEGER NOT NULL DEFAULT 0,
+                    instagram_fast_endpoint_timings_json TEXT,
                     instagram_fallback_attempted INTEGER NOT NULL DEFAULT 0,
                     instagram_account_attempts INTEGER NOT NULL DEFAULT 0,
                     instagram_account_retries INTEGER NOT NULL DEFAULT 0,
                     instagram_auth_failures INTEGER NOT NULL DEFAULT 0,
                     instagram_success_path TEXT,
+                    instagram_fallback_path TEXT,
+                    instagram_metadata_reused INTEGER NOT NULL DEFAULT 0,
                     failure_class TEXT
                 );
 
@@ -156,6 +160,22 @@ class StateStore:
             if "failure_class" not in performance_columns:
                 self._conn.execute(
                     "ALTER TABLE performance_metrics ADD COLUMN failure_class TEXT"
+                )
+            if "instagram_fast_budget_exhausted" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN instagram_fast_budget_exhausted INTEGER NOT NULL DEFAULT 0"
+                )
+            if "instagram_fast_endpoint_timings_json" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN instagram_fast_endpoint_timings_json TEXT"
+                )
+            if "instagram_fallback_path" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN instagram_fallback_path TEXT"
+                )
+            if "instagram_metadata_reused" not in performance_columns:
+                self._conn.execute(
+                    "ALTER TABLE performance_metrics ADD COLUMN instagram_metadata_reused INTEGER NOT NULL DEFAULT 0"
                 )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
@@ -468,11 +488,15 @@ class StateStore:
         retry_count: int = 0,
         instagram_fast_status: str | None = None,
         instagram_fast_duration_ms: int | None = None,
+        instagram_fast_budget_exhausted: bool = False,
+        instagram_fast_endpoint_timings_json: str | None = None,
         instagram_fallback_attempted: bool = False,
         instagram_account_attempts: int = 0,
         instagram_account_retries: int = 0,
         instagram_auth_failures: int = 0,
         instagram_success_path: str | None = None,
+        instagram_fallback_path: str | None = None,
+        instagram_metadata_reused: bool = False,
         failure_class: str | None = None,
     ) -> None:
         self._safe_metrics_write(
@@ -482,11 +506,15 @@ class StateStore:
                 retry_count = ?,
                 instagram_fast_status = ?,
                 instagram_fast_duration_ms = ?,
+                instagram_fast_budget_exhausted = ?,
+                instagram_fast_endpoint_timings_json = ?,
                 instagram_fallback_attempted = ?,
                 instagram_account_attempts = ?,
                 instagram_account_retries = ?,
                 instagram_auth_failures = ?,
                 instagram_success_path = ?,
+                instagram_fallback_path = ?,
+                instagram_metadata_reused = ?,
                 failure_class = COALESCE(?, failure_class)
             WHERE job_id = ?
             """,
@@ -495,11 +523,15 @@ class StateStore:
                 retry_count,
                 instagram_fast_status,
                 instagram_fast_duration_ms,
+                1 if instagram_fast_budget_exhausted else 0,
+                instagram_fast_endpoint_timings_json,
                 1 if instagram_fallback_attempted else 0,
                 instagram_account_attempts,
                 instagram_account_retries,
                 instagram_auth_failures,
                 instagram_success_path,
+                instagram_fallback_path,
+                1 if instagram_metadata_reused else 0,
                 failure_class,
                 job_id,
             ),
@@ -621,6 +653,24 @@ class StateStore:
                 ),
                 "fallback_count": sum(
                     1 for row in instagram_rows if row["instagram_fallback_attempted"]
+                ),
+                "fast_budget_exhausted": sum(
+                    1 for row in instagram_rows if row["instagram_fast_budget_exhausted"]
+                ),
+                "fallback_paths": {
+                    path: sum(
+                        1 for row in instagram_rows if row["instagram_fallback_path"] == path
+                    )
+                    for path in sorted(
+                        {
+                            row["instagram_fallback_path"]
+                            for row in instagram_rows
+                            if row["instagram_fallback_path"]
+                        }
+                    )
+                },
+                "metadata_reused": sum(
+                    1 for row in instagram_rows if row["instagram_metadata_reused"]
                 ),
                 "account_retries": sum(
                     int(row["instagram_account_retries"] or 0) for row in instagram_rows
