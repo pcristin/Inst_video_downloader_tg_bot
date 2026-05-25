@@ -205,10 +205,10 @@ class VideoDownloader:
                     (perf_counter() - fast_started_at) * 1000
                 )
                 self.last_provider_metrics.instagram_fast_budget_exhausted = bool(
-                    getattr(self.fast_extractor, "last_budget_exhausted", False)
+                    getattr(fast_result, "instagram_fast_budget_exhausted", False)
                 )
-                self.last_provider_metrics.instagram_fast_endpoint_timings_json = json.dumps(
-                    getattr(self.fast_extractor, "last_endpoint_timings", [])
+                self.last_provider_metrics.instagram_fast_endpoint_timings_json = getattr(
+                    fast_result, "instagram_fast_endpoint_timings_json", None
                 )
                 self.last_provider_metrics.instagram_success_path = "fast"
                 return fast_result
@@ -219,10 +219,10 @@ class VideoDownloader:
                     (perf_counter() - fast_started_at) * 1000
                 )
                 self.last_provider_metrics.instagram_fast_budget_exhausted = bool(
-                    getattr(self.fast_extractor, "last_budget_exhausted", False)
+                    getattr(error, "budget_exhausted", False)
                 )
                 self.last_provider_metrics.instagram_fast_endpoint_timings_json = json.dumps(
-                    getattr(self.fast_extractor, "last_endpoint_timings", [])
+                    getattr(error, "endpoint_timings", [])
                 )
                 self.last_provider_metrics.failure_class = "fast_path_failed"
                 logger.warning(

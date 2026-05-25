@@ -33,6 +33,8 @@ class VideoInfo:
     from_cache: bool = False
     instagram_fallback_path: Optional[str] = None
     instagram_metadata_reused: bool = False
+    instagram_fast_budget_exhausted: bool = False
+    instagram_fast_endpoint_timings_json: Optional[str] = None
 
 
 @dataclass

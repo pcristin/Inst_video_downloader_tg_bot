@@ -205,3 +205,42 @@ def test_fast_extractor_records_endpoint_timings(monkeypatch, tmp_path):
     assert names == ["media_id", "embed", "graphql"]
     assert all("duration_ms" in item for item in extractor.last_endpoint_timings)
     assert all(item["status"] in {"miss", "failed"} for item in extractor.last_endpoint_timings)
+
+
+def test_fast_extractor_attempt_metrics_are_isolated_across_threads(monkeypatch, tmp_path):
+    extractor = InstagramFastExtractor(total_budget_seconds=5.0)
+    barrier = threading.Barrier(2)
+    errors = {}
+
+    def fake_get_media_id(_canonical_url):
+        barrier.wait(timeout=1)
+        return None
+
+    def fake_embed(shortcode):
+        time.sleep(0.02 if shortcode == "one" else 0.01)
+        return {}
+
+    monkeypatch.setattr(extractor, "_get_media_id", fake_get_media_id)
+    monkeypatch.setattr(extractor, "_request_embed_data", fake_embed)
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda _shortcode: {})
+
+    def run(shortcode):
+        with pytest.raises(InstagramFastExtractorError) as exc_info:
+            extractor.extract_and_download(
+                f"https://www.instagram.com/reel/{shortcode}/", tmp_path
+            )
+        errors[shortcode] = exc_info.value.endpoint_timings
+
+    threads = [
+        threading.Thread(target=run, args=("one",)),
+        threading.Thread(target=run, args=("two",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert set(errors) == {"one", "two"}
+    for timings in errors.values():
+        assert [item["name"] for item in timings] == ["media_id", "embed", "graphql"]
+        assert len(timings) == 3

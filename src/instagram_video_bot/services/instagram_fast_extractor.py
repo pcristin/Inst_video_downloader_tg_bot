@@ -12,7 +12,8 @@ import re
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic, perf_counter
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -29,6 +30,14 @@ _MEDIA_TYPE = Literal["video", "photo"]
 
 class InstagramFastExtractorError(Exception):
     """Raised when the fast extractor cannot produce downloadable media."""
+
+    endpoint_timings: list[dict[str, Any]]
+    budget_exhausted: bool
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.endpoint_timings = []
+        self.budget_exhausted = False
 
 
 @dataclass
@@ -60,6 +69,17 @@ class FastExtractorDownloadResult:
     shortcode: str
     caption: str
     media_items: List[DownloadedMedia]
+    endpoint_timings: list[dict[str, Any]] = field(default_factory=list)
+    budget_exhausted: bool = False
+
+
+@dataclass
+class _FastAttemptState:
+    """Per-extraction timing and budget state."""
+
+    budget_deadline: float
+    endpoint_timings: list[dict[str, Any]] = field(default_factory=list)
+    budget_exhausted: bool = False
 
 
 @dataclass
@@ -113,16 +133,38 @@ class InstagramFastExtractor:
         self.session = requests.Session()
         self.last_endpoint_timings: list[dict[str, Any]] = []
         self.last_budget_exhausted = False
-        self._budget_deadline = 0.0
+        self._attempt_state: ContextVar[_FastAttemptState | None] = ContextVar(
+            f"instagram_fast_attempt_{id(self)}", default=None
+        )
 
-    def _reset_attempt_metrics(self) -> None:
-        self.last_endpoint_timings = []
-        self.last_budget_exhausted = False
-        self._budget_deadline = monotonic() + self.total_budget_seconds
+    def _new_attempt_state(self) -> _FastAttemptState:
+        return _FastAttemptState(
+            budget_deadline=monotonic() + self.total_budget_seconds
+        )
+
+    def _current_attempt_state(self) -> _FastAttemptState:
+        state = self._attempt_state.get()
+        if state is None:
+            state = self._new_attempt_state()
+            self._attempt_state.set(state)
+        return state
+
+    def _publish_attempt_state(self, state: _FastAttemptState) -> None:
+        self.last_endpoint_timings = list(state.endpoint_timings)
+        self.last_budget_exhausted = state.budget_exhausted
+
+    @staticmethod
+    def _attach_attempt_state(
+        error: InstagramFastExtractorError, state: _FastAttemptState
+    ) -> InstagramFastExtractorError:
+        error.endpoint_timings = list(state.endpoint_timings)
+        error.budget_exhausted = state.budget_exhausted
+        return error
 
     def _ensure_budget(self) -> None:
-        if monotonic() > self._budget_deadline:
-            self.last_budget_exhausted = True
+        state = self._current_attempt_state()
+        if monotonic() > state.budget_deadline:
+            state.budget_exhausted = True
             raise InstagramFastExtractorError("fast_path_budget_exhausted")
 
     @contextmanager
@@ -137,7 +179,7 @@ class InstagramFastExtractor:
             status = "failed"
             raise
         finally:
-            self.last_endpoint_timings.append(
+            self._current_attempt_state().endpoint_timings.append(
                 {
                     "name": name,
                     "status": status,
@@ -190,36 +232,45 @@ class InstagramFastExtractor:
     def extract_and_download(self, url: str, output_dir: Path) -> FastExtractorDownloadResult:
         """Extract media links from URL and download all media files."""
         parsed = self.parse_url(url)
-        self._reset_attempt_metrics()
-        if parsed.route == "story":
-            raise InstagramFastExtractorError("story_unsupported_in_fast_path")
+        state = self._new_attempt_state()
+        token = self._attempt_state.set(state)
+        try:
+            if parsed.route == "story":
+                raise InstagramFastExtractorError("story_unsupported_in_fast_path")
 
-        if parsed.route == "share":
-            resolved = self.resolve_share_url(parsed.canonical_url)
-            parsed = self.parse_url(resolved)
-            if parsed.route != "post" or not parsed.shortcode:
-                raise InstagramFastExtractorError("Share URL did not resolve to a post")
+            if parsed.route == "share":
+                resolved = self.resolve_share_url(parsed.canonical_url)
+                parsed = self.parse_url(resolved)
+                if parsed.route != "post" or not parsed.shortcode:
+                    raise InstagramFastExtractorError("Share URL did not resolve to a post")
 
-        if not parsed.shortcode:
-            raise InstagramFastExtractorError("Missing post shortcode")
+            if not parsed.shortcode:
+                raise InstagramFastExtractorError("Missing post shortcode")
 
-        caption, media = self._extract_post(parsed.shortcode, parsed.canonical_url)
-        if not media:
-            raise InstagramFastExtractorError("No media items extracted")
+            caption, media = self._extract_post(parsed.shortcode, parsed.canonical_url)
+            if not media:
+                raise InstagramFastExtractorError("No media items extracted")
 
-        downloaded = self._download_media_items(
-            shortcode=parsed.shortcode,
-            media_items=media,
-            output_dir=output_dir,
-        )
-        if not downloaded:
-            raise InstagramFastExtractorError("No media files downloaded")
+            downloaded = self._download_media_items(
+                shortcode=parsed.shortcode,
+                media_items=media,
+                output_dir=output_dir,
+            )
+            if not downloaded:
+                raise InstagramFastExtractorError("No media files downloaded")
 
-        return FastExtractorDownloadResult(
-            shortcode=parsed.shortcode,
-            caption=caption,
-            media_items=downloaded,
-        )
+            return FastExtractorDownloadResult(
+                shortcode=parsed.shortcode,
+                caption=caption,
+                media_items=downloaded,
+                endpoint_timings=list(state.endpoint_timings),
+                budget_exhausted=state.budget_exhausted,
+            )
+        except InstagramFastExtractorError as error:
+            raise self._attach_attempt_state(error, state)
+        finally:
+            self._publish_attempt_state(state)
+            self._attempt_state.reset(token)
 
     def resolve_share_url(self, share_url: str) -> str:
         """Resolve /share URLs to canonical post/reel URLs."""
@@ -260,7 +311,7 @@ class InstagramFastExtractor:
             self._ensure_budget()
             caption, items = self._parse_mobile_item(mobile_item)
             if items:
-                self.last_endpoint_timings[-1]["status"] = "hit"
+                self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
                 return caption, items
 
         with self._timed_endpoint("embed"):
@@ -268,7 +319,7 @@ class InstagramFastExtractor:
         self._ensure_budget()
         caption, items = self._parse_embed_or_graphql_data(embed_data)
         if items:
-            self.last_endpoint_timings[-1]["status"] = "hit"
+            self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
             return caption, items
 
         with self._timed_endpoint("graphql"):
@@ -276,7 +327,7 @@ class InstagramFastExtractor:
         self._ensure_budget()
         caption, items = self._parse_embed_or_graphql_data(gql_data)
         if items:
-            self.last_endpoint_timings[-1]["status"] = "hit"
+            self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
             return caption, items
 
         raise InstagramFastExtractorError("Failed to extract media from all fast endpoints")

@@ -1449,12 +1449,17 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
     expected_path = tmp_path / "legacy-metrics.mp4"
     expected_path.write_bytes(b"video")
-    fast_extractor = _FastExtractorFailure()
-    fast_extractor.last_budget_exhausted = True
-    fast_extractor.last_endpoint_timings = [
+    fast_error = InstagramFastExtractorError("fast-failed")
+    fast_error.budget_exhausted = True
+    fast_error.endpoint_timings = [
         {"name": "media_id", "status": "miss", "duration_ms": 12}
     ]
-    downloader.fast_extractor = fast_extractor
+
+    class _FastExtractorFailureWithMetrics:
+        def extract_and_download(self, _url: str, _output_dir: Path):
+            raise fast_error
+
+    downloader.fast_extractor = _FastExtractorFailureWithMetrics()
     monkeypatch.setattr(
         downloader,
         "_build_single_account_client",

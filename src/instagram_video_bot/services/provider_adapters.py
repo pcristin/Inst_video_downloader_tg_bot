@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Literal, Optional, cast
@@ -86,6 +87,8 @@ class InstagramProviderAdapter:
             description=result.caption or "",
             media_items=media_items,
             primary_media_type=primary_item.media_type,
+            instagram_fast_budget_exhausted=result.budget_exhausted,
+            instagram_fast_endpoint_timings_json=json.dumps(result.endpoint_timings),
         )
 
     def download_with_instagram_client(
