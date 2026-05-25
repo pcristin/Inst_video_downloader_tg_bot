@@ -454,6 +454,9 @@ class InstagramClient:
                     metadata=metadata,
                     metadata_reused=bool(metadata),
                 )
+            if self.last_failure_class == "auth_challenge":
+                self.last_failure_class = None
+                self.last_failure_reason = None
 
             logger.error("All download methods failed")
             return None
@@ -525,6 +528,9 @@ class InstagramClient:
                 items = data.get('items', [])
                 if items:
                     return items[0]
+            return None
+        except AttributeError as e:
+            logger.warning(f"Raw media dict unavailable: {e}")
             return None
         except Exception as e:
             logger.warning(f"Failed to get raw media dict: {e}")
