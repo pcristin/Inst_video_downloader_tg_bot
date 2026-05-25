@@ -22,6 +22,8 @@ class InstagramProviderAdapter:
 
     def __init__(self, fast_extractor: InstagramFastExtractor):
         self.fast_extractor = fast_extractor
+        self.last_fallback_path: str | None = None
+        self.last_metadata_reused = False
 
     def build_single_account_client(self) -> InstagramClient:
         """Create and login a single-account client."""
@@ -95,6 +97,8 @@ class InstagramProviderAdapter:
         redact_proxy,
     ) -> VideoInfo:
         """Download Instagram media and map metadata into VideoInfo."""
+        self.last_fallback_path = None
+        self.last_metadata_reused = False
         account_name = client.username
         proxy_value = client.proxy or settings.get_single_proxy() or "none"
         redacted_proxy = redact_proxy(proxy_value)
@@ -119,6 +123,8 @@ class InstagramProviderAdapter:
         structured_file_paths = getattr(download_result, "file_paths", None)
         if structured_file_paths is not None:
             file_paths = list(structured_file_paths)
+            self.last_fallback_path = getattr(download_result, "fallback_path", None)
+            self.last_metadata_reused = bool(getattr(download_result, "metadata_reused", False))
             media_info = getattr(download_result, "metadata", None) or {
                 "title": "",
                 "duration": 0,
@@ -136,8 +142,10 @@ class InstagramProviderAdapter:
         if not media_info:
             media_info = {"title": "", "duration": 0}
 
-        if structured_file_paths is None or not getattr(
-            download_result, "metadata_reused", False
+        if (
+            structured_file_paths is None
+            or not self.last_metadata_reused
+            or not self._has_useful_metadata(media_info)
         ):
             try:
                 info = client.get_media_info(url)
@@ -162,6 +170,7 @@ class InstagramProviderAdapter:
                     },
                 )
 
+        title = media_info.get("title") or media_info.get("caption") or ""
         media_items = []
         for file_path in file_paths:
             media_type = self._infer_media_type(file_path)
@@ -169,16 +178,18 @@ class InstagramProviderAdapter:
                 self._build_media_item(
                     file_path=file_path,
                     media_type=media_type,
-                    caption=media_info.get("title") or None,
+                    caption=title or None,
                     duration=media_info.get("duration"),
+                    width=media_info.get("width"),
+                    height=media_info.get("height"),
                 )
             )
         primary_item = media_items[0]
         return VideoInfo(
             file_path=primary_item.file_path,
-            title=media_info.get("title", ""),
+            title=title,
             duration=primary_item.duration,
-            description=media_info.get("title", ""),
+            description=title,
             media_items=media_items,
             primary_media_type=primary_item.media_type,
         )
@@ -186,6 +197,19 @@ class InstagramProviderAdapter:
     def is_story_url(self, url: str) -> bool:
         """Check if URL targets Instagram stories."""
         return "/stories/" in url.lower()
+
+    @staticmethod
+    def _has_useful_metadata(media_info) -> bool:
+        if not media_info:
+            return False
+        title = media_info.get("title") or media_info.get("caption")
+        if isinstance(title, str) and title.strip():
+            return True
+        duration = media_info.get("duration")
+        try:
+            return float(duration) > 0
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _download_with_legacy_client(

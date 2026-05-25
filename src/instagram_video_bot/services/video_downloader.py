@@ -285,6 +285,12 @@ class VideoDownloader:
                 if not getattr(self.last_account_health_event, "should_alert_owner", False):
                     self.last_account_health_event = None
                 self.last_provider_metrics.instagram_success_path = "fallback"
+                self.last_provider_metrics.instagram_fallback_path = getattr(
+                    self.instagram_adapter, "last_fallback_path", None
+                )
+                self.last_provider_metrics.instagram_metadata_reused = bool(
+                    getattr(self.instagram_adapter, "last_metadata_reused", False)
+                )
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 release_account_on_exit = True
@@ -356,6 +362,12 @@ class VideoDownloader:
                         lambda: self._download_with_single_account_sync(url, output_dir)
                     )
                 self.last_provider_metrics.instagram_success_path = "fallback"
+                self.last_provider_metrics.instagram_fallback_path = getattr(
+                    self.instagram_adapter, "last_fallback_path", None
+                )
+                self.last_provider_metrics.instagram_metadata_reused = bool(
+                    getattr(self.instagram_adapter, "last_metadata_reused", False)
+                )
                 return result
             except (InstagramAuthError, AuthenticationError) as auth_error:
                 last_error = auth_error

@@ -316,6 +316,7 @@ def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path)
 def test_instagram_adapter_uses_structured_download_result_metadata(tmp_path):
     video_file = tmp_path / "structured.mp4"
     video_file.write_bytes(b"video")
+    calls = {"get_media_info": 0}
 
     class _StructuredClient:
         username = "acc_structured"
@@ -325,11 +326,12 @@ def test_instagram_adapter_uses_structured_download_result_metadata(tmp_path):
             return SimpleNamespace(
                 file_paths=[video_file],
                 fallback_path="raw_direct",
-                metadata={"title": "raw caption", "duration": 8.5},
+                metadata={"title": "raw caption", "duration": 8.5, "width": 720, "height": 1280},
                 metadata_reused=True,
             )
 
         def get_media_info(self, _url: str):
+            calls["get_media_info"] += 1
             raise AssertionError("structured metadata should be reused")
 
     adapter = InstagramProviderAdapter(fast_extractor=None)
@@ -345,6 +347,49 @@ def test_instagram_adapter_uses_structured_download_result_metadata(tmp_path):
     assert info.title == "raw caption"
     assert info.duration == 8.5
     assert info.media_items[0].caption == "raw caption"
+    assert info.media_items[0].width == 720
+    assert info.media_items[0].height == 1280
+    assert calls["get_media_info"] == 0
+    assert adapter.last_fallback_path == "raw_direct"
+    assert adapter.last_metadata_reused is True
+
+
+def test_instagram_adapter_fetches_metadata_when_structured_metadata_is_not_useful(tmp_path):
+    video_file = tmp_path / "empty-structured.mp4"
+    video_file.write_bytes(b"video")
+    calls = {"get_media_info": 0}
+
+    class _StructuredClient:
+        username = "acc_empty_structured"
+        proxy = None
+
+        def download_media(self, _url: str, _output_dir: Path):
+            return SimpleNamespace(
+                file_paths=[video_file],
+                fallback_path="yt_dlp",
+                metadata={},
+                metadata_reused=True,
+            )
+
+        def get_media_info(self, _url: str):
+            calls["get_media_info"] += 1
+            return {"title": "fetched caption", "duration": 9}
+
+    adapter = InstagramProviderAdapter(fast_extractor=None)
+
+    info = adapter.download_with_instagram_client(
+        client=_StructuredClient(),
+        url="https://www.instagram.com/reel/empty-structured/",
+        output_dir=tmp_path,
+        redact_proxy=lambda proxy: proxy,
+    )
+
+    assert info.file_path == video_file
+    assert info.title == "fetched caption"
+    assert info.duration == 9
+    assert calls["get_media_info"] == 1
+    assert adapter.last_fallback_path == "yt_dlp"
+    assert adapter.last_metadata_reused is True
 
 
 def test_instagram_client_uses_raw_direct_video_before_ytdlp(tmp_path):
@@ -1423,6 +1468,84 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
     assert json.loads(metrics.instagram_fast_endpoint_timings_json) == [
         {"name": "media_id", "status": "miss", "duration_ms": 12}
     ]
+
+
+@pytest.mark.asyncio
+async def test_single_account_fallback_success_records_adapter_result_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    expected_path = tmp_path / "single-raw-direct.mp4"
+    expected_path.write_bytes(b"video")
+
+    class _StructuredClient:
+        username = "acc_single_structured"
+        proxy = None
+
+        def download_media(self, _url: str, _output_dir: Path):
+            return SimpleNamespace(
+                file_paths=[expected_path],
+                fallback_path="raw_direct",
+                metadata={"title": "single raw", "duration": 4},
+                metadata_reused=True,
+            )
+
+        def get_media_info(self, _url: str):
+            raise AssertionError("structured metadata should be reused")
+
+    monkeypatch.setattr(downloader, "_build_single_account_client", lambda: _StructuredClient())
+
+    await downloader.download_video("https://www.instagram.com/reel/single-raw/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_success_path == "fallback"
+    assert metrics.instagram_fallback_path == "raw_direct"
+    assert metrics.instagram_metadata_reused is True
+
+
+@pytest.mark.asyncio
+async def test_leased_account_fallback_success_records_adapter_result_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+    expected_path = tmp_path / "leased-ytdlp.mp4"
+    expected_path.write_bytes(b"video")
+    manager = _LeaseManager([_Account("acc_structured")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    class _StructuredClient:
+        username = "acc_structured"
+        proxy = None
+
+        def login(self):
+            return True
+
+        def download_media(self, _url: str, _output_dir: Path):
+            return SimpleNamespace(
+                file_paths=[expected_path],
+                fallback_path="yt_dlp",
+                metadata={"title": "leased raw", "duration": 5},
+                metadata_reused=True,
+            )
+
+        def get_media_info(self, _url: str):
+            raise AssertionError("structured metadata should be reused")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.InstagramClient",
+        lambda **_kwargs: _StructuredClient(),
+    )
+
+    await downloader.download_video("https://www.instagram.com/reel/leased-ytdlp/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_success_path == "fallback"
+    assert metrics.instagram_fallback_path == "yt_dlp"
+    assert metrics.instagram_metadata_reused is True
+    assert manager.successes == ["acc_structured"]
 
 
 @pytest.mark.asyncio
