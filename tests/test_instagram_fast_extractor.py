@@ -161,6 +161,12 @@ def test_extract_raises_when_all_fast_sources_fail(monkeypatch, tmp_path):
         extractor.extract_and_download("https://www.instagram.com/p/abc123/", tmp_path)
 
 
+def test_fast_extractor_clamps_zero_budget_to_positive_minimum():
+    extractor = InstagramFastExtractor(total_budget_seconds=0.0)
+
+    assert extractor.total_budget_seconds == 0.01
+
+
 def test_fast_extractor_budget_stops_later_endpoint_attempts(monkeypatch, tmp_path):
     extractor = InstagramFastExtractor(total_budget_seconds=0.01)
     calls = []

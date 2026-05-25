@@ -103,7 +103,7 @@ class InstagramFastExtractor:
         self.timeout = (timeout_connect, timeout_read)
         self.metadata_timeout = metadata_timeout or self.timeout
         self.total_budget_seconds = max(
-            0.0,
+            0.01,
             float(
                 total_budget_seconds
                 if total_budget_seconds is not None

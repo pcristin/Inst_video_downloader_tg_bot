@@ -311,7 +311,7 @@ Change `__init__`:
         self.timeout = (timeout_connect, timeout_read)
         self.metadata_timeout = metadata_timeout or self.timeout
         self.total_budget_seconds = max(
-            0.1,
+            0.01,
             float(total_budget_seconds if total_budget_seconds is not None else settings.IG_FAST_TOTAL_BUDGET_SECONDS),
         )
         self.session = requests.Session()
