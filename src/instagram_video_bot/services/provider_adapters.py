@@ -106,8 +106,8 @@ class InstagramProviderAdapter:
             },
         )
 
-        downloaded_paths = self._download_with_legacy_client(client, url, output_dir)
-        if not downloaded_paths:
+        download_result = self._download_with_legacy_client(client, url, output_dir)
+        if not download_result:
             failure_class = getattr(client, "last_failure_class", None)
             if failure_class == "auth_challenge":
                 reason = getattr(client, "last_failure_reason", None) or failure_class
@@ -116,34 +116,51 @@ class InstagramProviderAdapter:
                 raise DownloadError(f"Instagram download failed: {failure_class}")
             raise DownloadError("Failed to download video")
 
-        if isinstance(downloaded_paths, list):
-            file_paths = downloaded_paths
+        structured_file_paths = getattr(download_result, "file_paths", None)
+        if structured_file_paths is not None:
+            file_paths = list(structured_file_paths)
+            media_info = getattr(download_result, "metadata", None) or {
+                "title": "",
+                "duration": 0,
+            }
+        elif isinstance(download_result, list):
+            file_paths = download_result
+            media_info = {"title": "", "duration": 0}
         else:
-            file_paths = [downloaded_paths]
+            file_paths = [download_result]
+            media_info = {"title": "", "duration": 0}
 
-        media_info = {"title": "", "duration": 0}
-        try:
-            info = client.get_media_info(url)
-            if info:
-                media_info = info
-        except InstagramAuthError as auth_error:
-            logger.warning(
-                "Metadata failed with auth error after download",
-                extra={
-                    "username": account_name,
-                    "failure_class": "metadata_unavailable",
-                    "error": str(auth_error),
-                },
-            )
-        except Exception as metadata_error:
-            logger.warning(
-                "Metadata lookup failed after download",
-                extra={
-                    "username": account_name,
-                    "failure_class": "metadata_unavailable",
-                    "error": str(metadata_error),
-                },
-            )
+        if not file_paths:
+            raise DownloadError("Instagram download returned no files")
+
+        if not media_info:
+            media_info = {"title": "", "duration": 0}
+
+        if structured_file_paths is None or not getattr(
+            download_result, "metadata_reused", False
+        ):
+            try:
+                info = client.get_media_info(url)
+                if info:
+                    media_info = info
+            except InstagramAuthError as auth_error:
+                logger.warning(
+                    "Metadata failed with auth error after download",
+                    extra={
+                        "username": account_name,
+                        "failure_class": "metadata_unavailable",
+                        "error": str(auth_error),
+                    },
+                )
+            except Exception as metadata_error:
+                logger.warning(
+                    "Metadata lookup failed after download",
+                    extra={
+                        "username": account_name,
+                        "failure_class": "metadata_unavailable",
+                        "error": str(metadata_error),
+                    },
+                )
 
         media_items = []
         for file_path in file_paths:
@@ -173,7 +190,7 @@ class InstagramProviderAdapter:
     @staticmethod
     def _download_with_legacy_client(
         client: InstagramClient, url: str, output_dir: Path
-    ) -> Optional[Path | list[Path]]:
+    ) -> Optional[object]:
         """Download media using existing authenticated client path."""
         if hasattr(client, "download_media"):
             return client.download_media(url, output_dir)

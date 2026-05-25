@@ -8,7 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.instagram_video_bot.services.instagram_client import InstagramAuthError
+from src.instagram_video_bot.services.instagram_client import (
+    InstagramAuthError,
+    InstagramClient,
+)
 from src.instagram_video_bot.services.instagram_fast_extractor import (
     DownloadedMedia,
     FastExtractorDownloadResult,
@@ -308,6 +311,132 @@ def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path)
     assert media_item.duration == 12.4
     assert media_item.width == 720
     assert media_item.height == 1280
+
+
+def test_instagram_adapter_uses_structured_download_result_metadata(tmp_path):
+    video_file = tmp_path / "structured.mp4"
+    video_file.write_bytes(b"video")
+
+    class _StructuredClient:
+        username = "acc_structured"
+        proxy = None
+
+        def download_media(self, _url: str, _output_dir: Path):
+            return SimpleNamespace(
+                file_paths=[video_file],
+                fallback_path="raw_direct",
+                metadata={"title": "raw caption", "duration": 8.5},
+                metadata_reused=True,
+            )
+
+        def get_media_info(self, _url: str):
+            raise AssertionError("structured metadata should be reused")
+
+    adapter = InstagramProviderAdapter(fast_extractor=None)
+
+    info = adapter.download_with_instagram_client(
+        client=_StructuredClient(),
+        url="https://www.instagram.com/reel/structured/",
+        output_dir=tmp_path,
+        redact_proxy=lambda proxy: proxy,
+    )
+
+    assert info.file_path == video_file
+    assert info.title == "raw caption"
+    assert info.duration == 8.5
+    assert info.media_items[0].caption == "raw caption"
+
+
+def test_instagram_client_uses_raw_direct_video_before_ytdlp(tmp_path):
+    direct_path = tmp_path / "direct.mp4"
+    direct_path.write_bytes(b"video")
+    calls = []
+    client = InstagramClient.__new__(InstagramClient)
+    client.username = "acc_direct"
+    client.proxy = None
+    client.last_failure_class = None
+    client.last_failure_reason = None
+    client.client = SimpleNamespace(
+        media_pk_from_url=lambda _url: "123",
+        user_agent="test-agent",
+        cookie_jar={},
+    )
+    client._get_media_dict_raw = lambda _media_pk: {
+        "pk": 123,
+        "caption": {"text": "raw caption"},
+        "video_duration": "4.5",
+        "user": {"username": "creator"},
+        "video_versions": [
+            {"url": "https://cdn.example/low.mp4", "width": 320, "height": 480},
+            {"url": "https://cdn.example/high.mp4", "width": 1080, "height": 1920},
+        ],
+    }
+    client._download_video_manually = (
+        lambda video_url, _media_pk, _output_dir: calls.append(("raw_direct", video_url))
+        or direct_path
+    )
+    client._download_with_ytdlp_first = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("yt-dlp should not run before raw direct")
+    )
+
+    result = client.download_video("https://www.instagram.com/reel/direct/", tmp_path)
+
+    assert result.file_paths == [direct_path]
+    assert result.fallback_path == "raw_direct"
+    assert result.metadata == {
+        "title": "raw caption",
+        "duration": 4.5,
+        "user": "creator",
+        "pk": 123,
+    }
+    assert result.metadata_reused is True
+    assert calls == [("raw_direct", "https://cdn.example/high.mp4")]
+
+
+def test_instagram_client_falls_back_to_native_then_ytdlp_when_raw_direct_fails(tmp_path):
+    ytdlp_path = tmp_path / "fallback.mp4"
+    ytdlp_path.write_bytes(b"video")
+    calls = []
+    client = InstagramClient.__new__(InstagramClient)
+    client.username = "acc_fallback"
+    client.proxy = None
+    client.last_failure_class = None
+    client.last_failure_reason = None
+    client.client = SimpleNamespace(
+        media_pk_from_url=lambda _url: "456",
+        user_agent="test-agent",
+        cookie_jar={},
+    )
+    client._get_media_dict_raw = lambda _media_pk: {
+        "pk": 456,
+        "caption": {"text": "fallback caption"},
+        "video_duration": 6,
+        "user": {"username": "creator"},
+        "video_versions": [
+            {"url": "https://cdn.example/raw.mp4", "width": 720, "height": 1280},
+        ],
+    }
+    client._download_video_manually = (
+        lambda _video_url, _media_pk, _output_dir: calls.append("raw_direct") or None
+    )
+    client._download_video_native = (
+        lambda _media_pk, _output_dir: calls.append("instagrapi_native") or None
+    )
+
+    def _download_with_ytdlp_first(_url, _media_pk, _output_dir):
+        assert calls == ["raw_direct", "instagrapi_native"]
+        calls.append("yt_dlp")
+        return ytdlp_path
+
+    client._download_with_ytdlp_first = _download_with_ytdlp_first
+
+    result = client.download_video("https://www.instagram.com/reel/fallback/", tmp_path)
+
+    assert result.file_paths == [ytdlp_path]
+    assert result.fallback_path == "yt_dlp"
+    assert result.metadata["title"] == "fallback caption"
+    assert result.metadata_reused is True
+    assert calls == ["raw_direct", "instagrapi_native", "yt_dlp"]
 
 
 def test_instagram_adapter_maps_legacy_album_paths_to_media_items(tmp_path):
