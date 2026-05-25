@@ -56,6 +56,13 @@ class VideoDownloader:
         """Initialize the video downloader."""
         self.min_delay_between_downloads = 10
         self.random_delay_range = (1.0, 3.0)
+        self.fast_min_delay_between_downloads = max(
+            0.0, float(settings.IG_FAST_MIN_DELAY_BETWEEN_DOWNLOADS)
+        )
+        self.fast_random_delay_range = (
+            max(0.0, float(settings.IG_FAST_RANDOM_DELAY_MIN_SECONDS)),
+            max(0.0, float(settings.IG_FAST_RANDOM_DELAY_MAX_SECONDS)),
+        )
         fast_extractor = InstagramFastExtractor(
             timeout_connect=settings.IG_FAST_TIMEOUT_CONNECT,
             timeout_read=settings.IG_FAST_TIMEOUT_READ,
@@ -179,7 +186,11 @@ class VideoDownloader:
             fast_started_at = perf_counter()
             try:
                 async with self._instagram_provider_slot():
-                    await self._apply_instagram_throttle(lease_key)
+                    await self._apply_instagram_throttle(
+                        lease_key,
+                        min_delay=self.fast_min_delay_between_downloads,
+                        random_delay_range=self.fast_random_delay_range,
+                    )
                     fast_result = await self._run_instagram_sync(
                         lambda: self.instagram_adapter.download_with_fast_method(url, output_dir)
                     )
@@ -434,23 +445,31 @@ class VideoDownloader:
             "www.x.com",
         }
 
-    async def _apply_instagram_throttle(self, key: str) -> None:
-        """Apply a conservative per-key delay before Instagram work."""
+    async def _apply_instagram_throttle(
+        self,
+        key: str,
+        *,
+        min_delay: float | None = None,
+        random_delay_range: tuple[float, float] | None = None,
+    ) -> None:
+        """Apply a per-key delay before Instagram work."""
+        effective_min_delay = self.min_delay_between_downloads if min_delay is None else max(0.0, min_delay)
+        effective_jitter = self.random_delay_range if random_delay_range is None else random_delay_range
         sleep_for = 0.0
         with self._throttle_lock:
             last_download = self._last_instagram_download_by_key.get(key, 0.0)
             current_time = time.time()
             time_since_last = current_time - last_download
-            if time_since_last < self.min_delay_between_downloads:
-                sleep_for = self.min_delay_between_downloads - time_since_last
+            if time_since_last < effective_min_delay:
+                sleep_for = effective_min_delay - time_since_last
             self._last_instagram_download_by_key[key] = current_time + sleep_for
 
         if sleep_for > 0:
             logger.info("Instagram throttle delay %.1fs for key %s", sleep_for, key)
             await asyncio.sleep(sleep_for)
 
-        if self.random_delay_range[1] > 0:
-            jitter = random.uniform(*self.random_delay_range)
+        if effective_jitter[1] > 0:
+            jitter = random.uniform(*effective_jitter)
             logger.debug("Adding Instagram jitter delay: %.1fs", jitter)
             await asyncio.sleep(jitter)
 

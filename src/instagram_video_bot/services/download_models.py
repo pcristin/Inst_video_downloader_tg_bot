@@ -17,6 +17,7 @@ class MediaItem:
     duration: Optional[float] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    telegram_file_id: Optional[str] = None
 
 
 @dataclass

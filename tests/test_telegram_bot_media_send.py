@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram.error import BadRequest
 
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
@@ -26,15 +27,41 @@ class _FakeBot:
 
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
+        return SimpleNamespace(video=SimpleNamespace(file_id="tg-video-file-id"), photo=None)
 
     async def send_photo(self, **kwargs):
         self.photo_calls.append(kwargs)
+        return SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="tg-photo-file-id")])
 
     async def send_media_group(self, **kwargs):
         self.group_calls.append(kwargs)
+        messages = []
+        for item in kwargs["media"]:
+            media_type = getattr(item, "type", "")
+            if media_type == "video":
+                messages.append(SimpleNamespace(video=SimpleNamespace(file_id="tg-group-video-id"), photo=None))
+            else:
+                messages.append(SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="tg-group-photo-id")]))
+        return messages
 
     async def get_chat_member(self, chat_id: int, user_id: int):
         return SimpleNamespace(status=self.member_status)
+
+
+class _RejectStaleFileIdBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        return SimpleNamespace(video=SimpleNamespace(file_id="fresh-video-file-id"), photo=None)
+
+
+class _RejectStaleGroupFileIdBot(_FakeBot):
+    async def send_media_group(self, **kwargs):
+        self.group_calls.append(kwargs)
+        if any(getattr(item, "media", None) == "stale-photo-file-id" for item in kwargs["media"]):
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        return [SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="fresh-group-photo-id")]) for _ in kwargs["media"]]
 
 
 class _FakeStatusMessage:
@@ -995,6 +1022,129 @@ async def test_cache_hit_records_performance_metrics(monkeypatch, tmp_path):
     summary = telegram_bot.state_store.get_performance_summary(77, limit=50)
     assert summary["cache_hits"] == 1
     assert summary["avg_delivery_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_send_media_persists_and_reuses_telegram_file_id(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    context = _FakeContext(_FakeBot())
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    media_file = tmp_path / "cached-file-id.mp4"
+    media_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="cached file id",
+        media_items=[
+            {
+                "file_path": str(media_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+            }
+        ],
+        ttl_seconds=3600,
+    )
+
+    info = VideoInfo(
+        file_path=media_file,
+        title="cached file id",
+        media_items=[MediaItem(file_path=media_file, media_type="video")],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    cached = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    assert cached is not None
+    assert cached.media_items[0]["telegram_file_id"] == "tg-video-file-id"
+
+    cached_info = telegram_bot._video_info_from_cache(cached)
+    second_fake_bot = _FakeBot()
+    await telegram_bot._send_media(_FakeContext(second_fake_bot), request_context, cached_info)
+
+    assert second_fake_bot.video_calls[0]["video"] == "tg-video-file-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_falls_back_to_local_upload_when_cached_file_id_is_rejected(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    fake_bot = _RejectStaleFileIdBot()
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    media_file = tmp_path / "stale-file-id.mp4"
+    media_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="cached file id",
+        media_items=[
+            {
+                "file_path": str(media_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+                "telegram_file_id": "stale-video-file-id",
+            }
+        ],
+        ttl_seconds=3600,
+    )
+
+    cached = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    assert cached is not None
+
+    await telegram_bot._send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        telegram_bot._video_info_from_cache(cached),
+    )
+
+    assert len(fake_bot.video_calls) == 2
+    assert fake_bot.video_calls[0]["video"] == "stale-video-file-id"
+    assert not isinstance(fake_bot.video_calls[1]["video"], str)
+
+    refreshed = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    assert refreshed is not None
+    assert refreshed.media_items[0]["telegram_file_id"] == "fresh-video-file-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_is_rejected(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _RejectStaleGroupFileIdBot()
+    request_context = _make_request_context(_FakeStatusMessage())
+
+    first = tmp_path / "stale-1.jpg"
+    second = tmp_path / "stale-2.jpg"
+    first.write_bytes(b"photo")
+    second.write_bytes(b"photo")
+    info = VideoInfo(
+        file_path=first,
+        title="cached album",
+        media_items=[
+            MediaItem(file_path=first, media_type="photo", telegram_file_id="stale-photo-file-id"),
+            MediaItem(file_path=second, media_type="photo", telegram_file_id="fresh-photo-file-id"),
+        ],
+        primary_media_type="photo",
+    )
+
+    await telegram_bot._send_media(_FakeContext(fake_bot), request_context, info)
+
+    assert len(fake_bot.group_calls) == 2
+    assert [item.media for item in fake_bot.group_calls[0]["media"]] == [
+        "stale-photo-file-id",
+        "fresh-photo-file-id",
+    ]
+    assert all(not isinstance(item.media, str) for item in fake_bot.group_calls[1]["media"])
 
 
 @pytest.mark.asyncio

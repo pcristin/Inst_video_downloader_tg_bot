@@ -9,12 +9,15 @@ import json
 import logging
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import requests
+
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -448,50 +451,71 @@ class InstagramFastExtractor:
     ) -> List[DownloadedMedia]:
         """Download extracted media URLs to local files."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        downloaded: List[DownloadedMedia] = []
+        if not media_items:
+            return []
 
-        for index, item in enumerate(media_items, start=1):
-            extension = self._guess_extension(item)
-            out_path = output_dir / f"instagram_{shortcode}_{index}.{extension}"
+        max_workers = max(1, min(settings.IG_FAST_MAX_MEDIA_DOWNLOAD_WORKERS, len(media_items)))
+        if max_workers == 1:
+            return [
+                self._download_one_media_item(shortcode, index, item, output_dir)
+                for index, item in enumerate(media_items, start=1)
+            ]
 
-            response = self._request_raw(
-                method="GET",
-                url=item.url,
-                headers=self._download_headers(),
-                stream=True,
-            )
-            if response is None:
-                raise InstagramFastExtractorError(f"Failed to download media item {index}")
+        results: list[DownloadedMedia | None] = [None] * len(media_items)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ig-fast-media") as executor:
+            futures = {
+                executor.submit(self._download_one_media_item, shortcode, index, item, output_dir): index - 1
+                for index, item in enumerate(media_items, start=1)
+            }
+            for future, result_index in futures.items():
+                results[result_index] = future.result()
 
-            content_type = (response.headers.get("content-type") or "").lower()
-            if item.media_type == "video" and content_type and "video" not in content_type:
-                logger.warning("Fast media content-type mismatch for video: %s", content_type)
-            if item.media_type == "photo" and content_type and "image" not in content_type:
-                logger.warning("Fast media content-type mismatch for photo: %s", content_type)
+        return [item for item in results if item is not None]
 
-            total_written = 0
-            with open(out_path, "wb") as file_handle:
-                for chunk in response.iter_content(chunk_size=1024 * 64):
-                    if not chunk:
-                        continue
-                    file_handle.write(chunk)
-                    total_written += len(chunk)
+    def _download_one_media_item(
+        self,
+        shortcode: str,
+        index: int,
+        item: ExtractedMedia,
+        output_dir: Path,
+    ) -> DownloadedMedia:
+        extension = self._guess_extension(item)
+        out_path = output_dir / f"instagram_{shortcode}_{index}.{extension}"
 
-            if total_written <= 0:
-                out_path.unlink(missing_ok=True)
-                raise InstagramFastExtractorError(f"Downloaded empty media item {index}")
+        response = self._request_raw(
+            method="GET",
+            url=item.url,
+            headers=self._download_headers(),
+            stream=True,
+        )
+        if response is None:
+            raise InstagramFastExtractorError(f"Failed to download media item {index}")
 
-            downloaded.append(
-                DownloadedMedia(
-                    file_path=out_path,
-                    media_type=item.media_type,
-                    duration=item.duration,
-                    width=item.width,
-                    height=item.height,
-                )
-            )
+        content_type = (response.headers.get("content-type") or "").lower()
+        if item.media_type == "video" and content_type and "video" not in content_type:
+            logger.warning("Fast media content-type mismatch for video: %s", content_type)
+        if item.media_type == "photo" and content_type and "image" not in content_type:
+            logger.warning("Fast media content-type mismatch for photo: %s", content_type)
 
-        return downloaded
+        total_written = 0
+        with open(out_path, "wb") as file_handle:
+            for chunk in response.iter_content(chunk_size=1024 * 64):
+                if not chunk:
+                    continue
+                file_handle.write(chunk)
+                total_written += len(chunk)
+
+        if total_written <= 0:
+            out_path.unlink(missing_ok=True)
+            raise InstagramFastExtractorError(f"Downloaded empty media item {index}")
+
+        return DownloadedMedia(
+            file_path=out_path,
+            media_type=item.media_type,
+            duration=item.duration,
+            width=item.width,
+            height=item.height,
+        )
 
     def _normalize_url(self, url: str) -> str:
         """Normalize incoming URLs and alias ddinstagram hostnames."""
