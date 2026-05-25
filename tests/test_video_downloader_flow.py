@@ -1233,6 +1233,14 @@ async def test_youtube_shorts_url_routes_to_youtube_downloader(tmp_path):
     assert info.primary_media_type == "video"
 
 
+def test_instagram_fast_path_uses_lower_default_throttle():
+    downloader = VideoDownloader()
+
+    assert downloader.fast_min_delay_between_downloads <= 1.0
+    assert downloader.fast_random_delay_range == (0.0, 0.0)
+    assert downloader.min_delay_between_downloads >= 10
+
+
 @pytest.mark.asyncio
 async def test_instagram_fast_success_records_provider_metrics(monkeypatch, tmp_path):
     downloader = VideoDownloader()

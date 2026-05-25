@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 from src.instagram_video_bot.services.instagram_fast_extractor import (
@@ -92,6 +95,46 @@ def test_parse_carousel_mobile_item_preserves_order():
     assert [item.media_type for item in media_items] == ["photo", "video"]
     assert media_items[0].url.endswith("1.jpg")
     assert media_items[1].url.endswith("2-high.mp4")
+
+
+def test_download_media_items_runs_carousel_downloads_concurrently(monkeypatch, tmp_path):
+    extractor = InstagramFastExtractor()
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class _StreamResponse:
+        headers = {"content-type": "video/mp4"}
+
+        def iter_content(self, chunk_size):
+            yield b"video"
+
+    def fake_request_raw(**kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return _StreamResponse()
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    media_items = [
+        type("Item", (), {"url": f"https://cdn.example.com/{index}.mp4", "media_type": "video", "duration": None, "width": None, "height": None})()
+        for index in range(4)
+    ]
+
+    downloaded = extractor._download_media_items("abc123", media_items, tmp_path)
+
+    assert len(downloaded) == 4
+    assert [item.file_path.name for item in downloaded] == [
+        "instagram_abc123_1.mp4",
+        "instagram_abc123_2.mp4",
+        "instagram_abc123_3.mp4",
+        "instagram_abc123_4.mp4",
+    ]
+    assert max_active > 1
 
 
 def test_share_url_resolution_to_canonical_post(monkeypatch):

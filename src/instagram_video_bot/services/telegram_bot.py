@@ -675,14 +675,19 @@ class TelegramBot:
         self._validate_media_files([item.file_path for item in media_items])
         caption_text = self._build_caption_text(video_info.title)
 
+        telegram_file_ids: list[str | None] = []
+
         if len(media_items) == 1:
             media_item = media_items[0]
-            await self._send_single_media_item(
-                context,
-                request_context,
-                media_item,
-                caption_text,
+            telegram_file_ids.append(
+                await self._send_single_media_item(
+                    context,
+                    request_context,
+                    media_item,
+                    caption_text,
+                )
             )
+            self._persist_telegram_file_ids(request_context, telegram_file_ids)
             return
 
         caption_available = caption_text
@@ -690,19 +695,24 @@ class TelegramBot:
             chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
             chunk_caption = caption_available if offset == 0 else None
             if len(chunk) == 1:
-                await self._send_single_media_item(
-                    context,
-                    request_context,
-                    chunk[0],
-                    chunk_caption,
+                telegram_file_ids.append(
+                    await self._send_single_media_item(
+                        context,
+                        request_context,
+                        chunk[0],
+                        chunk_caption,
+                    )
                 )
             else:
-                await self._send_media_group_chunk(
-                    context,
-                    request_context,
-                    chunk,
-                    chunk_caption,
+                telegram_file_ids.extend(
+                    await self._send_media_group_chunk(
+                        context,
+                        request_context,
+                        chunk,
+                        chunk_caption,
+                    )
                 )
+        self._persist_telegram_file_ids(request_context, telegram_file_ids)
 
     async def _send_single_media_item(
         self,
@@ -710,10 +720,28 @@ class TelegramBot:
         request_context: RequestContext,
         media_item: MediaItem,
         caption_text: str | None,
-    ) -> None:
+    ) -> str | None:
+        if media_item.telegram_file_id:
+            if media_item.media_type == "video":
+                message = await context.bot.send_video(
+                    chat_id=request_context.chat_id,
+                    video=media_item.telegram_file_id,
+                    caption=caption_text,
+                    reply_to_message_id=request_context.original_message_id,
+                    **self._telegram_video_kwargs(media_item),
+                )
+            else:
+                message = await context.bot.send_photo(
+                    chat_id=request_context.chat_id,
+                    photo=media_item.telegram_file_id,
+                    caption=caption_text,
+                    reply_to_message_id=request_context.original_message_id,
+                )
+            return self._extract_telegram_file_id(message, media_item.media_type)
+
         with open(media_item.file_path, "rb") as media_file:
             if media_item.media_type == "video":
-                await context.bot.send_video(
+                message = await context.bot.send_video(
                     chat_id=request_context.chat_id,
                     video=media_file,
                     caption=caption_text,
@@ -721,12 +749,13 @@ class TelegramBot:
                     **self._telegram_video_kwargs(media_item),
                 )
             else:
-                await context.bot.send_photo(
+                message = await context.bot.send_photo(
                     chat_id=request_context.chat_id,
                     photo=media_file,
                     caption=caption_text,
                     reply_to_message_id=request_context.original_message_id,
                 )
+        return self._extract_telegram_file_id(message, media_item.media_type)
 
     async def _send_media_group_chunk(
         self,
@@ -734,27 +763,56 @@ class TelegramBot:
         request_context: RequestContext,
         media_items: list[MediaItem],
         caption_text: str | None,
-    ) -> None:
+    ) -> list[str | None]:
         with ExitStack() as stack:
             media_group = []
             for index, media_item in enumerate(media_items):
-                media_file = stack.enter_context(open(media_item.file_path, "rb"))
+                media_value = media_item.telegram_file_id
+                if not media_value:
+                    media_value = stack.enter_context(open(media_item.file_path, "rb"))
                 item_caption = caption_text if index == 0 else None
                 if media_item.media_type == "video":
                     media_group.append(
                         InputMediaVideo(
-                            media=media_file,
+                            media=media_value,
                             caption=item_caption,
                             **self._telegram_video_kwargs(media_item),
                         )
                     )
                 else:
-                    media_group.append(InputMediaPhoto(media=media_file, caption=item_caption))
-            await context.bot.send_media_group(
+                    media_group.append(InputMediaPhoto(media=media_value, caption=item_caption))
+            messages = await context.bot.send_media_group(
                 chat_id=request_context.chat_id,
                 media=media_group,
                 reply_to_message_id=request_context.original_message_id,
             )
+        return [
+            self._extract_telegram_file_id(message, media_item.media_type)
+            for message, media_item in zip(messages or [], media_items)
+        ]
+
+    def _persist_telegram_file_ids(
+        self,
+        request_context: RequestContext,
+        telegram_file_ids: list[str | None],
+    ) -> None:
+        if not telegram_file_ids or not any(telegram_file_ids):
+            return
+        self.state_store.update_cached_telegram_file_ids(
+            request_context.chat_id,
+            request_context.normalized_url,
+            telegram_file_ids,
+        )
+
+    @staticmethod
+    def _extract_telegram_file_id(message: Any, media_type: str) -> str | None:
+        if media_type == "video":
+            video = getattr(message, "video", None)
+            return getattr(video, "file_id", None)
+        photos = getattr(message, "photo", None)
+        if photos:
+            return getattr(photos[-1], "file_id", None)
+        return None
 
     @staticmethod
     def _cleanup_files(files: List[Path]) -> None:
@@ -785,6 +843,7 @@ class TelegramBot:
                 duration=item.get("duration"),
                 width=item.get("width"),
                 height=item.get("height"),
+                telegram_file_id=item.get("telegram_file_id"),
             )
             for item in cached.media_items
         ]
@@ -1021,6 +1080,9 @@ class TelegramBot:
         self.application = (
             ApplicationBuilder()
             .token(settings.BOT_TOKEN)
+            .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
+            .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
+            .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
             .build()
         )
 
