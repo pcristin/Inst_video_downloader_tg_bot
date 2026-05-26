@@ -34,43 +34,43 @@ help: ## Show this help message
 	@echo 'Proxy format: user:pass@host:port (http:// added automatically)'
 
 build: ## Build the Docker image
-	docker-compose build
+	docker compose build
 
 up: ## Start the bot in detached mode
-	docker-compose up -d
+	docker compose up -d
 
 down: ## Stop the bot
-	docker-compose down
+	docker compose down
 
 restart: ## Restart the bot
-	docker-compose restart
+	docker compose restart
 
 logs: ## View bot logs (follow mode)
-	docker-compose logs -f
+	docker compose logs -f
 
 shell: ## Open a shell in the running container
-	docker-compose exec instagram-video-bot /bin/bash
+	docker compose exec instagram-video-bot /bin/bash
 
 clean: ## Clean up temporary files and Docker volumes
-	docker-compose down -v
+	docker compose down -v
 	rm -rf temp/* logs/* sessions/* 2fa_qr.png
 
 setup-2fa: ## Set up two-factor authentication
 	./docker-setup-2fa.sh
 
 dev: ## Start in development mode with live reload
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 dev-build: ## Build for development
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml build
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
 test-health: ## Test the health check
-	docker-compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
+	docker compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
 
 test-proxies: ## Test proxy parsing and configuration
 	@echo "🌐 Testing Proxy Configuration"
 	@echo "Format: user:pass@host:port (http:// added automatically)"
-	@docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python -c "from src.instagram_video_bot.config.settings import settings; proxies = settings.get_proxy_list(); print(f'✅ Found {len(proxies)} proxies:'); [print(f'  {i+1}: {proxy}') for i, proxy in enumerate(proxies[:10])] if proxies else print('❌ No proxies configured in PROXIES environment variable')"
+	@docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python -c "from src.instagram_video_bot.config.settings import settings; proxies = settings.get_proxy_list(); print(f'✅ Found {len(proxies)} proxies:'); [print(f'  {i+1}: {proxy}') for i, proxy in enumerate(proxies[:10])] if proxies else print('❌ No proxies configured in PROXIES environment variable')"
 
 # Account Management Commands
 accounts-list: ## List all accounts from accounts.txt with proxy assignments
@@ -88,26 +88,26 @@ accounts-list: ## List all accounts from accounts.txt with proxy assignments
 	fi
 
 accounts-status: ## Show status of all Instagram accounts
-	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
+	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
 
 accounts-setup: ## Setup all accounts (login and create sessions)
-	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
+	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
 
 accounts-rotate: ## Manually rotate to next available account
-	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py rotate
+	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py rotate
 
 accounts-reset: ## Reset banned status for all accounts
-	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset
+	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset
 
 accounts-reset-old: ## Reset accounts banned longer than HOURS hours (default 24)
-	docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
+	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)
-	docker-compose run --rm --entrypoint sh instagram-video-bot -c "rm -f /app/sessions/*.json && echo 'All session files deleted. Accounts will need to login again.'"
+	docker compose run --rm --entrypoint sh instagram-video-bot -c "rm -f /app/sessions/*.json && echo 'All session files deleted. Accounts will need to login again.'"
 
 sessions-backup: ## Backup all session files
-	docker-compose run --rm --entrypoint sh instagram-video-bot -c "mkdir -p /app/sessions/backup && cp /app/sessions/*.json /app/sessions/backup/ 2>/dev/null && echo 'Session files backed up to sessions/backup/' || echo 'No session files to backup'"
+	docker compose run --rm --entrypoint sh instagram-video-bot -c "mkdir -p /app/sessions/backup && cp /app/sessions/*.json /app/sessions/backup/ 2>/dev/null && echo 'Session files backed up to sessions/backup/' || echo 'No session files to backup'"
 
 sessions-restore: ## Restore session files from backup
-	docker-compose run --rm --entrypoint sh instagram-video-bot -c "cp /app/sessions/backup/*.json /app/sessions/ 2>/dev/null && echo 'Session files restored from backup' || echo 'No backup files found'"
+	docker compose run --rm --entrypoint sh instagram-video-bot -c "cp /app/sessions/backup/*.json /app/sessions/ 2>/dev/null && echo 'Session files restored from backup' || echo 'No backup files found'"
