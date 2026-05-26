@@ -82,13 +82,13 @@ make up
 
 ### Run commands inside container:
 ```bash
-docker-compose exec instagram-video-bot /bin/bash
+docker compose exec instagram-video-bot /bin/bash
 ```
 
 ### Run Python commands inside the container:
 ```bash
-docker-compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
-docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
+docker compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
+docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
 ```
 
 ## Volume Mounts
@@ -104,14 +104,14 @@ The Docker setup uses several volume mounts:
 ### Bot not starting
 Check the logs:
 ```bash
-docker-compose logs instagram-video-bot
+docker compose logs instagram-video-bot
 ```
 
 ### Instagram authentication issues
 1. Verify your `.env` credentials or `accounts.txt` entries.
 2. Re-initialize sessions:
    ```bash
-   docker-compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
+   docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
    ```
 3. Restart the bot:
    ```bash
@@ -150,7 +150,7 @@ To develop with Docker:
 
 3. Use Docker Compose override:
    ```bash
-   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
    ```
 
 ## Security Considerations
