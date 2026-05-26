@@ -324,10 +324,39 @@ class AccountManager:
             account.last_failure_at = None
             self._save_state()
 
+    @staticmethod
+    def _is_hard_account_failure_reason(reason: str) -> bool:
+        """Return true when an account should be quarantined after one failure."""
+        text = reason.lower()
+        hard_tokens = (
+            "auth_challenge",
+            "challenge_required",
+            "manual_verification",
+            "manual verification",
+            "checkpoint",
+            "ufac",
+            "web bloks",
+            "unresolved_challenge",
+            "challenge resolver",
+            "unknown step_name",
+            "invalid_credentials",
+            "invalid username or password",
+            "login_required",
+            "login required",
+            "unauthorized",
+            "401",
+            "rate_limited",
+            "rate limit",
+            "please wait",
+        )
+        return any(token in text for token in hard_tokens)
+
     def record_account_failure(self, account: Account, reason: str) -> AccountHealthEvent:
         """Persist a sequential failure and quarantine accounts at threshold."""
         with self._lock:
-            threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
+            configured_threshold = max(1, settings.ACCOUNT_FAILURE_THRESHOLD)
+            hard_failure = self._is_hard_account_failure_reason(reason)
+            threshold = 1 if hard_failure else configured_threshold
             now = datetime.now()
             previous_failures = account.consecutive_failures
 
@@ -335,10 +364,15 @@ class AccountManager:
             account.last_failure_reason = reason
             account.last_failure_at = now
 
-            threshold_reached = previous_failures < threshold <= account.consecutive_failures
+            threshold_reached = not account.is_banned and (
+                hard_failure
+                or previous_failures < threshold <= account.consecutive_failures
+            )
             if threshold_reached:
                 account.is_banned = True
-                account.ban_reason = f"sequential_failures:{reason}"
+                account.ban_reason = (
+                    f"hard_failure:{reason}" if hard_failure else f"sequential_failures:{reason}"
+                )
                 account.banned_at = now
                 self._leased_accounts.discard(account.username)
 
