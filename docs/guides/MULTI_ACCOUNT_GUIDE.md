@@ -165,7 +165,7 @@ If many accounts get banned:
 
 ```bash
 # 1. Stop the bot
-docker-compose down
+docker compose down
 
 # 2. Wait 24 hours
 
@@ -185,7 +185,7 @@ python3 manage_accounts.py warmup
 
 ```bash
 # Bot logs
-docker-compose logs -f
+docker compose logs -f
 
 # Account state
 cat accounts_state.json | jq
@@ -237,10 +237,10 @@ ACCOUNTS_FILE=vip_accounts.txt python3 manage_accounts.py setup
 With 20 accounts, you can potentially run multiple bot instances:
 ```bash
 # Instance 1 (accounts 1-10)
-BOT_INSTANCE=1 docker-compose up -d
+BOT_INSTANCE=1 docker compose up -d
 
 # Instance 2 (accounts 11-20)  
-BOT_INSTANCE=2 docker-compose -p bot2 up -d
+BOT_INSTANCE=2 docker compose -p bot2 up -d
 ```
 
 **Warning**: This increases detection risk. Use carefully.
