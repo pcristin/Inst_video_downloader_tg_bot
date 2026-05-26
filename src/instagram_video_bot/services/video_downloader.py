@@ -306,7 +306,8 @@ class VideoDownloader:
                         "error": str(auth_error),
                     },
                 )
-                event = manager.record_account_failure(account, "auth_challenge")
+                account_failure_reason = self._classify_instagram_account_failure(auth_error)
+                event = manager.record_account_failure(account, account_failure_reason)
                 if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
                     self.last_account_health_event = event
             except Exception as error:
@@ -423,6 +424,20 @@ class VideoDownloader:
             token in text
             for token in ("timeout", "timed out", "temporary", "temporarily", "connection", "network")
         )
+
+    @staticmethod
+    def _classify_instagram_account_failure(error: Exception) -> str:
+        """Map auth-like Instagram errors to account quarantine reasons."""
+        text = str(error).lower()
+        if "manual verification" in text or "ufac" in text or "web bloks" in text:
+            return "manual_verification"
+        if "unknown step_name" in text or "challenge resolver" in text:
+            return "unresolved_challenge"
+        if "invalid username or password" in text:
+            return "invalid_credentials"
+        if "please wait" in text or ("rate" in text and "limit" in text):
+            return "rate_limited"
+        return "auth_challenge"
 
     @staticmethod
     def _classify_download_error(error: Exception) -> str:

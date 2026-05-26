@@ -65,6 +65,27 @@ class _AuthFailClient:
         return None
 
 
+class _ManualVerificationClient:
+    username = "acc_checkpoint"
+    proxy = None
+
+    def login(self):
+        return True
+
+    def download_video(self, _url: str, _output_dir: Path):
+        raise InstagramAuthError(
+            "Manual verification required via Instagram UFAC web bloks checkpoint"
+        )
+
+    def download_media(self, _url: str, _output_dir: Path):
+        raise InstagramAuthError(
+            "Manual verification required via Instagram UFAC web bloks checkpoint"
+        )
+
+    def get_media_info(self, _url: str):
+        return None
+
+
 class _DownloadErrorClient:
     username = "acc_error"
     proxy = None
@@ -1682,6 +1703,37 @@ async def test_leased_auth_challenge_failure_class_rotates_account(monkeypatch, 
     assert downloader.last_provider_metrics.instagram_auth_failures == 1
     assert downloader.last_provider_metrics.failure_class == "auth_challenge"
     assert manager.failures == [("acc_challenge", "auth_challenge")]
+    assert manager.successes == ["acc_ok"]
+
+
+@pytest.mark.asyncio
+async def test_leased_manual_verification_records_hard_account_reason(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
+
+    expected_path = tmp_path / "after-manual-verification.mp4"
+    expected_path.write_bytes(b"video")
+
+    manager = _LeaseManager([_Account("acc_checkpoint"), _Account("acc_ok")])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+
+    clients = {
+        "acc_checkpoint": _ManualVerificationClient(),
+        "acc_ok": _SuccessDownloadClient(expected_path, {"title": "ok", "duration": 10}),
+    }
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.InstagramClient",
+        lambda **kwargs: clients[kwargs["username"]],
+    )
+
+    info = await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    assert info.file_path == expected_path
+    assert downloader.last_provider_metrics.instagram_auth_failures == 1
+    assert downloader.last_provider_metrics.failure_class == "auth_challenge"
+    assert manager.failures == [("acc_checkpoint", "manual_verification")]
     assert manager.successes == ["acc_ok"]
 
 
