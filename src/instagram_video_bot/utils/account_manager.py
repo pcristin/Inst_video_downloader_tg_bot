@@ -364,9 +364,10 @@ class AccountManager:
             account.last_failure_reason = reason
             account.last_failure_at = now
 
-            threshold_reached = (
-                hard_failure and not account.is_banned
-            ) or previous_failures < threshold <= account.consecutive_failures
+            threshold_reached = not account.is_banned and (
+                hard_failure
+                or previous_failures < threshold <= account.consecutive_failures
+            )
             if threshold_reached:
                 account.is_banned = True
                 account.ban_reason = (

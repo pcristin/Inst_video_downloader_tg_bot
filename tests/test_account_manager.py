@@ -122,6 +122,27 @@ def test_hard_account_failure_quarantines_after_prior_soft_failure(monkeypatch, 
     assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
 
 
+def test_failure_after_hard_quarantine_preserves_original_ban(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_LOW_WATERMARK", 0)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    account = manager.accounts[0]
+
+    hard_event = manager.record_account_failure(account, "manual_verification")
+    repeated_event = manager.record_account_failure(account, "timeout")
+
+    assert hard_event.threshold_reached is True
+    assert repeated_event.consecutive_failures == 2
+    assert repeated_event.threshold_reached is False
+    assert account.is_banned is True
+    assert account.ban_reason == "hard_failure:manual_verification"
+    assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
+
+
 def test_account_success_resets_failure_counter(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)
