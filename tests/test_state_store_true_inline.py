@@ -432,3 +432,104 @@ def test_cached_inline_media_round_trips(tmp_path):
     cached = store.get_inline_cached_media("instagram:https://www.instagram.com/reel/abc/")
     assert cached is not None
     assert cached["media_items"][0]["file_id"] == "video-file-id"
+
+
+def test_user_rate_limit_uses_sliding_window(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+
+    first = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now)
+    second = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=10))
+    third = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=20))
+    after_window = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=61))
+
+    assert first["allowed"] is True
+    assert second["allowed"] is True
+    assert third["allowed"] is False
+    assert third["retry_after_seconds"] == 40
+    assert after_window["allowed"] is True
+
+
+def test_inline_promo_success_count_is_lifetime_per_user(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+
+    store.record_inline_promo_success(1001)
+    store.record_inline_promo_success(1001)
+    store.record_inline_promo_success(1002)
+
+    assert store.get_inline_promo_success_count(1001) == 2
+    assert store.get_inline_promo_success_count(1002) == 1
+    assert store.get_inline_promo_success_count(9999) == 0
+
+
+def test_subscription_delivery_stats_count_period_events(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    started_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    expires_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s1",
+        access_kind="subscription",
+        status="success",
+        occurred_at=started_at + timedelta(days=1),
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s2",
+        access_kind="subscription",
+        status="failed",
+        occurred_at=started_at + timedelta(days=2),
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s3",
+        access_kind="subscription",
+        status="failed",
+        occurred_at=expires_at + timedelta(seconds=1),
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s4",
+        access_kind="promo",
+        status="failed",
+        occurred_at=started_at + timedelta(days=3),
+    )
+
+    stats = store.get_subscription_delivery_stats(
+        user_id=1001,
+        started_at=started_at,
+        expires_at=expires_at,
+    )
+
+    assert stats == {"success": 1, "failed": 1, "attempts": 2, "failure_rate": 0.5}
+
+
+def test_expired_unchecked_subscriptions_are_listed_and_marked(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=now - timedelta(seconds=1),
+        telegram_payment_charge_id="charge-1",
+        provider_payment_charge_id="provider-1",
+        total_amount=100,
+        started_at=now - timedelta(days=30),
+    )
+    store.record_inline_subscription(
+        user_id=1002,
+        expires_at=now + timedelta(days=1),
+        telegram_payment_charge_id="charge-2",
+        provider_payment_charge_id="provider-2",
+        total_amount=100,
+        started_at=now - timedelta(days=29),
+    )
+
+    expired = store.list_expired_unchecked_inline_subscriptions(now=now)
+    store.mark_inline_subscription_auto_refunded(1001, reason="failure_rate:0.50")
+
+    assert [row["user_id"] for row in expired] == [1001]
+    subscription = store.get_inline_subscription(1001)
+    assert subscription["status"] == "auto_refunded"
+    assert subscription["refund_reason"] == "failure_rate:0.50"
+    assert subscription["auto_refund_checked_at"] is not None
