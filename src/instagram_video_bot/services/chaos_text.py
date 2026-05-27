@@ -226,6 +226,10 @@ class ChaosText:
         return "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID."
 
     @staticmethod
+    def inline_payment_unavailable() -> str:
+        return "Inline payments are temporarily unavailable. Try again later."
+
+    @staticmethod
     def inline_delivery_failed() -> str:
         return "Inline delivery failed. If this was a one-time payment, it was refunded."
 

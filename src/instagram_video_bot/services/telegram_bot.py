@@ -634,6 +634,27 @@ class TelegramBot:
         runtime = self.state_store.get_inline_runtime_settings()
         session_token = generate_session_token()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        subscription_payload = build_subscription_payload(user_id=query.from_user.id, session_token=session_token)
+        try:
+            subscription_invoice_link = await context.bot.create_invoice_link(
+                title="Inline Mode",
+                description="Monthly access to send downloaded media into any chat.",
+                payload=subscription_payload,
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
+                subscription_period=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
+            )
+        except TelegramError:
+            logger.exception("Failed to create inline subscription invoice link")
+            result = InlineQueryResultArticle(
+                id="inline-payment-unavailable",
+                title="Inline payments are temporarily unavailable",
+                input_message_content=InputTextMessageContent(ChaosText.inline_payment_unavailable()),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
         self.state_store.create_inline_session(
             session_token=session_token,
             user_id=query.from_user.id,
@@ -642,16 +663,6 @@ class TelegramBot:
             provider=parsed_link.provider,
             provider_label=parsed_link.provider_label,
             expires_at=expires_at,
-        )
-        subscription_payload = build_subscription_payload(user_id=query.from_user.id, session_token=session_token)
-        subscription_invoice_link = await context.bot.create_invoice_link(
-            title="Inline Mode",
-            description="Monthly access to send downloaded media into any chat.",
-            payload=subscription_payload,
-            provider_token="",
-            currency="XTR",
-            prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
-            subscription_period=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
         )
         results = [
             InlineQueryResultArticle(

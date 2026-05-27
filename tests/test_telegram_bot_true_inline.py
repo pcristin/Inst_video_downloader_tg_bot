@@ -129,6 +129,11 @@ class _FakeInvoiceLinkBot:
         return "https://t.me/invoice-link"
 
 
+class _FailingInvoiceLinkBot:
+    async def create_invoice_link(self, **kwargs):
+        raise TelegramError("invoice link failed")
+
+
 @pytest.mark.asyncio
 async def test_paid_user_inline_query_returns_placeholder_with_keyboard(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
@@ -258,6 +263,25 @@ async def test_paid_subscription_inline_result_uses_subscription_invoice_link(mo
     assert fake_bot.invoice_link_calls[0]["currency"] == "XTR"
     assert fake_bot.invoice_link_calls[0]["prices"][0].amount == 5
     assert result.reply_markup.inline_keyboard[0][0].url == "https://t.me/invoice-link"
+
+
+@pytest.mark.asyncio
+async def test_paid_subscription_invoice_link_failure_returns_safe_inline_result(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+
+    await bot.inline_query_handler(
+        _FakeUpdate(inline_query=query),
+        SimpleNamespace(bot=_FailingInvoiceLinkBot()),
+    )
+
+    result = query.answers[0]["results"][0]
+    session_count = store._conn.execute("SELECT COUNT(*) AS count FROM inline_sessions").fetchone()["count"]
+    assert result.id == "inline-payment-unavailable"
+    assert result.title == "Inline payments are temporarily unavailable"
+    assert session_count == 0
 
 
 @pytest.mark.asyncio
