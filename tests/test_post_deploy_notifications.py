@@ -5,8 +5,10 @@ from src.instagram_video_bot.services.post_deploy_notifications import (
     INLINE_MODE_ANNOUNCEMENT_KEY,
     INLINE_PROMO_REFUND_ANNOUNCEMENT_KEY,
     INLINE_PROMO_REFUND_ANNOUNCEMENT_TEXT,
+    build_bot_migration_announcement_key,
     send_inline_mode_announcement_once,
     send_inline_promo_refund_announcement_once,
+    send_bot_migration_announcement_once,
 )
 from src.instagram_video_bot.services.state_store import StateStore
 
@@ -233,3 +235,43 @@ async def test_promo_refund_announcement_sends_once_with_promo_copy(tmp_path):
     assert len(fake_bot.messages) == 1
     assert "first 3 successful inline downloads are free" in INLINE_PROMO_REFUND_ANNOUNCEMENT_TEXT
     assert store.notification_was_sent(INLINE_PROMO_REFUND_ANNOUNCEMENT_KEY, 1001) is True
+
+
+@pytest.mark.asyncio
+async def test_bot_migration_announcement_sends_once_with_target_username(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_job("job-1", 77, "https://x.com/a/status/1", "twitter", "queued")
+    store.create_request(
+        "req-1",
+        "job-1",
+        77,
+        1001,
+        "@alice",
+        "twitter",
+        "https://x.com/a/status/1",
+        "completed",
+    )
+    fake_bot = _FakeBot()
+
+    first = await send_bot_migration_announcement_once(
+        fake_bot,
+        store,
+        target_username="igclipbot",
+        pause_seconds=0,
+    )
+    second = await send_bot_migration_announcement_once(
+        fake_bot,
+        store,
+        target_username="@igclipbot",
+        pause_seconds=0,
+    )
+
+    assert first == {"sent": 1, "failed": 0, "skipped": 0}
+    assert second == {"sent": 0, "failed": 0, "skipped": 1}
+    assert len(fake_bot.messages) == 1
+    assert "@igclipbot" in fake_bot.messages[0]["text"]
+    assert "https://t.me/igclipbot" in fake_bot.messages[0]["text"]
+    assert store.notification_was_sent(
+        build_bot_migration_announcement_key("igclipbot"),
+        1001,
+    ) is True

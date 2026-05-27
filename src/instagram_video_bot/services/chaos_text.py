@@ -40,6 +40,11 @@ class ChaosText:
         )
 
     @staticmethod
+    def bot_migration_redirect(target_username: str) -> str:
+        username = target_username.strip().removeprefix("@")
+        return f"Мы переехали в @{username}.\nОткрыть нового бота: https://t.me/{username}"
+
+    @staticmethod
     def admin_help() -> str:
         return (
             "Admin commands:\n"

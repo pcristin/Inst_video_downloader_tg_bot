@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest
 
+from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
 from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
@@ -358,6 +359,22 @@ async def test_handle_message_rejects_user_over_rate_limit(monkeypatch, tmp_path
     await asyncio.gather(*tasks, return_exceptions=True)
     assert first_update.message.replies == ["Принял Twitter/X. Скоро начну скачивать."]
     assert second_update.message.replies == ["Слишком много запросов. Попробуй снова примерно через 10 мин."]
+
+
+@pytest.mark.asyncio
+async def test_legacy_redirect_mode_replies_without_queueing(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "BOT_LEGACY_REDIRECT_MODE", True)
+    monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", "igclipbot")
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    monkeypatch.setattr(telegram_bot.job_manager, "submit", lambda **_kwargs: pytest.fail("submit called"))
+    update = _FakeUpdate("https://x.com/example/status/1", user_id=1001)
+    context = _FakeContext(_FakeBot())
+
+    await telegram_bot.handle_message(update, context)
+
+    assert update.message.replies == [
+        "Мы переехали в @igclipbot.\nОткрыть нового бота: https://t.me/igclipbot"
+    ]
 
 
 @pytest.mark.asyncio
