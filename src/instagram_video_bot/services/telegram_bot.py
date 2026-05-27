@@ -1774,14 +1774,24 @@ class TelegramBot:
         if not settings.BOT_TOKEN:
             raise ValueError("BOT_TOKEN is not set in environment variables")
 
-        self.application = (
+        builder = (
             ApplicationBuilder()
             .token(settings.BOT_TOKEN)
             .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
             .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
             .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
-            .build()
         )
+
+        if settings.INLINE_MODE_ENABLED:
+            from .post_deploy_notifications import send_inline_mode_announcement_once
+
+            async def _post_init(application: Application) -> None:
+                result = await send_inline_mode_announcement_once(application.bot, self.state_store)
+                logger.info("Inline mode announcement result: %s", result)
+
+            builder = builder.post_init(_post_init)
+
+        self.application = builder.build()
 
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))

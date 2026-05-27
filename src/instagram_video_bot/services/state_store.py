@@ -178,6 +178,16 @@ class StateStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS user_notifications (
+                    notification_key TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_class TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (notification_key, user_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_chat_status
                     ON jobs (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_requests_chat_status
@@ -186,6 +196,8 @@ class StateStore:
                     ON recent_results (chat_id, normalized_url);
                 CREATE INDEX IF NOT EXISTS idx_perf_chat_finished
                     ON performance_metrics (chat_id, finished_at);
+                CREATE INDEX IF NOT EXISTS idx_user_notifications_key_status
+                    ON user_notifications (notification_key, status);
                 """
             )
             existing_columns = {
@@ -493,6 +505,76 @@ class StateStore:
                 WHERE request_id = ?
                 """,
                 (status, 1 if cache_hit else 0, now, request_id),
+            )
+
+    def list_distinct_request_user_ids(self) -> list[int]:
+        """Return users who have submitted at least one request."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT user_id
+                FROM request_events
+                ORDER BY user_id
+                """
+            ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    def notification_was_attempted(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification has already been attempted for the user."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def notification_was_sent(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification was sent successfully."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                  AND status = 'sent'
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def record_user_notification(
+        self,
+        *,
+        notification_key: str,
+        user_id: int,
+        status: str,
+        error_class: str | None = None,
+    ) -> None:
+        """Record a one-time notification attempt."""
+
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO user_notifications (
+                    notification_key, user_id, status, error_class, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(notification_key, user_id) DO UPDATE SET
+                    status = excluded.status,
+                    error_class = excluded.error_class,
+                    updated_at = excluded.updated_at
+                """,
+                (notification_key, user_id, status, error_class, now, now),
             )
 
     def start_job_metrics(
