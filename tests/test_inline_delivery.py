@@ -1,3 +1,4 @@
+import datetime as dtm
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -86,6 +87,61 @@ def test_build_inline_input_media_for_video():
     assert media.caption == "Caption"
     if hasattr(media, "supports_streaming"):
         assert media.supports_streaming is True
+
+
+@pytest.mark.asyncio
+async def test_upload_first_video_to_storage_preserves_portrait_metadata(tmp_path):
+    media_file = tmp_path / "portrait.mp4"
+    media_file.write_bytes(b"video")
+    info = VideoInfo(
+        file_path=media_file,
+        title="Title",
+        media_items=[
+            MediaItem(
+                file_path=media_file,
+                media_type="video",
+                caption="Caption",
+                duration=11.6,
+                width=720,
+                height=1280,
+            )
+        ],
+        primary_media_type="video",
+    )
+
+    bot = _FakeBot()
+
+    item = await upload_first_media_to_storage(bot, storage_chat_id=-100, video_info=info)
+
+    assert item == InlineCachedMediaItem(
+        media_type="video",
+        file_id="video-file-id",
+        caption="Caption",
+        duration=11.6,
+        width=720,
+        height=1280,
+    )
+    assert bot.video_calls[0]["width"] == 720
+    assert bot.video_calls[0]["height"] == 1280
+    assert bot.video_calls[0]["duration"] == dtm.timedelta(seconds=12)
+
+
+def test_build_inline_input_media_for_video_preserves_portrait_metadata():
+    item = InlineCachedMediaItem(
+        media_type="video",
+        file_id="video-file-id",
+        caption="Caption",
+        duration=11.6,
+        width=720,
+        height=1280,
+    )
+
+    media = build_inline_input_media(item)
+
+    assert isinstance(media, InputMediaVideo)
+    assert media.width == 720
+    assert media.height == 1280
+    assert media._duration == dtm.timedelta(seconds=12)
 
 
 def test_build_inline_input_media_rejects_unknown_media_type():

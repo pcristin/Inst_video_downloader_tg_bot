@@ -570,6 +570,79 @@ async def test_inline_delivery_removes_download_files_after_storage_upload(monke
 
 
 @pytest.mark.asyncio
+async def test_inline_delivery_caches_and_edits_video_portrait_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "portrait.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[
+                    MediaItem(
+                        file_path=media_file,
+                        media_type="video",
+                        caption="Caption",
+                        duration=11.6,
+                        width=720,
+                        height=1280,
+                    )
+                ],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(
+            media_type="video",
+            file_id="video-file-id",
+            caption="Caption",
+            duration=11.6,
+            width=720,
+            height=1280,
+        )
+
+    fake_telegram_bot = SimpleNamespace(edited_media=None)
+
+    async def edit_message_media(**kwargs):
+        fake_telegram_bot.edited_media = kwargs
+
+    fake_telegram_bot.edit_message_media = edit_message_media
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=fake_telegram_bot),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    cached = store.get_inline_cached_media("instagram:https://www.instagram.com/reel/abc/")
+    assert cached["media_items"][0]["width"] == 720
+    assert cached["media_items"][0]["height"] == 1280
+    assert cached["media_items"][0]["duration"] == 11.6
+
+    media = fake_telegram_bot.edited_media["media"]
+    assert media.width == 720
+    assert media.height == 1280
+    assert media._duration == timedelta(seconds=12)
+
+
+@pytest.mark.asyncio
 async def test_successful_promo_inline_delivery_consumes_lifetime_free_credit(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
