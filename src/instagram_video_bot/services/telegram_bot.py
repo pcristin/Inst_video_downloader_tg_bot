@@ -43,6 +43,7 @@ from .chaos_text import ChaosText, TextContext
 from .download_models import ProviderExecutionMetrics
 from .inline_access import (
     build_inline_result_id,
+    build_one_time_entitlement_result_id,
     build_one_time_payload,
     build_subscription_payload,
     generate_session_token,
@@ -475,9 +476,34 @@ class TelegramBot:
 
         parsed_link = parsed_links[0]
         if settings.INLINE_SUBSCRIPTION_REQUIRED and not self.state_store.user_has_inline_access(query.from_user.id):
+            self.state_store.release_stale_inline_one_time_claims(
+                older_than=datetime.now(timezone.utc)
+                - timedelta(seconds=settings.INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS)
+            )
+            one_time_payment = self.state_store.get_available_inline_one_time_payment(
+                user_id=query.from_user.id,
+                provider=parsed_link.provider,
+                normalized_url=parsed_link.normalized_url,
+            )
+            if one_time_payment is not None:
+                await self._answer_inline_delivery_option(
+                    query,
+                    parsed_link,
+                    one_time_entitlement=True,
+                )
+                return
             await self._answer_paid_inline_options(query, parsed_link)
             return
 
+        await self._answer_inline_delivery_option(query, parsed_link, one_time_entitlement=False)
+
+    async def _answer_inline_delivery_option(
+        self,
+        query: Any,
+        parsed_link: ParsedRequestLink,
+        *,
+        one_time_entitlement: bool,
+    ) -> None:
         session_token = generate_session_token()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
         self.state_store.create_inline_session(
@@ -489,15 +515,21 @@ class TelegramBot:
             provider_label=parsed_link.provider_label,
             expires_at=expires_at,
         )
+        result_id = (
+            build_one_time_entitlement_result_id(session_token)
+            if one_time_entitlement
+            else build_inline_result_id(session_token)
+        )
+        callback_prefix = "inline_once" if one_time_entitlement else "inline"
         result = InlineQueryResultArticle(
-            id=build_inline_result_id(session_token),
+            id=result_id,
             title="Send media here",
             description=parsed_link.provider_label,
             input_message_content=InputTextMessageContent(
                 ChaosText.inline_preparing(parsed_link.provider_label)
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Preparing", callback_data=f"inline:{session_token}")]]
+                [[InlineKeyboardButton("Preparing", callback_data=f"{callback_prefix}:{session_token}")]]
             ),
         )
         await query.answer([result], cache_time=0, is_personal=True)
@@ -512,11 +544,6 @@ class TelegramBot:
         if not session_token:
             return
         if result_kind == "paid":
-            self._attach_paid_inline_message(
-                session_token,
-                user_id=chosen.from_user.id,
-                inline_message_id=chosen.inline_message_id,
-            )
             return
         claim_status = self._claim_inline_delivery_session(
             session_token,
@@ -525,7 +552,26 @@ class TelegramBot:
         )
         if claim_status != "claimed":
             return
-        self._schedule_inline_delivery(context, session_token=session_token, one_time_payment_id=None)
+        one_time_payment_id = None
+        if result_kind == "one_time":
+            one_time_payment_id = self._claim_one_time_payment_for_session(
+                session_token,
+                user_id=chosen.from_user.id,
+            )
+            if one_time_payment_id is None:
+                self._inline_delivery_session_tokens.discard(session_token)
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=chosen.inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+                return
+        self._schedule_inline_delivery(
+            context,
+            session_token=session_token,
+            one_time_payment_id=one_time_payment_id,
+        )
 
     async def inline_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Fallback: user taps the inline keyboard if chosen feedback did not start delivery."""
@@ -533,7 +579,9 @@ class TelegramBot:
         query = update.callback_query
         if not query or not query.inline_message_id or not query.data or not query.from_user:
             return
-        session_token = query.data.removeprefix("inline:")
+        result_kind, session_token = self._parse_chosen_inline_session_token(query.data)
+        if not session_token or result_kind == "paid":
+            return
         claim_status = self._claim_inline_delivery_session(
             session_token,
             user_id=query.from_user.id,
@@ -546,7 +594,26 @@ class TelegramBot:
             await query.answer("Already preparing media.")
             return
         await query.answer("Preparing media.")
-        self._schedule_inline_delivery(context, session_token=session_token, one_time_payment_id=None)
+        one_time_payment_id = None
+        if result_kind == "one_time":
+            one_time_payment_id = self._claim_one_time_payment_for_session(
+                session_token,
+                user_id=query.from_user.id,
+            )
+            if one_time_payment_id is None:
+                self._inline_delivery_session_tokens.discard(session_token)
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=query.inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+                return
+        self._schedule_inline_delivery(
+            context,
+            session_token=session_token,
+            one_time_payment_id=one_time_payment_id,
+        )
 
     async def _answer_paid_inline_options(self, query: Any, parsed_link: ParsedRequestLink) -> None:
         runtime = self.state_store.get_inline_runtime_settings()
@@ -644,21 +711,6 @@ class TelegramBot:
                 provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", "") or "",
                 total_amount=payment.total_amount,
             )
-            session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
-            if (
-                session
-                and session.get("inline_message_id")
-                and self._claim_attached_inline_delivery_session(
-                    payload.session_token,
-                    user_id=payload.user_id,
-                )
-                == "claimed"
-            ):
-                await self._deliver_inline_session(
-                    context,
-                    session_token=payload.session_token,
-                    one_time_payment_id=None,
-                )
             return
 
         if payload.kind != "one_time":
@@ -668,13 +720,15 @@ class TelegramBot:
         )
         if existing_payment is not None:
             return
+        session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
         payment_id = self.state_store.record_inline_one_time_payment(
             user_id=payload.user_id,
             session_token=payload.session_token,
             telegram_payment_charge_id=payment.telegram_payment_charge_id,
             total_amount=payment.total_amount,
+            provider=str(session["provider"]) if session else None,
+            normalized_url=str(session["normalized_url"]) if session else None,
         )
-        session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
         if session is None or self._inline_session_is_expired(session):
             await self._refund_one_time_payment(
                 context,
@@ -683,31 +737,7 @@ class TelegramBot:
                 reason="inline_session_expired",
             )
             return
-        if not session.get("inline_message_id"):
-            await self._refund_one_time_payment(
-                context,
-                payment_id=payment_id,
-                user_id=payload.user_id,
-                reason="inline_message_missing",
-            )
-            return
-        claim_status = self._claim_attached_inline_delivery_session(
-            payload.session_token,
-            user_id=payload.user_id,
-        )
-        if claim_status != "claimed":
-            await self._refund_one_time_payment(
-                context,
-                payment_id=payment_id,
-                user_id=payload.user_id,
-                reason=f"inline_delivery_{claim_status}",
-            )
-            return
-        await self._deliver_inline_session(
-            context,
-            session_token=payload.session_token,
-            one_time_payment_id=payment_id,
-        )
+        return
 
     @staticmethod
     def _subscription_expires_at(payment: Any) -> datetime:
@@ -722,6 +752,10 @@ class TelegramBot:
 
     @staticmethod
     def _parse_chosen_inline_session_token(result_id: str) -> tuple[str | None, str | None]:
+        one_time_prefix = "inline_once:"
+        if result_id.startswith(one_time_prefix):
+            token = result_id.removeprefix(one_time_prefix).strip()
+            return ("one_time", token) if token else (None, None)
         session_token = parse_inline_result_id(result_id)
         if session_token:
             return "free", session_token
@@ -765,39 +799,22 @@ class TelegramBot:
         self.state_store.mark_inline_session_status(session_token, "delivering")
         return "claimed"
 
-    def _claim_attached_inline_delivery_session(
-        self,
-        session_token: str,
-        *,
-        user_id: int,
-    ) -> str:
+    def _claim_one_time_payment_for_session(self, session_token: str, *, user_id: int) -> str | None:
         session = self.state_store.get_inline_session(session_token, user_id=user_id)
-        if session is None or self._inline_session_is_expired(session):
-            return "expired"
-        if not session.get("inline_message_id"):
-            return "missing"
-        if session.get("status") != "chosen" or session_token in self._inline_delivery_session_tokens:
-            return "duplicate"
-        self._inline_delivery_session_tokens.add(session_token)
-        self.state_store.mark_inline_session_status(session_token, "delivering")
-        return "claimed"
-
-    def _attach_paid_inline_message(
-        self,
-        session_token: str,
-        *,
-        user_id: int,
-        inline_message_id: str,
-    ) -> None:
-        session = self.state_store.get_inline_session(session_token, user_id=user_id)
-        if (
-            session is None
-            or self._inline_session_is_expired(session)
-            or session.get("inline_message_id")
-            or session.get("status") != "created"
-        ):
-            return
-        self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
+        if session is None:
+            return None
+        payment = self.state_store.get_available_inline_one_time_payment(
+            user_id=user_id,
+            provider=str(session["provider"]),
+            normalized_url=str(session["normalized_url"]),
+        )
+        if payment is None:
+            return None
+        payment_id = str(payment["payment_id"])
+        request_id = f"inline:{session_token}"
+        if not self.state_store.claim_inline_one_time_payment(payment_id, request_id=request_id):
+            return None
+        return payment_id
 
     def _schedule_inline_delivery(
         self,
@@ -1815,7 +1832,9 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("admin_global_status", self.admin_global_status_command))
         self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
         self.application.add_handler(ChosenInlineResultHandler(self.chosen_inline_result_handler))
-        self.application.add_handler(CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline:[A-Za-z0-9_-]+$"))
+        self.application.add_handler(
+            CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$")
+        )
         self.application.add_handler(PreCheckoutQueryHandler(self.pre_checkout_handler))
         self.application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler))
         self.application.add_handler(CommandHandler("inline_whitelist", self.inline_whitelist_command))

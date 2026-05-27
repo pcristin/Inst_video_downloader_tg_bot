@@ -336,6 +336,8 @@ uv run python manage_accounts.py status
 
 Inline mode sends media into the chat where the inline result is selected. Directly pasting links into a bot chat remains free.
 
+For users who do not already have inline access, the first inline selection is a Stars invoice. After the payment succeeds, they run the same inline query again and select "Send media here"; that second result is the one the bot edits into the requested media. One-time payments grant that retry only for the paid link, and are refunded if delivery for that paid link fails.
+
 Required setup:
 
 1. In BotFather, run `/setinline`.
@@ -346,6 +348,7 @@ Required setup:
 6. Grant free inline access with `/inline_whitelist add <telegram_id>` or forward a visible-origin user message to the bot as owner.
 
 Telegram cannot upload a new file while editing an inline message, so the bot first uploads media to the storage chat, then edits the selected inline message using the resulting `file_id`.
+`INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS` controls when a paid one-time link that was claimed but never finished becomes selectable again; active deliveries are not released by this cleanup.
 
 ## Troubleshooting
 

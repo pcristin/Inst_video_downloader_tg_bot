@@ -94,7 +94,10 @@ def test_run_registers_global_error_handler(monkeypatch):
     }
     for callback_name, class_name in inline_handler_contract:
         assert type(handlers_by_callback_name[callback_name]).__name__ == class_name
-    assert handlers_by_callback_name["inline_callback_handler"].pattern.pattern == r"^inline:[A-Za-z0-9_-]+$"
+    assert (
+        handlers_by_callback_name["inline_callback_handler"].pattern.pattern
+        == r"^inline(?:_once)?:[A-Za-z0-9_-]+$"
+    )
     assert type(handlers_by_callback_name["successful_payment_handler"].filters).__name__ == "SuccessfulPayment"
     assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset({"inline_whitelist"})
     assert handlers_by_callback_name["inline_price_command"].commands == frozenset({"inline_price"})

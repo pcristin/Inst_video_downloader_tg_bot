@@ -169,6 +169,171 @@ def test_one_time_payment_can_be_found_by_telegram_charge_id(tmp_path):
     assert store.get_inline_one_time_payment_by_charge_id("missing") is None
 
 
+def test_one_time_payment_can_be_claimed_as_link_entitlement(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="invoice-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+
+    payment = store.get_available_inline_one_time_payment(
+        user_id=1001,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/abc/",
+    )
+    claimed = store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
+    duplicate_claimed = store.claim_inline_one_time_payment(payment_id, request_id="inline:other")
+
+    assert payment["payment_id"] == payment_id
+    assert claimed is True
+    assert duplicate_claimed is False
+    assert store.get_inline_one_time_payment(payment_id)["request_id"] == "inline:delivery-session"
+    assert (
+        store.get_available_inline_one_time_payment(
+            user_id=1001,
+            provider="instagram",
+            normalized_url="https://www.instagram.com/reel/abc/",
+        )
+        is None
+    )
+
+
+def test_stale_one_time_payment_claim_becomes_available_again(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="invoice-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+    store.claim_inline_one_time_payment(payment_id, request_id="inline:lost-session")
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE inline_one_time_payments SET updated_at = ? WHERE payment_id = ?",
+            (stale_time.isoformat(), payment_id),
+        )
+
+    released = store.release_stale_inline_one_time_claims(
+        older_than=datetime.now(timezone.utc) - timedelta(hours=1)
+    )
+
+    assert released == 1
+    assert store.get_inline_one_time_payment(payment_id)["request_id"] is None
+
+
+def test_stale_one_time_payment_claim_keeps_active_delivery_claimed(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="invoice-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.create_inline_session(
+        session_token="delivery-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+    store.attach_inline_message("delivery-session", inline_message_id="inline-msg")
+    store.mark_inline_session_status("delivery-session", "delivering")
+    store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE inline_one_time_payments SET updated_at = ? WHERE payment_id = ?",
+            (stale_time.isoformat(), payment_id),
+        )
+
+    released = store.release_stale_inline_one_time_claims(
+        older_than=datetime.now(timezone.utc) - timedelta(hours=1)
+    )
+
+    assert released == 0
+    assert store.get_inline_one_time_payment(payment_id)["request_id"] == "inline:delivery-session"
+
+
+def test_stale_one_time_payment_claim_releases_abandoned_delivery_session(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="invoice-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.create_inline_session(
+        session_token="delivery-session",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+    store.attach_inline_message("delivery-session", inline_message_id="inline-msg")
+    store.mark_inline_session_status("delivery-session", "delivering")
+    store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
+    stale_time = datetime.now(timezone.utc) - timedelta(hours=8)
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE inline_one_time_payments SET updated_at = ? WHERE payment_id = ?",
+            (stale_time.isoformat(), payment_id),
+        )
+        store._conn.execute(
+            "UPDATE inline_sessions SET updated_at = ? WHERE session_token = ?",
+            (stale_time.isoformat(), "delivery-session"),
+        )
+
+    released = store.release_stale_inline_one_time_claims(
+        older_than=datetime.now(timezone.utc) - timedelta(hours=6)
+    )
+
+    assert released == 1
+    assert store.get_inline_one_time_payment(payment_id)["request_id"] is None
+
+
 def test_refunded_one_time_payment_cannot_later_be_delivered(tmp_path):
     store = StateStore(tmp_path / "state.db")
     payment_id = store.record_inline_one_time_payment(

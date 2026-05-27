@@ -162,6 +162,8 @@ class StateStore:
                     payment_id TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
                     session_token TEXT NOT NULL,
+                    provider TEXT,
+                    normalized_url TEXT,
                     telegram_payment_charge_id TEXT NOT NULL,
                     total_amount INTEGER NOT NULL,
                     status TEXT NOT NULL,
@@ -249,6 +251,14 @@ class StateStore:
                 self._conn.execute(
                     "ALTER TABLE performance_metrics ADD COLUMN instagram_metadata_reused INTEGER NOT NULL DEFAULT 0"
                 )
+            one_time_payment_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(inline_one_time_payments)").fetchall()
+            }
+            if "provider" not in one_time_payment_columns:
+                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT")
+            if "normalized_url" not in one_time_payment_columns:
+                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT")
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
         with self._lock, self._conn:
@@ -1082,6 +1092,8 @@ class StateStore:
         session_token: str,
         telegram_payment_charge_id: str,
         total_amount: int,
+        provider: str | None = None,
+        normalized_url: str | None = None,
     ) -> str:
         payment_id = uuid.uuid4().hex
         now = _utc_now().isoformat()
@@ -1089,15 +1101,17 @@ class StateStore:
             self._conn.execute(
                 """
                 INSERT INTO inline_one_time_payments (
-                    payment_id, user_id, session_token, telegram_payment_charge_id,
+                    payment_id, user_id, session_token, provider, normalized_url, telegram_payment_charge_id,
                     total_amount, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payment_id,
                     user_id,
                     session_token,
+                    provider,
+                    normalized_url,
                     telegram_payment_charge_id,
                     total_amount,
                     "paid",
@@ -1131,6 +1145,79 @@ class StateStore:
                 (telegram_payment_charge_id,),
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def get_available_inline_one_time_payment(
+        self,
+        *,
+        user_id: int,
+        provider: str,
+        normalized_url: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT p.*
+                FROM inline_one_time_payments p
+                LEFT JOIN inline_sessions s
+                    ON s.session_token = p.session_token
+                WHERE p.user_id = ?
+                  AND p.status = 'paid'
+                  AND p.request_id IS NULL
+                  AND (
+                    (p.provider = ? AND p.normalized_url = ?)
+                    OR (
+                        p.provider IS NULL
+                        AND p.normalized_url IS NULL
+                        AND s.provider = ?
+                        AND s.normalized_url = ?
+                    )
+                  )
+                ORDER BY p.created_at ASC
+                LIMIT 1
+                """,
+                (user_id, provider, normalized_url, provider, normalized_url),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def claim_inline_one_time_payment(self, payment_id: str, *, request_id: str) -> bool:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_one_time_payments
+                SET request_id = ?,
+                    updated_at = ?
+                WHERE payment_id = ?
+                  AND status = 'paid'
+                  AND request_id IS NULL
+                """,
+                (request_id, now, payment_id),
+            )
+        return cursor.rowcount == 1
+
+    def release_stale_inline_one_time_claims(self, *, older_than: datetime) -> int:
+        cutoff = self._normalize_utc_datetime(older_than).isoformat()
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_one_time_payments
+                SET request_id = NULL,
+                    updated_at = ?
+                WHERE status = 'paid'
+                  AND request_id IS NOT NULL
+                  AND updated_at <= ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM inline_sessions s
+                    WHERE s.session_token = substr(inline_one_time_payments.request_id, length('inline:') + 1)
+                      AND s.status = 'delivering'
+                      AND s.updated_at > ?
+                  )
+                """,
+                (now, cutoff, cutoff),
+            )
+        return cursor.rowcount
 
     def mark_inline_one_time_payment_delivered(
         self,

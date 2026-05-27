@@ -8,6 +8,7 @@ import secrets
 SUBSCRIPTION_PREFIX = "inline_sub:v1"
 ONE_TIME_PREFIX = "inline_once:v1"
 INLINE_RESULT_PREFIX = "inline"
+ONE_TIME_ENTITLEMENT_RESULT_PREFIX = "inline_once"
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,10 @@ def generate_session_token() -> str:
 
 def build_inline_result_id(session_token: str) -> str:
     return f"{INLINE_RESULT_PREFIX}:{session_token}"
+
+
+def build_one_time_entitlement_result_id(session_token: str) -> str:
+    return f"{ONE_TIME_ENTITLEMENT_RESULT_PREFIX}:{session_token}"
 
 
 def parse_inline_result_id(result_id: str) -> str | None:

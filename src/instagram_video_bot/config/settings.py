@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     INLINE_ONE_TIME_ENABLED: bool = False
     INLINE_ONE_TIME_STARS: int = 1
     INLINE_SESSION_TTL_SECONDS: int = 15 * 60
+    INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS: int = 6 * 60 * 60
     INLINE_STORAGE_CHAT_ID: Optional[int] = None
 
     # Concurrency and caching
