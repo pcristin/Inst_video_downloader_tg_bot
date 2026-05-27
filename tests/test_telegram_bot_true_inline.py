@@ -702,6 +702,73 @@ async def test_non_owner_inline_onetime_does_not_change_state(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_owner_can_refund_known_inline_subscription(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
+    store = StateStore(tmp_path / "state.db")
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        telegram_payment_charge_id="sub-charge",
+        provider_payment_charge_id="provider-charge",
+        total_amount=100,
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+    message = _FakeMessage("/inline_refund sub-charge")
+
+    await bot.inline_refund_command(
+        _FakeUpdate(message=message, user_id=42),
+        SimpleNamespace(args=["sub-charge"], bot=fake_bot),
+    )
+
+    assert fake_bot.refunds == [{"user_id": 1001, "telegram_payment_charge_id": "sub-charge"}]
+    assert store.get_inline_subscription(1001)["status"] == "refunded"
+    assert message.replies == ["Inline refund sent for user 1001."]
+
+
+@pytest.mark.asyncio
+async def test_owner_can_refund_known_one_time_payment(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
+    store = StateStore(tmp_path / "state.db")
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="s1",
+        telegram_payment_charge_id="once-charge",
+        total_amount=5,
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+    message = _FakeMessage("/inline_refund once-charge")
+
+    await bot.inline_refund_command(
+        _FakeUpdate(message=message, user_id=42),
+        SimpleNamespace(args=["once-charge"], bot=fake_bot),
+    )
+
+    payment = store.get_inline_one_time_payment(payment_id)
+    assert fake_bot.refunds == [{"user_id": 1001, "telegram_payment_charge_id": "once-charge"}]
+    assert payment["status"] == "refunded"
+    assert payment["refund_reason"] == "owner_command"
+    assert message.replies == ["Inline refund sent for user 1001."]
+
+
+@pytest.mark.asyncio
+async def test_non_owner_inline_refund_does_not_call_telegram(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
+    store = StateStore(tmp_path / "state.db")
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+    message = _FakeMessage("/inline_refund sub-charge 1001")
+
+    await bot.inline_refund_command(
+        _FakeUpdate(message=message, user_id=99),
+        SimpleNamespace(args=["sub-charge", "1001"], bot=fake_bot),
+    )
+
+    assert fake_bot.refunds == []
+
+
+@pytest.mark.asyncio
 async def test_pre_checkout_approves_valid_subscription(tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(subscription_stars=5)

@@ -273,3 +273,23 @@ class ChaosText:
         if runtime["one_time_enabled"]:
             return f"Inline one-time payment: on, {runtime['one_time_stars']} Stars."
         return "Inline one-time payment: off."
+
+    @staticmethod
+    def inline_refund_usage() -> str:
+        return "Usage: /inline_refund <telegram_payment_charge_id> [user_id]"
+
+    @staticmethod
+    def inline_refund_sent(user_id: int) -> str:
+        return f"Inline refund sent for user {user_id}."
+
+    @staticmethod
+    def inline_refund_not_found() -> str:
+        return "Inline refund charge not found. Add user_id to refund an unknown charge."
+
+    @staticmethod
+    def inline_refund_already_refunded() -> str:
+        return "Inline refund was already recorded for this charge."
+
+    @staticmethod
+    def inline_refund_failed() -> str:
+        return "Inline refund failed. Check logs and try again."
