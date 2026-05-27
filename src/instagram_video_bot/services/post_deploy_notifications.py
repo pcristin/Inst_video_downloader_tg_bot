@@ -35,7 +35,7 @@ async def send_inline_mode_announcement_once(
     user_ids = state_store.list_distinct_request_user_ids()
 
     for index, user_id in enumerate(user_ids):
-        if state_store.notification_was_attempted(
+        if state_store.notification_should_skip(
             INLINE_MODE_ANNOUNCEMENT_KEY, user_id
         ):
             skipped += 1
@@ -49,7 +49,7 @@ async def send_inline_mode_announcement_once(
 
         try:
             await bot.send_message(chat_id=user_id, text=INLINE_MODE_ANNOUNCEMENT_TEXT)
-        except (Forbidden, TelegramError) as exc:
+        except Forbidden as exc:
             state_store.record_user_notification(
                 notification_key=INLINE_MODE_ANNOUNCEMENT_KEY,
                 user_id=user_id,
@@ -58,6 +58,19 @@ async def send_inline_mode_announcement_once(
             )
             failed += 1
             logger.info("Inline mode announcement failed for user %s: %s", user_id, exc)
+        except TelegramError as exc:
+            state_store.record_user_notification(
+                notification_key=INLINE_MODE_ANNOUNCEMENT_KEY,
+                user_id=user_id,
+                status="retryable_failed",
+                error_class=exc.__class__.__name__,
+            )
+            failed += 1
+            logger.info(
+                "Inline mode announcement will retry for user %s after Telegram error: %s",
+                user_id,
+                exc,
+            )
         else:
             state_store.record_user_notification(
                 notification_key=INLINE_MODE_ANNOUNCEMENT_KEY,

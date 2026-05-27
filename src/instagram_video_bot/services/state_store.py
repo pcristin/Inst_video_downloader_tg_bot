@@ -15,7 +15,7 @@ from typing import Any
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
-USER_NOTIFICATION_STATUSES = frozenset({"attempted", "sent", "failed"})
+USER_NOTIFICATION_STATUSES = frozenset({"attempted", "sent", "failed", "retryable_failed"})
 
 
 def _utc_now() -> datetime:
@@ -541,6 +541,22 @@ class StateStore:
                 FROM user_notifications
                 WHERE notification_key = ?
                   AND user_id = ?
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def notification_should_skip(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification has a terminal or in-flight attempt."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                  AND status IN ('attempted', 'sent', 'failed')
                 """,
                 (notification_key, user_id),
             ).fetchone()

@@ -175,3 +175,32 @@ async def test_announcement_records_generic_telegram_errors_and_continues(tmp_pa
     assert [message["chat_id"] for message in fake_bot.messages] == [1002]
     assert store.notification_was_attempted(INLINE_MODE_ANNOUNCEMENT_KEY, 1001) is True
     assert store.notification_was_sent(INLINE_MODE_ANNOUNCEMENT_KEY, 1002) is True
+
+
+@pytest.mark.asyncio
+async def test_announcement_retries_generic_telegram_errors_on_later_run(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_job("job-1", 77, "https://x.com/a/status/1", "twitter", "queued")
+    store.create_request(
+        "req-1",
+        "job-1",
+        77,
+        1001,
+        "@alice",
+        "twitter",
+        "https://x.com/a/status/1",
+        "completed",
+    )
+
+    first = await send_inline_mode_announcement_once(
+        _FakeBot(telegram_error_user_ids={1001}),
+        store,
+        pause_seconds=0,
+    )
+    healthy_bot = _FakeBot()
+    second = await send_inline_mode_announcement_once(healthy_bot, store, pause_seconds=0)
+
+    assert first == {"sent": 0, "failed": 1, "skipped": 0}
+    assert second == {"sent": 1, "failed": 0, "skipped": 0}
+    assert [message["chat_id"] for message in healthy_bot.messages] == [1001]
+    assert store.notification_was_sent(INLINE_MODE_ANNOUNCEMENT_KEY, 1001) is True
