@@ -504,8 +504,15 @@ class TelegramBot:
         chosen = update.chosen_inline_result
         if not chosen or not chosen.inline_message_id:
             return
-        session_token = self._parse_chosen_inline_session_token(chosen.result_id)
+        result_kind, session_token = self._parse_chosen_inline_session_token(chosen.result_id)
         if not session_token:
+            return
+        if result_kind == "paid":
+            self._attach_paid_inline_message(
+                session_token,
+                user_id=chosen.from_user.id,
+                inline_message_id=chosen.inline_message_id,
+            )
             return
         claim_status = self._claim_inline_delivery_session(
             session_token,
@@ -677,15 +684,15 @@ class TelegramBot:
         return datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS)
 
     @staticmethod
-    def _parse_chosen_inline_session_token(result_id: str) -> str | None:
+    def _parse_chosen_inline_session_token(result_id: str) -> tuple[str | None, str | None]:
         session_token = parse_inline_result_id(result_id)
         if session_token:
-            return session_token
+            return "free", session_token
         for prefix in ("sub:", "once:"):
             if result_id.startswith(prefix):
                 token = result_id.removeprefix(prefix).strip()
-                return token or None
-        return None
+                return ("paid", token) if token else (None, None)
+        return None, None
 
     @staticmethod
     def _inline_session_is_expired(session: dict[str, Any]) -> bool:
@@ -720,6 +727,23 @@ class TelegramBot:
         self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
         self.state_store.mark_inline_session_status(session_token, "delivering")
         return "claimed"
+
+    def _attach_paid_inline_message(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> None:
+        session = self.state_store.get_inline_session(session_token, user_id=user_id)
+        if (
+            session is None
+            or self._inline_session_is_expired(session)
+            or session.get("inline_message_id")
+            or session.get("status") != "created"
+        ):
+            return
+        self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
 
     def _schedule_inline_delivery(
         self,

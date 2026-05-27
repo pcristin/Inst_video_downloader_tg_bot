@@ -128,7 +128,7 @@ async def test_chosen_inline_result_attaches_inline_message_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_paid_invoice_chosen_inline_result_attaches_inline_message_id(monkeypatch, tmp_path):
+async def test_paid_subscription_chosen_inline_result_attaches_without_scheduling(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
     bot = TelegramBot(state_store=store)
@@ -151,6 +151,64 @@ async def test_paid_invoice_chosen_inline_result_attaches_inline_message_id(monk
     )
 
     assert store.get_inline_session(session_token, user_id=1001)["inline_message_id"] == "inline-msg"
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_paid_one_time_chosen_inline_result_attaches_without_scheduling(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+    paid_result = query.answers[0]["results"][1]
+    session_token = paid_result.id.split(":", 1)[1]
+
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult(paid_result.id, "inline-msg")),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    assert store.get_inline_session(session_token, user_id=1001)["inline_message_id"] == "inline-msg"
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_free_chosen_inline_result_still_schedules_delivery(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=expires_at,
+    )
+    bot = TelegramBot(state_store=store)
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult("inline:s1", "inline-msg")),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    assert store.get_inline_session("s1", user_id=1001)["inline_message_id"] == "inline-msg"
     assert len(scheduled) == 1
 
 
