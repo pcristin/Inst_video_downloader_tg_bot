@@ -5,26 +5,58 @@ from __future__ import annotations
 import asyncio
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import datetime as dtm
 import logging
 from pathlib import Path
+import shutil
 import time
 from typing import Any, List, Optional
 
-from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputInvoiceMessageContent,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputTextMessageContent,
+    LabeledPrice,
+    Message,
+    Update,
+)
 from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
+    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
 from .download_models import ProviderExecutionMetrics
+from .inline_access import (
+    build_inline_result_id,
+    build_one_time_entitlement_result_id,
+    build_one_time_payload,
+    build_subscription_payload,
+    generate_session_token,
+    parse_inline_payment_payload,
+    parse_inline_result_id,
+    validate_star_amount,
+)
+from .inline_delivery import (
+    InlineCachedMediaItem,
+    build_inline_input_media,
+    upload_first_media_to_storage,
+)
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
@@ -64,21 +96,24 @@ class TelegramBot:
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
         self.request_contexts: dict[str, RequestContext] = {}
+        self._inline_delivery_session_tokens: set[str] = set()
         self.started_at = time.time()
         self._purge_expired_cache()
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages by queueing supported provider links."""
-        if not update.message or not update.message.text or not update.effective_chat or not update.effective_user:
+        if not update.message or not update.effective_chat or not update.effective_user:
             return
 
         self._purge_expired_cache()
-        message_text = update.message.text
+        message_text = update.message.text or ""
         extracted_links = RequestParser.extract_supported_links(
             message_text,
             limit=settings.MAX_LINKS_PER_MESSAGE,
         )
         if not extracted_links:
+            if self._message_is_from_owner(update) and await self._whitelist_forwarded_visible_user(update):
+                return
             return
 
         group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
@@ -349,6 +384,623 @@ class TelegramBot:
             f"- Последние ошибки:\n{failure_lines}\n\n"
             f"{self._format_performance_summary(performance)}"
         )
+
+    async def inline_whitelist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage owner-controlled true-inline whitelist."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        action = args[0].lower() if args else ""
+        if action == "list":
+            users = self.state_store.list_inline_whitelist_users()
+            await update.message.reply_text(ChaosText.inline_whitelist_list(users))
+            return
+        if action not in {"add", "remove"} or len(args) != 2:
+            await update.message.reply_text(ChaosText.inline_whitelist_usage())
+            return
+        user_id = self._parse_positive_int_arg(args[1])
+        if user_id is None:
+            await update.message.reply_text(ChaosText.inline_whitelist_usage())
+            return
+        if action == "add":
+            self.state_store.add_inline_whitelist_user(
+                user_id,
+                added_by_user_id=update.effective_user.id,
+                note="owner_command",
+            )
+            await update.message.reply_text(ChaosText.inline_whitelist_added(user_id))
+            return
+        self.state_store.remove_inline_whitelist_user(user_id)
+        await update.message.reply_text(ChaosText.inline_whitelist_removed(user_id))
+
+    async def inline_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage Stars subscription price for true-inline mode."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        if len(args) != 2 or args[0].lower() != "subscription":
+            await update.message.reply_text(ChaosText.inline_price_usage())
+            return
+        stars = validate_star_amount(args[1])
+        if stars is None:
+            await update.message.reply_text(ChaosText.inline_price_usage())
+            return
+        runtime = self.state_store.update_inline_runtime_settings(subscription_stars=stars)
+        await update.message.reply_text(ChaosText.inline_subscription_price_updated(runtime["subscription_stars"]))
+
+    async def inline_onetime_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage optional one-time Stars payments for true-inline mode."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        action = args[0].lower() if args else ""
+        if action == "off" and len(args) == 1:
+            runtime = self.state_store.update_inline_runtime_settings(one_time_enabled=False)
+            await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
+            return
+        if action != "on" or len(args) != 2:
+            await update.message.reply_text(ChaosText.inline_onetime_usage())
+            return
+        stars = validate_star_amount(args[1])
+        if stars is None:
+            await update.message.reply_text(ChaosText.inline_onetime_usage())
+            return
+        runtime = self.state_store.update_inline_runtime_settings(
+            one_time_enabled=True,
+            one_time_stars=stars,
+        )
+        await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
+
+    async def inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Return true inline placeholder results that will be edited into media."""
+
+        query = update.inline_query
+        if not query or not settings.INLINE_MODE_ENABLED:
+            return
+        parsed_links = RequestParser.extract_supported_links(query.query, limit=1)
+        if not parsed_links:
+            result = InlineQueryResultArticle(
+                id="inline-help",
+                title="Paste a supported media link",
+                input_message_content=InputTextMessageContent(
+                    "Paste an Instagram, X/Twitter, or YouTube Shorts link."
+                ),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
+        parsed_link = parsed_links[0]
+        if settings.INLINE_STORAGE_CHAT_ID is None:
+            result = InlineQueryResultArticle(
+                id="inline-storage-missing",
+                title="Inline delivery is not configured",
+                input_message_content=InputTextMessageContent(ChaosText.inline_storage_missing()),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
+        if settings.INLINE_SUBSCRIPTION_REQUIRED and not self.state_store.user_has_inline_access(query.from_user.id):
+            self.state_store.release_stale_inline_one_time_claims(
+                older_than=datetime.now(timezone.utc)
+                - timedelta(seconds=settings.INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS)
+            )
+            one_time_payment = self.state_store.get_available_inline_one_time_payment(
+                user_id=query.from_user.id,
+                provider=parsed_link.provider,
+                normalized_url=parsed_link.normalized_url,
+            )
+            if one_time_payment is not None:
+                await self._answer_inline_delivery_option(
+                    query,
+                    parsed_link,
+                    one_time_entitlement=True,
+                )
+                return
+            await self._answer_paid_inline_options(context, query, parsed_link)
+            return
+
+        await self._answer_inline_delivery_option(query, parsed_link, one_time_entitlement=False)
+
+    async def _answer_inline_delivery_option(
+        self,
+        query: Any,
+        parsed_link: ParsedRequestLink,
+        *,
+        one_time_entitlement: bool,
+    ) -> None:
+        session_token = generate_session_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        self.state_store.create_inline_session(
+            session_token=session_token,
+            user_id=query.from_user.id,
+            original_url=parsed_link.original_url,
+            normalized_url=parsed_link.normalized_url,
+            provider=parsed_link.provider,
+            provider_label=parsed_link.provider_label,
+            expires_at=expires_at,
+        )
+        result_id = (
+            build_one_time_entitlement_result_id(session_token)
+            if one_time_entitlement
+            else build_inline_result_id(session_token)
+        )
+        callback_prefix = "inline_once" if one_time_entitlement else "inline"
+        result = InlineQueryResultArticle(
+            id=result_id,
+            title="Send media here",
+            description=parsed_link.provider_label,
+            input_message_content=InputTextMessageContent(
+                ChaosText.inline_preparing(parsed_link.provider_label)
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Preparing", callback_data=f"{callback_prefix}:{session_token}")]]
+            ),
+        )
+        await query.answer([result], cache_time=0, is_personal=True)
+
+    async def chosen_inline_result_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Capture the inline message ID and start delivery."""
+
+        chosen = update.chosen_inline_result
+        if not chosen or not chosen.inline_message_id:
+            return
+        result_kind, session_token = self._parse_chosen_inline_session_token(chosen.result_id)
+        if not session_token:
+            return
+        if result_kind == "paid":
+            return
+        claim_status = self._claim_inline_delivery_session(
+            session_token,
+            user_id=chosen.from_user.id,
+            inline_message_id=chosen.inline_message_id,
+        )
+        if claim_status != "claimed":
+            return
+        one_time_payment_id = None
+        if result_kind == "one_time":
+            one_time_payment_id = self._claim_one_time_payment_for_session(
+                session_token,
+                user_id=chosen.from_user.id,
+            )
+            if one_time_payment_id is None:
+                self._inline_delivery_session_tokens.discard(session_token)
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=chosen.inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+                return
+        self._schedule_inline_delivery(
+            context,
+            session_token=session_token,
+            one_time_payment_id=one_time_payment_id,
+        )
+
+    async def inline_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Fallback: user taps the inline keyboard if chosen feedback did not start delivery."""
+
+        query = update.callback_query
+        if not query or not query.inline_message_id or not query.data or not query.from_user:
+            return
+        result_kind, session_token = self._parse_chosen_inline_session_token(query.data)
+        if not session_token or result_kind == "paid":
+            return
+        claim_status = self._claim_inline_delivery_session(
+            session_token,
+            user_id=query.from_user.id,
+            inline_message_id=query.inline_message_id,
+        )
+        if claim_status == "expired":
+            await query.answer("This inline request expired.")
+            return
+        if claim_status == "duplicate":
+            await query.answer("Already preparing media.")
+            return
+        await query.answer("Preparing media.")
+        one_time_payment_id = None
+        if result_kind == "one_time":
+            one_time_payment_id = self._claim_one_time_payment_for_session(
+                session_token,
+                user_id=query.from_user.id,
+            )
+            if one_time_payment_id is None:
+                self._inline_delivery_session_tokens.discard(session_token)
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=query.inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+                return
+        self._schedule_inline_delivery(
+            context,
+            session_token=session_token,
+            one_time_payment_id=one_time_payment_id,
+        )
+
+    async def _answer_paid_inline_options(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        query: Any,
+        parsed_link: ParsedRequestLink,
+    ) -> None:
+        runtime = self.state_store.get_inline_runtime_settings()
+        session_token = generate_session_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        subscription_payload = build_subscription_payload(user_id=query.from_user.id, session_token=session_token)
+        try:
+            subscription_invoice_link = await context.bot.create_invoice_link(
+                title="Inline Mode",
+                description="Monthly access to send downloaded media into any chat.",
+                payload=subscription_payload,
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
+                subscription_period=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
+            )
+        except TelegramError:
+            logger.exception("Failed to create inline subscription invoice link")
+            result = InlineQueryResultArticle(
+                id="inline-payment-unavailable",
+                title="Inline payments are temporarily unavailable",
+                input_message_content=InputTextMessageContent(ChaosText.inline_payment_unavailable()),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
+        self.state_store.create_inline_session(
+            session_token=session_token,
+            user_id=query.from_user.id,
+            original_url=parsed_link.original_url,
+            normalized_url=parsed_link.normalized_url,
+            provider=parsed_link.provider,
+            provider_label=parsed_link.provider_label,
+            expires_at=expires_at,
+        )
+        results = [
+            InlineQueryResultArticle(
+                id=f"sub:{session_token}",
+                title=f"Subscribe for {runtime['subscription_stars']} Stars/month",
+                input_message_content=InputTextMessageContent(
+                    "Open the invoice to activate inline mode, then run this inline query again."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Pay with Stars", url=subscription_invoice_link)]]
+                ),
+            ),
+        ]
+        if runtime["one_time_enabled"]:
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"once:{session_token}",
+                    title=f"Pay {runtime['one_time_stars']} Stars for this link",
+                    input_message_content=InputInvoiceMessageContent(
+                        title="One Inline Download",
+                        description="One-time access for this inline media link.",
+                        payload=build_one_time_payload(user_id=query.from_user.id, session_token=session_token),
+                        provider_token="",
+                        currency="XTR",
+                        prices=[LabeledPrice("One Inline Download", runtime["one_time_stars"])],
+                    ),
+                )
+            )
+        await query.answer(results, cache_time=0, is_personal=True)
+
+    async def pre_checkout_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Approve Telegram Stars inline invoices only when payload and amount match runtime settings."""
+
+        query = getattr(update, "pre_checkout_query", None)
+        if not query or not query.from_user:
+            return
+        payload = parse_inline_payment_payload(query.invoice_payload)
+        runtime = self.state_store.get_inline_runtime_settings()
+        approved = False
+        if (
+            payload is not None
+            and query.currency == "XTR"
+            and payload.user_id == query.from_user.id
+        ):
+            if payload.kind == "subscription":
+                approved = query.total_amount == runtime["subscription_stars"]
+            elif (
+                payload.kind == "one_time"
+                and runtime["one_time_enabled"]
+                and query.total_amount == runtime["one_time_stars"]
+            ):
+                session = self.state_store.get_inline_session(
+                    payload.session_token,
+                    user_id=payload.user_id,
+                )
+                approved = session is not None and not self._inline_session_is_expired(session)
+        if approved:
+            await query.answer(ok=True)
+            return
+        await query.answer(ok=False, error_message="Inline payment details are no longer valid.")
+
+    async def successful_payment_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Record successful Stars payments and deliver or refund linked inline sessions."""
+
+        if not update.message or not update.effective_user:
+            return
+        payment = getattr(update.message, "successful_payment", None)
+        if payment is None:
+            return
+        payload = parse_inline_payment_payload(payment.invoice_payload)
+        if payload is None or payload.user_id != update.effective_user.id or payment.currency != "XTR":
+            return
+
+        if payload.kind == "subscription":
+            self.state_store.record_inline_subscription(
+                user_id=payload.user_id,
+                expires_at=self._subscription_expires_at(payment),
+                telegram_payment_charge_id=payment.telegram_payment_charge_id,
+                provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", "") or "",
+                total_amount=payment.total_amount,
+            )
+            return
+
+        if payload.kind != "one_time":
+            return
+        existing_payment = self.state_store.get_inline_one_time_payment_by_charge_id(
+            payment.telegram_payment_charge_id
+        )
+        if existing_payment is not None:
+            return
+        session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
+        payment_id = self.state_store.record_inline_one_time_payment(
+            user_id=payload.user_id,
+            session_token=payload.session_token,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            total_amount=payment.total_amount,
+            provider=str(session["provider"]) if session else None,
+            normalized_url=str(session["normalized_url"]) if session else None,
+        )
+        if session is None or self._inline_session_is_expired(session):
+            await self._refund_one_time_payment(
+                context,
+                payment_id=payment_id,
+                user_id=payload.user_id,
+                reason="inline_session_expired",
+            )
+            return
+        return
+
+    @staticmethod
+    def _subscription_expires_at(payment: Any) -> datetime:
+        expires_at = getattr(payment, "subscription_expiration_date", None)
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                return expires_at.replace(tzinfo=timezone.utc)
+            return expires_at.astimezone(timezone.utc)
+        if isinstance(expires_at, (int, float)):
+            return datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        return datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS)
+
+    @staticmethod
+    def _parse_chosen_inline_session_token(result_id: str) -> tuple[str | None, str | None]:
+        one_time_prefix = "inline_once:"
+        if result_id.startswith(one_time_prefix):
+            token = result_id.removeprefix(one_time_prefix).strip()
+            return ("one_time", token) if token else (None, None)
+        session_token = parse_inline_result_id(result_id)
+        if session_token:
+            return "free", session_token
+        for prefix in ("sub:", "once:"):
+            if result_id.startswith(prefix):
+                token = result_id.removeprefix(prefix).strip()
+                return ("paid", token) if token else (None, None)
+        return None, None
+
+    @staticmethod
+    def _inline_session_is_expired(session: dict[str, Any]) -> bool:
+        expires_at_raw = session.get("expires_at")
+        if not expires_at_raw:
+            return True
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_raw))
+        except ValueError:
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
+
+    def _claim_inline_delivery_session(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> str:
+        session = self.state_store.get_inline_session(session_token, user_id=user_id)
+        if session is None or self._inline_session_is_expired(session):
+            return "expired"
+        if (
+            session.get("inline_message_id")
+            or session.get("status") != "created"
+            or session_token in self._inline_delivery_session_tokens
+        ):
+            return "duplicate"
+        self._inline_delivery_session_tokens.add(session_token)
+        self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
+        self.state_store.mark_inline_session_status(session_token, "delivering")
+        return "claimed"
+
+    def _claim_one_time_payment_for_session(self, session_token: str, *, user_id: int) -> str | None:
+        session = self.state_store.get_inline_session(session_token, user_id=user_id)
+        if session is None:
+            return None
+        payment = self.state_store.get_available_inline_one_time_payment(
+            user_id=user_id,
+            provider=str(session["provider"]),
+            normalized_url=str(session["normalized_url"]),
+        )
+        if payment is None:
+            return None
+        payment_id = str(payment["payment_id"])
+        request_id = f"inline:{session_token}"
+        if not self.state_store.claim_inline_one_time_payment(payment_id, request_id=request_id):
+            return None
+        return payment_id
+
+    def _schedule_inline_delivery(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        session_token: str,
+        one_time_payment_id: str | None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._deliver_inline_session(
+                context,
+                session_token=session_token,
+                one_time_payment_id=one_time_payment_id,
+            )
+        )
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(lambda _task, token=session_token: self._inline_delivery_session_tokens.discard(token))
+
+    async def _deliver_inline_session(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        session_token: str,
+        one_time_payment_id: str | None,
+    ) -> None:
+        """Download, cache, and edit the chosen inline placeholder into media."""
+
+        inline_message_id = None
+        try:
+            session = self.state_store.get_inline_session(session_token)
+            if session is None or not session.get("inline_message_id"):
+                return
+            inline_message_id = session["inline_message_id"]
+            if settings.INLINE_STORAGE_CHAT_ID is None:
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                if one_time_payment_id:
+                    await self._refund_one_time_payment(
+                        context,
+                        payment_id=one_time_payment_id,
+                        user_id=int(session["user_id"]),
+                        reason="inline_storage_missing",
+                    )
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=inline_message_id,
+                    text=ChaosText.inline_storage_missing(),
+                )
+                return
+
+            cache_key = f"{session['provider']}:{session['normalized_url']}"
+            cached = self.state_store.get_inline_cached_media(cache_key)
+            if cached:
+                media_item = cached["media_items"][0]
+            else:
+                parsed_link = ParsedRequestLink(
+                    original_url=session["original_url"],
+                    normalized_url=session["normalized_url"],
+                    provider=session["provider"],
+                    provider_label=session["provider_label"],
+                )
+                output_dir = settings.CACHE_DIR / "inline" / session_token
+                try:
+                    async with self.job_manager.bounded_execution(
+                        chat_id=int(session["user_id"]),
+                        user_id=int(session["user_id"]),
+                        provider=parsed_link.provider,
+                        provider_label=parsed_link.provider_label,
+                    ):
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        video_info = await VideoDownloader().download_video(parsed_link.original_url, output_dir)
+                        inline_item = await upload_first_media_to_storage(
+                            context.bot,
+                            storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
+                            video_info=video_info,
+                        )
+                finally:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                media_item = {
+                    "media_type": inline_item.media_type,
+                    "file_id": inline_item.file_id,
+                    "caption": inline_item.caption,
+                }
+                self.state_store.save_inline_cached_media(
+                    cache_key=cache_key,
+                    provider=parsed_link.provider,
+                    normalized_url=parsed_link.normalized_url,
+                    media_items=[media_item],
+                )
+
+            input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
+            await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media)
+            self.state_store.mark_inline_session_status(session_token, "delivered")
+            if one_time_payment_id:
+                self.state_store.mark_inline_one_time_payment_delivered(
+                    one_time_payment_id,
+                    request_id=f"inline:{session_token}",
+                )
+        except Exception:
+            logger.exception("Inline delivery failed for session %s", session_token)
+            self.state_store.mark_inline_session_status(session_token, "failed")
+            if one_time_payment_id:
+                session = self.state_store.get_inline_session(session_token)
+                user_id = int(session["user_id"]) if session else 0
+                await self._refund_one_time_payment(
+                    context,
+                    payment_id=one_time_payment_id,
+                    user_id=user_id,
+                    reason="download_failed",
+                )
+            if inline_message_id is not None:
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+        finally:
+            self._inline_delivery_session_tokens.discard(session_token)
+
+    async def _refund_one_time_payment(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        payment_id: str,
+        user_id: int,
+        reason: str,
+    ) -> None:
+        payment = self.state_store.get_inline_one_time_payment(payment_id)
+        if not payment or payment["status"] != "paid":
+            return
+        try:
+            await context.bot.refund_star_payment(
+                user_id=user_id,
+                telegram_payment_charge_id=payment["telegram_payment_charge_id"],
+            )
+        except TelegramError as exc:
+            self.state_store.mark_inline_one_time_payment_refund_failed(
+                payment_id,
+                reason=f"{reason}:{exc.__class__.__name__}",
+            )
+            return
+        self.state_store.mark_inline_one_time_payment_refunded(payment_id, reason=reason)
+
+    @staticmethod
+    async def _safe_edit_inline_text(
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        inline_message_id: str,
+        text: str,
+    ) -> None:
+        try:
+            await context.bot.edit_message_text(inline_message_id=inline_message_id, text=text)
+        except Exception:
+            logger.debug("Failed to edit inline placeholder text", exc_info=True)
 
     async def _await_request(
         self,
@@ -1014,6 +1666,38 @@ class TelegramBot:
             return user.full_name
         return str(user.id)
 
+    def _message_is_from_owner(self, update: Update) -> bool:
+        return (
+            settings.BOT_OWNER_USER_ID is not None
+            and update.effective_user is not None
+            and update.effective_user.id == settings.BOT_OWNER_USER_ID
+        )
+
+    async def _whitelist_forwarded_visible_user(self, update: Update) -> bool:
+        if not update.message or not update.effective_user:
+            return False
+        forwarded_user_id = self._forwarded_visible_user_id(update.message)
+        if forwarded_user_id is None:
+            return False
+        self.state_store.add_inline_whitelist_user(
+            forwarded_user_id,
+            added_by_user_id=update.effective_user.id,
+            note="owner_forward",
+        )
+        await update.message.reply_text(ChaosText.inline_whitelist_forward_added(forwarded_user_id))
+        return True
+
+    @staticmethod
+    def _forwarded_visible_user_id(message: Message) -> int | None:
+        forward_from = getattr(message, "forward_from", None)
+        if getattr(forward_from, "id", None) is not None:
+            return int(forward_from.id)
+        forward_origin = getattr(message, "forward_origin", None)
+        sender_user = getattr(forward_origin, "sender_user", None)
+        if getattr(sender_user, "id", None) is not None:
+            return int(sender_user.id)
+        return None
+
     async def _toggle_group_setting(
         self,
         update: Update,
@@ -1153,14 +1837,27 @@ class TelegramBot:
         if not settings.BOT_TOKEN:
             raise ValueError("BOT_TOKEN is not set in environment variables")
 
-        self.application = (
+        builder = (
             ApplicationBuilder()
             .token(settings.BOT_TOKEN)
             .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
             .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
             .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
-            .build()
         )
+
+        if settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None:
+            from .post_deploy_notifications import send_inline_mode_announcement_once
+
+            async def _post_init(application: Application) -> None:
+                application.create_task(_send_inline_mode_announcement(application))
+
+            async def _send_inline_mode_announcement(application: Application) -> None:
+                result = await send_inline_mode_announcement_once(application.bot, self.state_store)
+                logger.info("Inline mode announcement result: %s", result)
+
+            builder = builder.post_init(_post_init)
+
+        self.application = builder.build()
 
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
@@ -1175,6 +1872,16 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("userlimit", self.userlimit_command))
         self.application.add_handler(CommandHandler("admin_status", self.admin_status_command))
         self.application.add_handler(CommandHandler("admin_global_status", self.admin_global_status_command))
+        self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
+        self.application.add_handler(ChosenInlineResultHandler(self.chosen_inline_result_handler))
+        self.application.add_handler(
+            CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$")
+        )
+        self.application.add_handler(PreCheckoutQueryHandler(self.pre_checkout_handler))
+        self.application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler))
+        self.application.add_handler(CommandHandler("inline_whitelist", self.inline_whitelist_command))
+        self.application.add_handler(CommandHandler("inline_price", self.inline_price_command))
+        self.application.add_handler(CommandHandler("inline_onetime", self.inline_onetime_command))
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
