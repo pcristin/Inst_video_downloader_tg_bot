@@ -761,6 +761,69 @@ async def test_pre_checkout_rejects_disabled_one_time_payment(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pre_checkout_approves_live_one_time_session(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    bot = TelegramBot(state_store=store)
+    query = _FakePreCheckoutQuery(
+        invoice_payload=build_one_time_payload(user_id=1001, session_token="s1"),
+        total_amount=5,
+    )
+
+    await bot.pre_checkout_handler(_FakeUpdate(pre_checkout_query=query), SimpleNamespace(bot=SimpleNamespace()))
+
+    assert query.answers == [{"ok": True}]
+
+
+@pytest.mark.asyncio
+async def test_pre_checkout_rejects_expired_one_time_session(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    bot = TelegramBot(state_store=store)
+    query = _FakePreCheckoutQuery(
+        invoice_payload=build_one_time_payload(user_id=1001, session_token="s1"),
+        total_amount=5,
+    )
+
+    await bot.pre_checkout_handler(_FakeUpdate(pre_checkout_query=query), SimpleNamespace(bot=SimpleNamespace()))
+
+    assert query.answers[0]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_pre_checkout_rejects_missing_one_time_session(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
+    bot = TelegramBot(state_store=store)
+    query = _FakePreCheckoutQuery(
+        invoice_payload=build_one_time_payload(user_id=1001, session_token="missing"),
+        total_amount=5,
+    )
+
+    await bot.pre_checkout_handler(_FakeUpdate(pre_checkout_query=query), SimpleNamespace(bot=SimpleNamespace()))
+
+    assert query.answers[0]["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_one_time_failure_refunds_payment(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)

@@ -701,22 +701,24 @@ class TelegramBot:
             return
         payload = parse_inline_payment_payload(query.invoice_payload)
         runtime = self.state_store.get_inline_runtime_settings()
-        approved = (
+        approved = False
+        if (
             payload is not None
             and query.currency == "XTR"
             and payload.user_id == query.from_user.id
-            and (
-                (
-                    payload.kind == "subscription"
-                    and query.total_amount == runtime["subscription_stars"]
+        ):
+            if payload.kind == "subscription":
+                approved = query.total_amount == runtime["subscription_stars"]
+            elif (
+                payload.kind == "one_time"
+                and runtime["one_time_enabled"]
+                and query.total_amount == runtime["one_time_stars"]
+            ):
+                session = self.state_store.get_inline_session(
+                    payload.session_token,
+                    user_id=payload.user_id,
                 )
-                or (
-                    payload.kind == "one_time"
-                    and runtime["one_time_enabled"]
-                    and query.total_amount == runtime["one_time_stars"]
-                )
-            )
-        )
+                approved = session is not None and not self._inline_session_is_expired(session)
         if approved:
             await query.answer(ok=True)
             return
