@@ -132,6 +132,23 @@ async def test_paid_user_inline_query_returns_placeholder_with_keyboard(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_inline_query_without_storage_does_not_offer_paid_invoice(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+
+    assert len(query.answers[0]["results"]) == 1
+    result = query.answers[0]["results"][0]
+    assert result.id == "inline-storage-missing"
+    assert result.title == "Inline delivery is not configured"
+    assert store.get_inline_one_time_payment_by_charge_id("tg-charge") is None
+
+
+@pytest.mark.asyncio
 async def test_chosen_inline_result_attaches_inline_message_id(tmp_path):
     store = StateStore(tmp_path / "state.db")
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -156,6 +173,7 @@ async def test_chosen_inline_result_attaches_inline_message_id(tmp_path):
 
 @pytest.mark.asyncio
 async def test_paid_subscription_chosen_inline_result_does_not_attach_or_schedule(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
     bot = TelegramBot(state_store=store)
@@ -183,6 +201,7 @@ async def test_paid_subscription_chosen_inline_result_does_not_attach_or_schedul
 
 @pytest.mark.asyncio
 async def test_paid_one_time_chosen_inline_result_does_not_attach_or_schedule(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
     bot = TelegramBot(state_store=store)
@@ -710,6 +729,7 @@ async def test_one_time_success_before_inline_message_stays_paid_for_later_deliv
 
 @pytest.mark.asyncio
 async def test_subscription_success_grants_later_inline_result_without_invoice_delivery(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(subscription_stars=5)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -756,7 +776,8 @@ async def test_subscription_success_grants_later_inline_result_without_invoice_d
 
 
 @pytest.mark.asyncio
-async def test_one_time_success_grants_later_inline_result_without_invoice_delivery(tmp_path):
+async def test_one_time_success_grants_later_inline_result_without_invoice_delivery(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -799,6 +820,7 @@ async def test_one_time_success_grants_later_inline_result_without_invoice_deliv
 
 @pytest.mark.asyncio
 async def test_one_time_entitlement_is_claimed_for_later_inline_delivery(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
     invoice_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)

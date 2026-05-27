@@ -55,6 +55,27 @@ async def test_upload_first_video_to_storage_returns_file_id(tmp_path):
     assert call["video_zero_byte_read"] == b""
 
 
+@pytest.mark.asyncio
+async def test_upload_first_media_to_storage_truncates_long_caption(tmp_path):
+    media_file = tmp_path / "video.mp4"
+    media_file.write_bytes(b"video")
+    long_caption = "x" * 1100
+    info = VideoInfo(
+        file_path=media_file,
+        title="Title",
+        media_items=[MediaItem(file_path=media_file, media_type="video", caption=long_caption)],
+        primary_media_type="video",
+    )
+    bot = _FakeBot()
+
+    item = await upload_first_media_to_storage(bot, storage_chat_id=-100, video_info=info)
+
+    assert item.caption is not None
+    assert len(item.caption) == 1024
+    assert item.caption.endswith("...")
+    assert bot.video_calls[0]["caption"] == item.caption
+
+
 def test_build_inline_input_media_for_video():
     item = InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
 

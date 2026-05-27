@@ -475,6 +475,15 @@ class TelegramBot:
             return
 
         parsed_link = parsed_links[0]
+        if settings.INLINE_STORAGE_CHAT_ID is None:
+            result = InlineQueryResultArticle(
+                id="inline-storage-missing",
+                title="Inline delivery is not configured",
+                input_message_content=InputTextMessageContent(ChaosText.inline_storage_missing()),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
         if settings.INLINE_SUBSCRIPTION_REQUIRED and not self.state_store.user_has_inline_access(query.from_user.id):
             self.state_store.release_stale_inline_one_time_claims(
                 older_than=datetime.now(timezone.utc)

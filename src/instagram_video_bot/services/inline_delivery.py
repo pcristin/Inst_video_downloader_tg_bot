@@ -9,6 +9,8 @@ from telegram import InputMediaPhoto, InputMediaVideo
 
 from .download_models import VideoInfo
 
+MAX_INLINE_MEDIA_CAPTION_LENGTH = 1024
+
 
 @dataclass(frozen=True)
 class InlineCachedMediaItem:
@@ -21,7 +23,7 @@ async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info
     """Upload the first downloaded media item to storage and return its bot-local file_id."""
 
     first = video_info.media_items[0]
-    caption = first.caption or video_info.title
+    caption = _truncate_inline_caption(first.caption or video_info.title)
     if first.media_type == "photo":
         with first.file_path.open("rb") as media_file:
             message = await bot.send_photo(chat_id=storage_chat_id, photo=media_file, caption=caption)
@@ -36,6 +38,17 @@ async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info
             supports_streaming=True,
         )
     return InlineCachedMediaItem(media_type="video", file_id=message.video.file_id, caption=caption)
+
+
+def _truncate_inline_caption(caption: str | None) -> str | None:
+    if not caption:
+        return None
+    caption = caption.strip()
+    if not caption:
+        return None
+    if len(caption) <= MAX_INLINE_MEDIA_CAPTION_LENGTH:
+        return caption
+    return caption[: MAX_INLINE_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
 
 
 def build_inline_input_media(item: InlineCachedMediaItem) -> InputMediaPhoto | InputMediaVideo:
