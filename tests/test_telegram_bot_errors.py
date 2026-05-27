@@ -56,6 +56,7 @@ def test_run_registers_global_error_handler(monkeypatch):
 
     monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.ApplicationBuilder", lambda: FakeBuilder())
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
 
     bot = TelegramBot()
     bot.run()
@@ -163,6 +164,7 @@ async def test_inline_announcement_post_init_schedules_background_task(monkeypat
         slow_announcement,
     )
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
 
     bot = TelegramBot()
     bot.run()
@@ -171,3 +173,49 @@ async def test_inline_announcement_post_init_schedules_background_task(monkeypat
 
     assert registered["scheduled"] is not None
     registered["scheduled"].close()
+
+
+def test_inline_announcement_post_init_is_not_registered_without_storage(monkeypatch):
+    registered = {"post_init": None}
+
+    class FakeApplication:
+        def add_handler(self, _handler):
+            pass
+
+        def add_error_handler(self, _handler):
+            pass
+
+        def run_polling(self):
+            pass
+
+    class FakeBuilder:
+        def token(self, _token):
+            return self
+
+        def concurrent_updates(self, _updates):
+            return self
+
+        def connection_pool_size(self, _size):
+            return self
+
+        def media_write_timeout(self, _timeout):
+            return self
+
+        def post_init(self, callback):
+            registered["post_init"] = callback
+            return self
+
+        def build(self):
+            return FakeApplication()
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        lambda: FakeBuilder(),
+    )
+    monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
+
+    bot = TelegramBot()
+    bot.run()
+
+    assert registered["post_init"] is None

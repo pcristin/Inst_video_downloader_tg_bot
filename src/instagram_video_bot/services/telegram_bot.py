@@ -1845,7 +1845,7 @@ class TelegramBot:
             .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
         )
 
-        if settings.INLINE_MODE_ENABLED:
+        if settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None:
             from .post_deploy_notifications import send_inline_mode_announcement_once
 
             async def _post_init(application: Application) -> None:
