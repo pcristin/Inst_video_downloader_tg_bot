@@ -168,6 +168,14 @@ class TelegramBot:
         group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
         await update.message.reply_text(ChaosText.help(group_settings["chaos_mode_enabled"]))
 
+    async def admin_help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show owner-only operational command usage."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        await update.message.reply_text(ChaosText.admin_help())
+
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show supported URL shapes."""
         if not update.message:
@@ -1932,6 +1940,7 @@ class TelegramBot:
         self.application = builder.build()
 
         self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("admin_help", self.admin_help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("formats", self.formats_command))
         self.application.add_handler(CommandHandler("cancel", self.cancel_command))

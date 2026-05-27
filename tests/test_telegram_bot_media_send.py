@@ -840,9 +840,38 @@ async def test_help_formats_status_and_stats_are_russian(tmp_path):
     await telegram_bot.stats_command(update, context)
 
     assert "Пришли ссылку" in update.message.replies[0]
+    assert "Настройки владельца" not in update.message.replies[0]
+    assert "/admin_status" not in update.message.replies[0]
     assert "Поддерживаемые ссылки" in update.message.replies[1]
     assert "Статус очереди" in update.message.replies[2]
     assert "Статистика чата" in update.message.replies[3]
+
+
+@pytest.mark.asyncio
+async def test_admin_help_lists_owner_commands(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_help", user_id=42)
+    context = _FakeContext(_FakeBot())
+
+    await telegram_bot.admin_help_command(update, context)
+
+    reply = update.message.replies[-1]
+    assert "Admin commands" in reply
+    assert "/admin_status" in reply
+    assert "/inline_refund <telegram_payment_charge_id> [user_id]" in reply
+
+
+@pytest.mark.asyncio
+async def test_admin_help_rejects_non_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/admin_help", user_id=99)
+    context = _FakeContext(_FakeBot())
+
+    await telegram_bot.admin_help_command(update, context)
+
+    assert update.message.replies[-1] == "Эта команда доступна только владельцу бота."
 
 
 @pytest.mark.asyncio
