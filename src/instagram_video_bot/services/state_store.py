@@ -15,6 +15,7 @@ from typing import Any
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
+USER_NOTIFICATION_STATUSES = frozenset({"attempted", "sent", "failed"})
 
 
 def _utc_now() -> datetime:
@@ -560,6 +561,9 @@ class StateStore:
         error_class: str | None = None,
     ) -> None:
         """Record a one-time notification attempt."""
+
+        if status not in USER_NOTIFICATION_STATUSES:
+            raise ValueError(f"Invalid user notification status: {status}")
 
         now = _utc_now().isoformat()
         with self._lock, self._conn:

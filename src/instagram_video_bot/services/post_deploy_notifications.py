@@ -41,6 +41,12 @@ async def send_inline_mode_announcement_once(
             skipped += 1
             continue
 
+        state_store.record_user_notification(
+            notification_key=INLINE_MODE_ANNOUNCEMENT_KEY,
+            user_id=user_id,
+            status="attempted",
+        )
+
         try:
             await bot.send_message(chat_id=user_id, text=INLINE_MODE_ANNOUNCEMENT_TEXT)
         except (Forbidden, TelegramError) as exc:

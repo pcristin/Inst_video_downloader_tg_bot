@@ -1786,6 +1786,9 @@ class TelegramBot:
             from .post_deploy_notifications import send_inline_mode_announcement_once
 
             async def _post_init(application: Application) -> None:
+                application.create_task(_send_inline_mode_announcement(application))
+
+            async def _send_inline_mode_announcement(application: Application) -> None:
                 result = await send_inline_mode_announcement_once(application.bot, self.state_store)
                 logger.info("Inline mode announcement result: %s", result)
 
