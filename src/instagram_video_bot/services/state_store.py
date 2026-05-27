@@ -1029,6 +1029,23 @@ class StateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_inline_one_time_payment_by_charge_id(
+        self,
+        telegram_payment_charge_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_one_time_payments
+                WHERE telegram_payment_charge_id = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (telegram_payment_charge_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def mark_inline_one_time_payment_delivered(
         self,
         payment_id: str,

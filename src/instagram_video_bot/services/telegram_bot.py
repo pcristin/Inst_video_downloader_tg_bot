@@ -641,7 +641,15 @@ class TelegramBot:
                 total_amount=payment.total_amount,
             )
             session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
-            if session and session.get("inline_message_id") and not self._inline_session_is_expired(session):
+            if (
+                session
+                and session.get("inline_message_id")
+                and self._claim_attached_inline_delivery_session(
+                    payload.session_token,
+                    user_id=payload.user_id,
+                )
+                == "claimed"
+            ):
                 await self._deliver_inline_session(
                     context,
                     session_token=payload.session_token,
@@ -650,6 +658,11 @@ class TelegramBot:
             return
 
         if payload.kind != "one_time":
+            return
+        existing_payment = self.state_store.get_inline_one_time_payment_by_charge_id(
+            payment.telegram_payment_charge_id
+        )
+        if existing_payment is not None:
             return
         payment_id = self.state_store.record_inline_one_time_payment(
             user_id=payload.user_id,
@@ -664,6 +677,26 @@ class TelegramBot:
                 payment_id=payment_id,
                 user_id=payload.user_id,
                 reason="inline_session_expired",
+            )
+            return
+        if not session.get("inline_message_id"):
+            await self._refund_one_time_payment(
+                context,
+                payment_id=payment_id,
+                user_id=payload.user_id,
+                reason="inline_message_missing",
+            )
+            return
+        claim_status = self._claim_attached_inline_delivery_session(
+            payload.session_token,
+            user_id=payload.user_id,
+        )
+        if claim_status != "claimed":
+            await self._refund_one_time_payment(
+                context,
+                payment_id=payment_id,
+                user_id=payload.user_id,
+                reason=f"inline_delivery_{claim_status}",
             )
             return
         await self._deliver_inline_session(
@@ -725,6 +758,23 @@ class TelegramBot:
             return "duplicate"
         self._inline_delivery_session_tokens.add(session_token)
         self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
+        self.state_store.mark_inline_session_status(session_token, "delivering")
+        return "claimed"
+
+    def _claim_attached_inline_delivery_session(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+    ) -> str:
+        session = self.state_store.get_inline_session(session_token, user_id=user_id)
+        if session is None or self._inline_session_is_expired(session):
+            return "expired"
+        if not session.get("inline_message_id"):
+            return "missing"
+        if session.get("status") != "chosen" or session_token in self._inline_delivery_session_tokens:
+            return "duplicate"
+        self._inline_delivery_session_tokens.add(session_token)
         self.state_store.mark_inline_session_status(session_token, "delivering")
         return "claimed"
 

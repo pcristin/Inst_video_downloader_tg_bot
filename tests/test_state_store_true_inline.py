@@ -153,6 +153,22 @@ def test_one_time_payment_can_be_refunded(tmp_path):
     assert payment["refund_reason"] == "download_failed"
 
 
+def test_one_time_payment_can_be_found_by_telegram_charge_id(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="s1",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+
+    payment = store.get_inline_one_time_payment_by_charge_id("tg-charge")
+
+    assert payment["payment_id"] == payment_id
+    assert payment["telegram_payment_charge_id"] == "tg-charge"
+    assert store.get_inline_one_time_payment_by_charge_id("missing") is None
+
+
 def test_refunded_one_time_payment_cannot_later_be_delivered(tmp_path):
     store = StateStore(tmp_path / "state.db")
     payment_id = store.record_inline_one_time_payment(
