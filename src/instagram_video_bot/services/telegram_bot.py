@@ -102,7 +102,8 @@ class TelegramBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages by queueing supported provider links."""
-        if not update.message or not update.effective_chat:
+        message = update.effective_message
+        if not message or not update.effective_chat:
             return
         request_user_id = self._request_user_id(update)
         if request_user_id is None:
@@ -112,7 +113,7 @@ class TelegramBot:
             return
 
         self._purge_expired_cache()
-        message_text = update.message.text or ""
+        message_text = message.text or getattr(message, "caption", None) or ""
         extracted_links = RequestParser.extract_supported_links(
             message_text,
             limit=settings.MAX_LINKS_PER_MESSAGE,
@@ -125,14 +126,14 @@ class TelegramBot:
         group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
         raw_url_count = len(RequestParser.URL_PATTERN.findall(message_text))
         if raw_url_count > settings.MAX_LINKS_PER_MESSAGE:
-            await update.message.reply_text(
+            await message.reply_text(
                 ChaosText.too_many_links(settings.MAX_LINKS_PER_MESSAGE)
             )
 
         for parsed_link in extracted_links:
             rate_limit = self._consume_user_rate_limit(request_user_id, source="direct")
             if not rate_limit["allowed"]:
-                await update.message.reply_text(
+                await message.reply_text(
                     ChaosText.rate_limited(rate_limit["retry_after_seconds"])
                 )
                 break
@@ -147,7 +148,7 @@ class TelegramBot:
                 execute=self._build_job_executor(update.effective_chat.id, parsed_link, context),
                 duplicate_suppression=group_settings["duplicate_suppression"],
             )
-            status_message = await update.message.reply_text(
+            status_message = await message.reply_text(
                 self._build_submission_message(
                     parsed_link.provider_label,
                     queue_position=submission.queue_position,
@@ -162,7 +163,7 @@ class TelegramBot:
                 provider_label=parsed_link.provider_label,
                 normalized_url=parsed_link.normalized_url,
                 original_url=parsed_link.original_url,
-                original_message_id=update.message.message_id,
+                original_message_id=message.message_id,
                 status_message=status_message,
                 quiet_mode=group_settings["quiet_mode"],
                 joined_existing=not submission.is_new_job,
@@ -1939,7 +1940,8 @@ class TelegramBot:
     def _request_user_id(update: Update) -> int | None:
         if update.effective_user is not None:
             return update.effective_user.id
-        sender_chat = getattr(update.message, "sender_chat", None) if update.message else None
+        message = update.effective_message
+        sender_chat = getattr(message, "sender_chat", None) if message else None
         if sender_chat is not None:
             return getattr(sender_chat, "id", None)
         return None
@@ -1948,7 +1950,8 @@ class TelegramBot:
     def _request_user_label(cls, update: Update) -> str:
         if update.effective_user is not None:
             return cls._user_label(update)
-        sender_chat = getattr(update.message, "sender_chat", None) if update.message else None
+        message = update.effective_message
+        sender_chat = getattr(message, "sender_chat", None) if message else None
         if sender_chat is None:
             return "unknown"
         title = getattr(sender_chat, "title", None)

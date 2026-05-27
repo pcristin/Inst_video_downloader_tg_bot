@@ -109,8 +109,11 @@ class _FakeUpdate:
         chat_type: str = "private",
         effective_user_present: bool = True,
         sender_chat=None,
+        message_present: bool = True,
     ):
-        self.message = _FakeMessage(text, message_id=message_id, sender_chat=sender_chat)
+        message = _FakeMessage(text, message_id=message_id, sender_chat=sender_chat)
+        self.message = message if message_present else None
+        self.effective_message = message
         self.effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.effective_user = (
             SimpleNamespace(id=user_id, username=username, full_name=full_name)
@@ -425,6 +428,42 @@ async def test_handle_message_processes_sender_chat_text_link(monkeypatch, tmp_p
         "user_label": "Example Sender Chat",
         "normalized_url": "https://www.instagram.com/reel/ABC123xyz_9/",
     }
+
+
+@pytest.mark.asyncio
+async def test_handle_message_processes_effective_message_text_link(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    sender_chat = SimpleNamespace(id=-1001234567890, title="Example Sender Chat")
+    update = _FakeUpdate(
+        "https://www.instagram.com/reel/ABC123xyz_9/?igsh=example",
+        chat_id=-1001234567890,
+        chat_type="supergroup",
+        effective_user_present=False,
+        sender_chat=sender_chat,
+        message_present=False,
+    )
+
+    media_file = tmp_path / "effective-message.mp4"
+    media_file.write_bytes(b"video")
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        return VideoInfo(
+            file_path=media_file,
+            title="effective message",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert update.effective_message.replies == ["Принял Instagram. Скоро начну скачивать."]
+    assert len(fake_bot.video_calls) == 1
 
 
 @pytest.mark.asyncio
