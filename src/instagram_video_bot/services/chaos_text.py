@@ -21,17 +21,46 @@ class ChaosText:
     @staticmethod
     def help(chaos_enabled: bool) -> str:
         chaos_line = (
-            "Режим хаоса включен: буду шумнее реагировать на очереди, повторы и удачные скачивания."
+            "- /chaos status - статус режима хаоса: включен"
             if chaos_enabled
-            else "Режим хаоса выключен. Админ может включить его командой /chaos on."
+            else "- /chaos status - статус режима хаоса: выключен"
         )
         return (
-            "Пришли ссылку, а я скачаю медиа.\n"
-            "Поддерживаю: Instagram, Twitter/X и YouTube Shorts.\n"
-            "Команды: /help, /status, /formats, /cancel, /stats, /chaos status\n"
-            "Настройки владельца: /quiet on|off, /dupes on|off, /statsmode on|off, "
-            "/chatlimit <n>, /userlimit <n>, /admin_status, /admin_global_status\n"
+            "Пришли ссылку - я скачаю медиа в этот чат.\n\n"
+            "Поддерживаю:\n"
+            "- Instagram posts, reels, stories\n"
+            "- Twitter/X status links\n"
+            "- YouTube Shorts\n\n"
+            "Команды:\n"
+            "- /formats - примеры поддерживаемых ссылок\n"
+            "- /status - очередь и состояние бота\n"
+            "- /cancel - отменить твой последний запрос\n"
+            "- /stats - статистика этого чата\n"
             f"{chaos_line}"
+        )
+
+    @staticmethod
+    def admin_help() -> str:
+        return (
+            "Admin commands:\n"
+            "/help - public usage help\n"
+            "/formats - supported link formats\n"
+            "/status - queue status for this chat\n"
+            "/cancel - cancel your latest active request\n"
+            "/stats - chat stats\n"
+            "/chaos on|off|status - manage chat chaos mode\n"
+            "/quiet on|off - toggle quiet mode for this chat\n"
+            "/dupes on|off - toggle duplicate suppression for this chat\n"
+            "/statsmode on|off - toggle stats visibility for this chat\n"
+            "/chatlimit <positive number> - set this chat concurrency limit\n"
+            "/userlimit <positive number> - set per-user active request limit\n"
+            "/admin_status - owner operational status for this chat\n"
+            "/admin_global_status - owner operational status across all chats\n"
+            "/inline_whitelist add <user_id> | remove <user_id> | list - manage free inline users\n"
+            "/inline_price subscription <stars> - set inline monthly subscription price\n"
+            "/inline_onetime on <stars> | off - manage one-time inline payments\n"
+            "/inline_refund <telegram_payment_charge_id> [user_id] - refund an inline Stars payment\n"
+            "/admin_help - show this admin command list"
         )
 
     @staticmethod

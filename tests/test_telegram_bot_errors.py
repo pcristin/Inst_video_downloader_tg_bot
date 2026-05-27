@@ -61,6 +61,9 @@ def test_run_registers_global_error_handler(monkeypatch):
     bot = TelegramBot()
     bot.run()
 
+    admin_handler_contract = [
+        ("admin_help_command", "CommandHandler"),
+    ]
     inline_handler_contract = [
         ("inline_query_handler", "InlineQueryHandler"),
         ("chosen_inline_result_handler", "ChosenInlineResultHandler"),
@@ -94,13 +97,14 @@ def test_run_registers_global_error_handler(monkeypatch):
         for handler in registered["handlers"]
         if getattr(handler, "callback", None) is not None
     }
-    for callback_name, class_name in inline_handler_contract:
+    for callback_name, class_name in admin_handler_contract + inline_handler_contract:
         assert type(handlers_by_callback_name[callback_name]).__name__ == class_name
     assert (
         handlers_by_callback_name["inline_callback_handler"].pattern.pattern
         == r"^inline(?:_once)?:[A-Za-z0-9_-]+$"
     )
     assert type(handlers_by_callback_name["successful_payment_handler"].filters).__name__ == "SuccessfulPayment"
+    assert handlers_by_callback_name["admin_help_command"].commands == frozenset({"admin_help"})
     assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset({"inline_whitelist"})
     assert handlers_by_callback_name["inline_price_command"].commands == frozenset({"inline_price"})
     assert handlers_by_callback_name["inline_onetime_command"].commands == frozenset({"inline_onetime"})
