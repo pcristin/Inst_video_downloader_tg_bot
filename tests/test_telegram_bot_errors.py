@@ -16,7 +16,12 @@ async def test_global_error_handler_handles_network_error():
 
 
 def test_run_registers_global_error_handler(monkeypatch):
-    registered = {"error_handler": None, "message_handler": None, "ran": False}
+    registered = {
+        "error_handler": None,
+        "message_handler": None,
+        "post_init": None,
+        "ran": False,
+    }
 
     class FakeApplication:
         def add_handler(self, handler):
@@ -41,6 +46,10 @@ def test_run_registers_global_error_handler(monkeypatch):
         def media_write_timeout(self, _timeout):
             return self
 
+        def post_init(self, callback):
+            registered["post_init"] = callback
+            return self
+
         def build(self):
             return FakeApplication()
 
@@ -52,4 +61,5 @@ def test_run_registers_global_error_handler(monkeypatch):
 
     assert registered["message_handler"] is not None
     assert registered["error_handler"] == bot._global_error_handler
+    assert registered["post_init"] is not None
     assert registered["ran"] is True
