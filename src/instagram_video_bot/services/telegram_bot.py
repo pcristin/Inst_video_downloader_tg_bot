@@ -26,11 +26,8 @@ from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
-    CallbackQueryHandler,
-    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
-    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -83,6 +80,7 @@ class TelegramBot:
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
         self.request_contexts: dict[str, RequestContext] = {}
+        self._inline_delivery_session_tokens: set[str] = set()
         self.started_at = time.time()
         self._purge_expired_cache()
 
@@ -425,11 +423,14 @@ class TelegramBot:
         session_token = parse_inline_result_id(chosen.result_id)
         if not session_token:
             return
-        session = self.state_store.get_inline_session(session_token, user_id=chosen.from_user.id)
-        if session is None or self._inline_session_is_expired(session):
+        claim_status = self._claim_inline_delivery_session(
+            session_token,
+            user_id=chosen.from_user.id,
+            inline_message_id=chosen.inline_message_id,
+        )
+        if claim_status != "claimed":
             return
-        self.state_store.attach_inline_message(session_token, inline_message_id=chosen.inline_message_id)
-        asyncio.create_task(self._deliver_inline_session(context, session_token=session_token, one_time_payment_id=None))
+        self._schedule_inline_delivery(context, session_token=session_token, one_time_payment_id=None)
 
     async def inline_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Fallback: user taps the inline keyboard if chosen feedback did not start delivery."""
@@ -438,13 +439,19 @@ class TelegramBot:
         if not query or not query.inline_message_id or not query.data or not query.from_user:
             return
         session_token = query.data.removeprefix("inline:")
-        session = self.state_store.get_inline_session(session_token, user_id=query.from_user.id)
-        if session is None or self._inline_session_is_expired(session):
+        claim_status = self._claim_inline_delivery_session(
+            session_token,
+            user_id=query.from_user.id,
+            inline_message_id=query.inline_message_id,
+        )
+        if claim_status == "expired":
             await query.answer("This inline request expired.")
             return
-        self.state_store.attach_inline_message(session_token, inline_message_id=query.inline_message_id)
+        if claim_status == "duplicate":
+            await query.answer("Already preparing media.")
+            return
         await query.answer("Preparing media.")
-        asyncio.create_task(self._deliver_inline_session(context, session_token=session_token, one_time_payment_id=None))
+        self._schedule_inline_delivery(context, session_token=session_token, one_time_payment_id=None)
 
     async def _answer_paid_inline_options(self, query: Any, parsed_link: ParsedRequestLink) -> None:
         """Minimal paid-inline placeholder until payment handling is wired."""
@@ -472,6 +479,44 @@ class TelegramBot:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         return expires_at <= datetime.now(timezone.utc)
 
+    def _claim_inline_delivery_session(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> str:
+        session = self.state_store.get_inline_session(session_token, user_id=user_id)
+        if session is None or self._inline_session_is_expired(session):
+            return "expired"
+        if (
+            session.get("inline_message_id")
+            or session.get("status") != "created"
+            or session_token in self._inline_delivery_session_tokens
+        ):
+            return "duplicate"
+        self._inline_delivery_session_tokens.add(session_token)
+        self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
+        self.state_store.mark_inline_session_status(session_token, "delivering")
+        return "claimed"
+
+    def _schedule_inline_delivery(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        session_token: str,
+        one_time_payment_id: str | None,
+    ) -> None:
+        task = asyncio.create_task(
+            self._deliver_inline_session(
+                context,
+                session_token=session_token,
+                one_time_payment_id=one_time_payment_id,
+            )
+        )
+        if hasattr(task, "add_done_callback"):
+            task.add_done_callback(lambda _task, token=session_token: self._inline_delivery_session_tokens.discard(token))
+
     async def _deliver_inline_session(
         self,
         context: ContextTypes.DEFAULT_TYPE,
@@ -481,19 +526,27 @@ class TelegramBot:
     ) -> None:
         """Download, cache, and edit the chosen inline placeholder into media."""
 
-        session = self.state_store.get_inline_session(session_token)
-        if session is None or not session.get("inline_message_id"):
-            return
-        inline_message_id = session["inline_message_id"]
-        if settings.INLINE_STORAGE_CHAT_ID is None:
-            await self._safe_edit_inline_text(
-                context,
-                inline_message_id=inline_message_id,
-                text=ChaosText.inline_storage_missing(),
-            )
-            return
-
+        inline_message_id = None
         try:
+            session = self.state_store.get_inline_session(session_token)
+            if session is None or not session.get("inline_message_id"):
+                return
+            inline_message_id = session["inline_message_id"]
+            if settings.INLINE_STORAGE_CHAT_ID is None:
+                self.state_store.mark_inline_session_status(session_token, "failed")
+                if one_time_payment_id:
+                    await self._refund_one_time_payment(
+                        context,
+                        one_time_payment_id,
+                        reason="inline_storage_missing",
+                    )
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=inline_message_id,
+                    text=ChaosText.inline_storage_missing(),
+                )
+                return
+
             cache_key = f"{session['provider']}:{session['normalized_url']}"
             cached = self.state_store.get_inline_cached_media(cache_key)
             if cached:
@@ -538,11 +591,14 @@ class TelegramBot:
             self.state_store.mark_inline_session_status(session_token, "failed")
             if one_time_payment_id:
                 await self._refund_one_time_payment(context, one_time_payment_id, reason="download_failed")
-            await self._safe_edit_inline_text(
-                context,
-                inline_message_id=inline_message_id,
-                text=ChaosText.inline_delivery_failed(),
-            )
+            if inline_message_id is not None:
+                await self._safe_edit_inline_text(
+                    context,
+                    inline_message_id=inline_message_id,
+                    text=ChaosText.inline_delivery_failed(),
+                )
+        finally:
+            self._inline_delivery_session_tokens.discard(session_token)
 
     async def _refund_one_time_payment(
         self,
