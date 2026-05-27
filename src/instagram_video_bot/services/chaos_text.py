@@ -216,3 +216,60 @@ class ChaosText:
             "twitter": "Twitter/X",
             "youtube_shorts": "YouTube Shorts",
         }.get(provider, provider)
+
+    @staticmethod
+    def inline_preparing(provider_label: str) -> str:
+        return f"Preparing {provider_label} media..."
+
+    @staticmethod
+    def inline_storage_missing() -> str:
+        return "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID."
+
+    @staticmethod
+    def inline_payment_unavailable() -> str:
+        return "Inline payments are temporarily unavailable. Try again later."
+
+    @staticmethod
+    def inline_delivery_failed() -> str:
+        return "Inline delivery failed. If this was a one-time payment, it was refunded."
+
+    @staticmethod
+    def inline_whitelist_usage() -> str:
+        return "Usage: /inline_whitelist add <user_id> | remove <user_id> | list"
+
+    @staticmethod
+    def inline_whitelist_added(user_id: int) -> str:
+        return f"Inline whitelist: added user {user_id}."
+
+    @staticmethod
+    def inline_whitelist_removed(user_id: int) -> str:
+        return f"Inline whitelist: removed user {user_id}."
+
+    @staticmethod
+    def inline_whitelist_forward_added(user_id: int) -> str:
+        return f"Inline whitelist: added forwarded user {user_id}."
+
+    @staticmethod
+    def inline_whitelist_list(users: list[dict[str, Any]]) -> str:
+        if not users:
+            return "Inline whitelist is empty."
+        lines = [f"- {user['user_id']}" for user in users]
+        return "Inline whitelist:\n" + "\n".join(lines)
+
+    @staticmethod
+    def inline_price_usage() -> str:
+        return "Usage: /inline_price subscription <stars>"
+
+    @staticmethod
+    def inline_subscription_price_updated(stars: int) -> str:
+        return f"Inline subscription price: {stars} Stars."
+
+    @staticmethod
+    def inline_onetime_usage() -> str:
+        return "Usage: /inline_onetime on <stars> | off"
+
+    @staticmethod
+    def inline_onetime_updated(runtime: dict[str, Any]) -> str:
+        if runtime["one_time_enabled"]:
+            return f"Inline one-time payment: on, {runtime['one_time_stars']} Stars."
+        return "Inline one-time payment: off."

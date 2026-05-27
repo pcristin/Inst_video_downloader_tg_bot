@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import logging
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Awaitable, Callable
@@ -325,6 +325,31 @@ class JobManager:
             self._user_semaphore_limits[chat_id] = user_limit
             for key in [item for item in self._user_semaphores if item[0] == chat_id]:
                 self._user_semaphores[key] = asyncio.Semaphore(user_limit)
+
+    @asynccontextmanager
+    async def bounded_execution(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        provider: str,
+        provider_label: str,
+    ):
+        """Apply the same concurrency semaphores used by queued jobs."""
+
+        job = SharedJob(
+            job_id=f"inline:{uuid.uuid4().hex}",
+            chat_id=chat_id,
+            submitter_user_id=user_id,
+            provider=provider,
+            provider_label=provider_label,
+            original_url="",
+            normalized_url="",
+        )
+        async with AsyncExitStack() as stack:
+            for semaphore in self._job_semaphores(job):
+                await stack.enter_async_context(semaphore)
+            yield
 
     def _deactivate_request(self, request_id: str) -> None:
         for job_id, job in list(self._jobs.items()):

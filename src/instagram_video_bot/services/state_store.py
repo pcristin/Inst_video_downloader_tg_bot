@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
+USER_NOTIFICATION_STATUSES = frozenset({"attempted", "sent", "failed", "retryable_failed"})
 
 
 def _utc_now() -> datetime:
@@ -119,6 +121,76 @@ class StateStore:
                     failure_class TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS inline_sessions (
+                    session_token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    original_url TEXT NOT NULL,
+                    normalized_url TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    provider_label TEXT NOT NULL,
+                    inline_message_id TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_whitelist (
+                    user_id INTEGER PRIMARY KEY,
+                    added_by_user_id INTEGER NOT NULL,
+                    note TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_subscriptions (
+                    user_id INTEGER PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    telegram_payment_charge_id TEXT NOT NULL,
+                    provider_payment_charge_id TEXT NOT NULL,
+                    total_amount INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_runtime_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_one_time_payments (
+                    payment_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    session_token TEXT NOT NULL,
+                    provider TEXT,
+                    normalized_url TEXT,
+                    telegram_payment_charge_id TEXT NOT NULL,
+                    total_amount INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    request_id TEXT,
+                    refund_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_cached_media (
+                    cache_key TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    normalized_url TEXT NOT NULL,
+                    media_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS user_notifications (
+                    notification_key TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_class TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (notification_key, user_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_chat_status
                     ON jobs (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_requests_chat_status
@@ -127,6 +199,8 @@ class StateStore:
                     ON recent_results (chat_id, normalized_url);
                 CREATE INDEX IF NOT EXISTS idx_perf_chat_finished
                     ON performance_metrics (chat_id, finished_at);
+                CREATE INDEX IF NOT EXISTS idx_user_notifications_key_status
+                    ON user_notifications (notification_key, status);
                 """
             )
             existing_columns = {
@@ -177,6 +251,14 @@ class StateStore:
                 self._conn.execute(
                     "ALTER TABLE performance_metrics ADD COLUMN instagram_metadata_reused INTEGER NOT NULL DEFAULT 0"
                 )
+            one_time_payment_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(inline_one_time_payments)").fetchall()
+            }
+            if "provider" not in one_time_payment_columns:
+                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT")
+            if "normalized_url" not in one_time_payment_columns:
+                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT")
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
         with self._lock, self._conn:
@@ -436,6 +518,95 @@ class StateStore:
                 (status, 1 if cache_hit else 0, now, request_id),
             )
 
+    def list_distinct_request_user_ids(self) -> list[int]:
+        """Return users who have submitted at least one request."""
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT user_id
+                FROM request_events
+                ORDER BY user_id
+                """
+            ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    def notification_was_attempted(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification has already been attempted for the user."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def notification_should_skip(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification has a terminal or in-flight attempt."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                  AND status IN ('attempted', 'sent', 'failed')
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def notification_was_sent(self, notification_key: str, user_id: int) -> bool:
+        """Return whether this notification was sent successfully."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1
+                FROM user_notifications
+                WHERE notification_key = ?
+                  AND user_id = ?
+                  AND status = 'sent'
+                """,
+                (notification_key, user_id),
+            ).fetchone()
+        return row is not None
+
+    def record_user_notification(
+        self,
+        *,
+        notification_key: str,
+        user_id: int,
+        status: str,
+        error_class: str | None = None,
+    ) -> None:
+        """Record a one-time notification attempt."""
+
+        if status not in USER_NOTIFICATION_STATUSES:
+            raise ValueError(f"Invalid user notification status: {status}")
+
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO user_notifications (
+                    notification_key, user_id, status, error_class, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(notification_key, user_id) DO UPDATE SET
+                    status = excluded.status,
+                    error_class = excluded.error_class,
+                    updated_at = excluded.updated_at
+                """,
+                (notification_key, user_id, status, error_class, now, now),
+            )
+
     def start_job_metrics(
         self,
         job_id: str,
@@ -680,6 +851,460 @@ class StateStore:
                 ),
             },
         }
+
+    def create_inline_session(
+        self,
+        *,
+        session_token: str,
+        user_id: int,
+        original_url: str,
+        normalized_url: str,
+        provider: str,
+        provider_label: str,
+        expires_at: datetime,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_sessions (
+                    session_token, user_id, original_url, normalized_url, provider,
+                    provider_label, status, created_at, expires_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_token) DO UPDATE SET
+                    user_id = excluded.user_id,
+                    original_url = excluded.original_url,
+                    normalized_url = excluded.normalized_url,
+                    provider = excluded.provider,
+                    provider_label = excluded.provider_label,
+                    status = excluded.status,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_token,
+                    user_id,
+                    original_url,
+                    normalized_url,
+                    provider,
+                    provider_label,
+                    "created",
+                    now,
+                    self._normalize_utc_datetime(expires_at).isoformat(),
+                    now,
+                ),
+            )
+
+    def get_inline_session(
+        self,
+        session_token: str,
+        *,
+        user_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            if user_id is None:
+                row = self._conn.execute(
+                    "SELECT * FROM inline_sessions WHERE session_token = ?",
+                    (session_token,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT *
+                    FROM inline_sessions
+                    WHERE session_token = ? AND user_id = ?
+                    """,
+                    (session_token, user_id),
+                ).fetchone()
+        return dict(row) if row is not None else None
+
+    def attach_inline_message(self, session_token: str, *, inline_message_id: str) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET inline_message_id = ?,
+                    status = 'chosen',
+                    updated_at = ?
+                WHERE session_token = ?
+                """,
+                (inline_message_id, now, session_token),
+            )
+
+    def mark_inline_session_status(self, session_token: str, status: str) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET status = ?,
+                    updated_at = ?
+                WHERE session_token = ?
+                """,
+                (status, now, session_token),
+            )
+
+    def add_inline_whitelist_user(
+        self,
+        user_id: int,
+        *,
+        added_by_user_id: int,
+        note: str | None = None,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_whitelist (user_id, added_by_user_id, note, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    added_by_user_id = excluded.added_by_user_id,
+                    note = excluded.note,
+                    created_at = excluded.created_at
+                """,
+                (user_id, added_by_user_id, note, now),
+            )
+
+    def remove_inline_whitelist_user(self, user_id: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM inline_whitelist WHERE user_id = ?", (user_id,))
+
+    def list_inline_whitelist_users(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_whitelist
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def is_inline_whitelisted(self, user_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM inline_whitelist WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return row is not None
+
+    def record_inline_subscription(
+        self,
+        *,
+        user_id: int,
+        expires_at: datetime,
+        telegram_payment_charge_id: str,
+        provider_payment_charge_id: str,
+        total_amount: int,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_subscriptions (
+                    user_id, status, expires_at, telegram_payment_charge_id,
+                    provider_payment_charge_id, total_amount, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    status = excluded.status,
+                    expires_at = excluded.expires_at,
+                    telegram_payment_charge_id = excluded.telegram_payment_charge_id,
+                    provider_payment_charge_id = excluded.provider_payment_charge_id,
+                    total_amount = excluded.total_amount,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    "active",
+                    expires_at.isoformat(),
+                    telegram_payment_charge_id,
+                    provider_payment_charge_id,
+                    total_amount,
+                    now,
+                ),
+            )
+
+    def get_inline_subscription(self, user_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inline_subscriptions WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def has_active_inline_subscription(self, user_id: int) -> bool:
+        row = self.get_inline_subscription(user_id)
+        if row is None or row["status"] != "active":
+            return False
+        try:
+            expires_at = datetime.fromisoformat(row["expires_at"])
+        except ValueError:
+            return False
+        expires_at = self._normalize_utc_datetime(expires_at)
+        return expires_at > _utc_now()
+
+    def user_has_inline_access(self, user_id: int) -> bool:
+        return self.is_inline_whitelisted(user_id) or self.has_active_inline_subscription(user_id)
+
+    def get_inline_runtime_settings(self) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "subscription_stars": settings.INLINE_SUBSCRIPTION_STARS,
+            "one_time_enabled": settings.INLINE_ONE_TIME_ENABLED,
+            "one_time_stars": settings.INLINE_ONE_TIME_STARS,
+        }
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM inline_runtime_settings"
+            ).fetchall()
+        for row in rows:
+            if row["key"] in {"subscription_stars", "one_time_stars"}:
+                try:
+                    values[row["key"]] = int(row["value"])
+                except (TypeError, ValueError):
+                    continue
+            elif row["key"] == "one_time_enabled":
+                parsed = self._parse_runtime_bool(row["value"])
+                if parsed is not None:
+                    values[row["key"]] = parsed
+        return values
+
+    def update_inline_runtime_settings(
+        self,
+        *,
+        subscription_stars: int | None = None,
+        one_time_enabled: bool | None = None,
+        one_time_stars: int | None = None,
+    ) -> dict[str, Any]:
+        updates: dict[str, str] = {}
+        if subscription_stars is not None:
+            updates["subscription_stars"] = str(subscription_stars)
+        if one_time_enabled is not None:
+            updates["one_time_enabled"] = "1" if one_time_enabled else "0"
+        if one_time_stars is not None:
+            updates["one_time_stars"] = str(one_time_stars)
+
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            for key, value in updates.items():
+                self._conn.execute(
+                    """
+                    INSERT INTO inline_runtime_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, now),
+                )
+        return self.get_inline_runtime_settings()
+
+    def record_inline_one_time_payment(
+        self,
+        *,
+        user_id: int,
+        session_token: str,
+        telegram_payment_charge_id: str,
+        total_amount: int,
+        provider: str | None = None,
+        normalized_url: str | None = None,
+    ) -> str:
+        payment_id = uuid.uuid4().hex
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_one_time_payments (
+                    payment_id, user_id, session_token, provider, normalized_url, telegram_payment_charge_id,
+                    total_amount, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment_id,
+                    user_id,
+                    session_token,
+                    provider,
+                    normalized_url,
+                    telegram_payment_charge_id,
+                    total_amount,
+                    "paid",
+                    now,
+                    now,
+                ),
+            )
+        return payment_id
+
+    def get_inline_one_time_payment(self, payment_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inline_one_time_payments WHERE payment_id = ?",
+                (payment_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_inline_one_time_payment_by_charge_id(
+        self,
+        telegram_payment_charge_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_one_time_payments
+                WHERE telegram_payment_charge_id = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                """,
+                (telegram_payment_charge_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_available_inline_one_time_payment(
+        self,
+        *,
+        user_id: int,
+        provider: str,
+        normalized_url: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT p.*
+                FROM inline_one_time_payments p
+                LEFT JOIN inline_sessions s
+                    ON s.session_token = p.session_token
+                WHERE p.user_id = ?
+                  AND p.status = 'paid'
+                  AND p.request_id IS NULL
+                  AND (
+                    (p.provider = ? AND p.normalized_url = ?)
+                    OR (
+                        p.provider IS NULL
+                        AND p.normalized_url IS NULL
+                        AND s.provider = ?
+                        AND s.normalized_url = ?
+                    )
+                  )
+                ORDER BY p.created_at ASC
+                LIMIT 1
+                """,
+                (user_id, provider, normalized_url, provider, normalized_url),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def claim_inline_one_time_payment(self, payment_id: str, *, request_id: str) -> bool:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_one_time_payments
+                SET request_id = ?,
+                    updated_at = ?
+                WHERE payment_id = ?
+                  AND status = 'paid'
+                  AND request_id IS NULL
+                """,
+                (request_id, now, payment_id),
+            )
+        return cursor.rowcount == 1
+
+    def release_stale_inline_one_time_claims(self, *, older_than: datetime) -> int:
+        cutoff = self._normalize_utc_datetime(older_than).isoformat()
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_one_time_payments
+                SET request_id = NULL,
+                    updated_at = ?
+                WHERE status = 'paid'
+                  AND request_id IS NOT NULL
+                  AND updated_at <= ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM inline_sessions s
+                    WHERE s.session_token = substr(inline_one_time_payments.request_id, length('inline:') + 1)
+                      AND s.status = 'delivering'
+                      AND s.updated_at > ?
+                  )
+                """,
+                (now, cutoff, cutoff),
+            )
+        return cursor.rowcount
+
+    def mark_inline_one_time_payment_delivered(
+        self,
+        payment_id: str,
+        *,
+        request_id: str,
+    ) -> None:
+        self._mark_inline_one_time_payment(
+            payment_id,
+            status="delivered",
+            request_id=request_id,
+            refund_reason=None,
+        )
+
+    def mark_inline_one_time_payment_refunded(self, payment_id: str, *, reason: str) -> None:
+        self._mark_inline_one_time_payment(
+            payment_id,
+            status="refunded",
+            request_id=None,
+            refund_reason=reason,
+        )
+
+    def mark_inline_one_time_payment_refund_failed(
+        self,
+        payment_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        self._mark_inline_one_time_payment(
+            payment_id,
+            status="refund_failed",
+            request_id=None,
+            refund_reason=reason,
+        )
+
+    def save_inline_cached_media(
+        self,
+        *,
+        cache_key: str,
+        provider: str,
+        normalized_url: str,
+        media_items: list[dict[str, Any]],
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_cached_media (
+                    cache_key, provider, normalized_url, media_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    provider = excluded.provider,
+                    normalized_url = excluded.normalized_url,
+                    media_json = excluded.media_json,
+                    created_at = excluded.created_at
+                """,
+                (cache_key, provider, normalized_url, json.dumps(media_items), now),
+            )
+
+    def get_inline_cached_media(self, cache_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inline_cached_media WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        cached = dict(row)
+        cached["media_items"] = json.loads(cached.pop("media_json"))
+        return cached
 
     def get_cached_result(self, chat_id: int, normalized_url: str) -> CachedMediaEntry | None:
         now = _utc_now().isoformat()
@@ -992,6 +1617,43 @@ class StateStore:
     @staticmethod
     def _cache_key(chat_id: int, normalized_url: str) -> str:
         return f"{chat_id}:{normalized_url}"
+
+    def _mark_inline_one_time_payment(
+        self,
+        payment_id: str,
+        *,
+        status: str,
+        request_id: str | None,
+        refund_reason: str | None,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_one_time_payments
+                SET status = ?,
+                    request_id = ?,
+                    refund_reason = ?,
+                    updated_at = ?
+                WHERE payment_id = ? AND status = 'paid'
+                """,
+                (status, request_id, refund_reason, now, payment_id),
+            )
+
+    @staticmethod
+    def _normalize_utc_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _parse_runtime_bool(value: Any) -> bool | None:
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return None
 
     def _safe_metrics_write(self, query: str, params: tuple[Any, ...]) -> None:
         try:
