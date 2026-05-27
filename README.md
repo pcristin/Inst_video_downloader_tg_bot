@@ -336,7 +336,7 @@ uv run python manage_accounts.py status
 
 Inline mode sends media into the chat where the inline result is selected. Directly pasting links into a bot chat remains free.
 
-For users who do not already have inline access, the first inline selection is a Stars invoice. After the payment succeeds, they run the same inline query again and select "Send media here"; that second result is the one the bot edits into the requested media. One-time payments grant that retry only for the paid link, and are refunded if delivery for that paid link fails.
+For users who do not already have inline access, the first inline selection is a Stars invoice or subscription invoice link. After the payment succeeds, they run the same inline query again and select "Send media here"; that second result is the one the bot edits into the requested media. One-time payments grant that retry only for the paid link, and are refunded if delivery for that paid link fails.
 
 Required setup:
 

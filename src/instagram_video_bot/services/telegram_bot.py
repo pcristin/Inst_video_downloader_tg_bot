@@ -501,7 +501,7 @@ class TelegramBot:
                     one_time_entitlement=True,
                 )
                 return
-            await self._answer_paid_inline_options(query, parsed_link)
+            await self._answer_paid_inline_options(context, query, parsed_link)
             return
 
         await self._answer_inline_delivery_option(query, parsed_link, one_time_entitlement=False)
@@ -624,7 +624,12 @@ class TelegramBot:
             one_time_payment_id=one_time_payment_id,
         )
 
-    async def _answer_paid_inline_options(self, query: Any, parsed_link: ParsedRequestLink) -> None:
+    async def _answer_paid_inline_options(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        query: Any,
+        parsed_link: ParsedRequestLink,
+    ) -> None:
         runtime = self.state_store.get_inline_runtime_settings()
         session_token = generate_session_token()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
@@ -637,20 +642,25 @@ class TelegramBot:
             provider_label=parsed_link.provider_label,
             expires_at=expires_at,
         )
+        subscription_payload = build_subscription_payload(user_id=query.from_user.id, session_token=session_token)
+        subscription_invoice_link = await context.bot.create_invoice_link(
+            title="Inline Mode",
+            description="Monthly access to send downloaded media into any chat.",
+            payload=subscription_payload,
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
+            subscription_period=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
+        )
         results = [
             InlineQueryResultArticle(
                 id=f"sub:{session_token}",
                 title=f"Subscribe for {runtime['subscription_stars']} Stars/month",
-                input_message_content=InputInvoiceMessageContent(
-                    title="Inline Mode",
-                    description="Monthly access to send downloaded media into any chat.",
-                    payload=build_subscription_payload(user_id=query.from_user.id, session_token=session_token),
-                    provider_token="",
-                    currency="XTR",
-                    prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
-                    api_kwargs={
-                        "subscription_period": settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
-                    },
+                input_message_content=InputTextMessageContent(
+                    "Open the invoice to activate inline mode, then run this inline query again."
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Pay with Stars", url=subscription_invoice_link)]]
                 ),
             ),
         ]

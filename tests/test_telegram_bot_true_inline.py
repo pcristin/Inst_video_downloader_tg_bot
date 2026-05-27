@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from telegram import InputInvoiceMessageContent
 from telegram.error import TelegramError
 
 from src.instagram_video_bot.config.settings import settings
@@ -116,6 +117,15 @@ class _FailingRefundTelegramBot:
         raise TelegramError("refund failed")
 
 
+class _FakeInvoiceLinkBot:
+    def __init__(self):
+        self.invoice_link_calls = []
+
+    async def create_invoice_link(self, **kwargs):
+        self.invoice_link_calls.append(kwargs)
+        return "https://t.me/invoice-link"
+
+
 @pytest.mark.asyncio
 async def test_paid_user_inline_query_returns_placeholder_with_keyboard(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
@@ -186,7 +196,7 @@ async def test_paid_subscription_chosen_inline_result_does_not_attach_or_schedul
 
     monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
 
-    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=_FakeInvoiceLinkBot()))
     paid_result = query.answers[0]["results"][0]
     session_token = paid_result.id.split(":", 1)[1]
 
@@ -214,7 +224,7 @@ async def test_paid_one_time_chosen_inline_result_does_not_attach_or_schedule(mo
 
     monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
 
-    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=_FakeInvoiceLinkBot()))
     paid_result = query.answers[0]["results"][1]
     session_token = paid_result.id.split(":", 1)[1]
 
@@ -225,6 +235,26 @@ async def test_paid_one_time_chosen_inline_result_does_not_attach_or_schedule(mo
 
     assert store.get_inline_session(session_token, user_id=1001)["inline_message_id"] is None
     assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_paid_subscription_inline_result_uses_subscription_invoice_link(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(subscription_stars=5)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+    fake_bot = _FakeInvoiceLinkBot()
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=fake_bot))
+
+    result = query.answers[0]["results"][0]
+    assert result.id.startswith("sub:")
+    assert not isinstance(result.input_message_content, InputInvoiceMessageContent)
+    assert fake_bot.invoice_link_calls[0]["subscription_period"] == settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS
+    assert fake_bot.invoice_link_calls[0]["currency"] == "XTR"
+    assert fake_bot.invoice_link_calls[0]["prices"][0].amount == 5
+    assert result.reply_markup.inline_keyboard[0][0].url == "https://t.me/invoice-link"
 
 
 @pytest.mark.asyncio
