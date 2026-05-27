@@ -1124,6 +1124,9 @@ class TelegramBot:
                     "media_type": inline_item.media_type,
                     "file_id": inline_item.file_id,
                     "caption": inline_item.caption,
+                    "duration": inline_item.duration,
+                    "width": inline_item.width,
+                    "height": inline_item.height,
                 }
                 self.state_store.save_inline_cached_media(
                     cache_key=cache_key,

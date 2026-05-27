@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime as dtm
 from typing import Literal
 
 from telegram import InputMediaPhoto, InputMediaVideo
@@ -17,6 +18,9 @@ class InlineCachedMediaItem:
     media_type: Literal["video", "photo"]
     file_id: str
     caption: str | None = None
+    duration: float | int | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info: VideoInfo) -> InlineCachedMediaItem:
@@ -35,9 +39,20 @@ async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info
             chat_id=storage_chat_id,
             video=media_file,
             caption=caption,
-            supports_streaming=True,
+            **_inline_video_kwargs(
+                duration=first.duration,
+                width=first.width,
+                height=first.height,
+            ),
         )
-    return InlineCachedMediaItem(media_type="video", file_id=message.video.file_id, caption=caption)
+    return InlineCachedMediaItem(
+        media_type="video",
+        file_id=message.video.file_id,
+        caption=caption,
+        duration=first.duration,
+        width=first.width,
+        height=first.height,
+    )
 
 
 def _truncate_inline_caption(caption: str | None) -> str | None:
@@ -57,5 +72,29 @@ def build_inline_input_media(item: InlineCachedMediaItem) -> InputMediaPhoto | I
     if item.media_type == "photo":
         return InputMediaPhoto(media=item.file_id, caption=item.caption)
     if item.media_type == "video":
-        return InputMediaVideo(media=item.file_id, caption=item.caption, supports_streaming=True)
+        return InputMediaVideo(
+            media=item.file_id,
+            caption=item.caption,
+            **_inline_video_kwargs(
+                duration=item.duration,
+                width=item.width,
+                height=item.height,
+            ),
+        )
     raise ValueError(f"Unsupported inline media type: {item.media_type}")
+
+
+def _inline_video_kwargs(
+    *,
+    duration: float | int | None,
+    width: int | None,
+    height: int | None,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {"supports_streaming": True}
+    if width:
+        kwargs["width"] = int(width)
+    if height:
+        kwargs["height"] = int(height)
+    if duration is not None:
+        kwargs["duration"] = dtm.timedelta(seconds=max(0, round(float(duration))))
+    return kwargs
