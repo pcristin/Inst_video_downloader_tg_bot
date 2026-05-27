@@ -5,19 +5,32 @@ from __future__ import annotations
 import asyncio
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import datetime as dtm
 import logging
 from pathlib import Path
 import time
 from typing import Any, List, Optional
 
-from telegram import InputMediaPhoto, InputMediaVideo, Message, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InputTextMessageContent,
+    Message,
+    Update,
+)
 from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
+    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -25,6 +38,12 @@ from telegram.ext import (
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
 from .download_models import ProviderExecutionMetrics
+from .inline_access import build_inline_result_id, generate_session_token, parse_inline_result_id
+from .inline_delivery import (
+    InlineCachedMediaItem,
+    build_inline_input_media,
+    upload_first_media_to_storage,
+)
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
@@ -349,6 +368,189 @@ class TelegramBot:
             f"- Последние ошибки:\n{failure_lines}\n\n"
             f"{self._format_performance_summary(performance)}"
         )
+
+    async def inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Return true inline placeholder results that will be edited into media."""
+
+        query = update.inline_query
+        if not query or not settings.INLINE_MODE_ENABLED:
+            return
+        parsed_links = RequestParser.extract_supported_links(query.query, limit=1)
+        if not parsed_links:
+            result = InlineQueryResultArticle(
+                id="inline-help",
+                title="Paste a supported media link",
+                input_message_content=InputTextMessageContent(
+                    "Paste an Instagram, X/Twitter, or YouTube Shorts link."
+                ),
+            )
+            await query.answer([result], cache_time=0, is_personal=True)
+            return
+
+        parsed_link = parsed_links[0]
+        if settings.INLINE_SUBSCRIPTION_REQUIRED and not self.state_store.user_has_inline_access(query.from_user.id):
+            await self._answer_paid_inline_options(query, parsed_link)
+            return
+
+        session_token = generate_session_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        self.state_store.create_inline_session(
+            session_token=session_token,
+            user_id=query.from_user.id,
+            original_url=parsed_link.original_url,
+            normalized_url=parsed_link.normalized_url,
+            provider=parsed_link.provider,
+            provider_label=parsed_link.provider_label,
+            expires_at=expires_at,
+        )
+        result = InlineQueryResultArticle(
+            id=build_inline_result_id(session_token),
+            title="Send media here",
+            description=parsed_link.provider_label,
+            input_message_content=InputTextMessageContent(
+                ChaosText.inline_preparing(parsed_link.provider_label)
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Preparing", callback_data=f"inline:{session_token}")]]
+            ),
+        )
+        await query.answer([result], cache_time=0, is_personal=True)
+
+    async def chosen_inline_result_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Capture the inline message ID and start delivery."""
+
+        chosen = update.chosen_inline_result
+        if not chosen or not chosen.inline_message_id:
+            return
+        session_token = parse_inline_result_id(chosen.result_id)
+        if not session_token:
+            return
+        session = self.state_store.get_inline_session(session_token, user_id=chosen.from_user.id)
+        if session is None:
+            return
+        self.state_store.attach_inline_message(session_token, inline_message_id=chosen.inline_message_id)
+        asyncio.create_task(self._deliver_inline_session(context, session_token=session_token, one_time_payment_id=None))
+
+    async def inline_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Fallback: user taps the inline keyboard if chosen feedback did not start delivery."""
+
+        query = update.callback_query
+        if not query or not query.inline_message_id or not query.data or not query.from_user:
+            return
+        session_token = query.data.removeprefix("inline:")
+        session = self.state_store.get_inline_session(session_token, user_id=query.from_user.id)
+        if session is None:
+            await query.answer("This inline request expired.")
+            return
+        self.state_store.attach_inline_message(session_token, inline_message_id=query.inline_message_id)
+        await query.answer("Preparing media.")
+        asyncio.create_task(self._deliver_inline_session(context, session_token=session_token, one_time_payment_id=None))
+
+    async def _answer_paid_inline_options(self, query: Any, parsed_link: ParsedRequestLink) -> None:
+        """Minimal paid-inline placeholder until payment handling is wired."""
+
+        result = InlineQueryResultArticle(
+            id="inline-paywall",
+            title="Inline access required",
+            description=parsed_link.provider_label,
+            input_message_content=InputTextMessageContent(
+                "Inline delivery requires access. Direct messages remain free."
+            ),
+        )
+        await query.answer([result], cache_time=0, is_personal=True)
+
+    async def _deliver_inline_session(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        session_token: str,
+        one_time_payment_id: str | None,
+    ) -> None:
+        """Download, cache, and edit the chosen inline placeholder into media."""
+
+        session = self.state_store.get_inline_session(session_token)
+        if session is None or not session.get("inline_message_id"):
+            return
+        inline_message_id = session["inline_message_id"]
+        if settings.INLINE_STORAGE_CHAT_ID is None:
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=inline_message_id,
+                text=ChaosText.inline_storage_missing(),
+            )
+            return
+
+        try:
+            cache_key = f"{session['provider']}:{session['normalized_url']}"
+            cached = self.state_store.get_inline_cached_media(cache_key)
+            if cached:
+                media_item = cached["media_items"][0]
+            else:
+                parsed_link = ParsedRequestLink(
+                    original_url=session["original_url"],
+                    normalized_url=session["normalized_url"],
+                    provider=session["provider"],
+                    provider_label=session["provider_label"],
+                )
+                output_dir = settings.CACHE_DIR / "inline" / session_token
+                output_dir.mkdir(parents=True, exist_ok=True)
+                video_info = await VideoDownloader().download_video(parsed_link.original_url, output_dir)
+                inline_item = await upload_first_media_to_storage(
+                    context.bot,
+                    storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
+                    video_info=video_info,
+                )
+                media_item = {
+                    "media_type": inline_item.media_type,
+                    "file_id": inline_item.file_id,
+                    "caption": inline_item.caption,
+                }
+                self.state_store.save_inline_cached_media(
+                    cache_key=cache_key,
+                    provider=parsed_link.provider,
+                    normalized_url=parsed_link.normalized_url,
+                    media_items=[media_item],
+                )
+
+            input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
+            await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media)
+            self.state_store.mark_inline_session_status(session_token, "delivered")
+            if one_time_payment_id:
+                self.state_store.mark_inline_one_time_payment_delivered(
+                    one_time_payment_id,
+                    request_id=f"inline:{session_token}",
+                )
+        except Exception:
+            logger.exception("Inline delivery failed for session %s", session_token)
+            self.state_store.mark_inline_session_status(session_token, "failed")
+            if one_time_payment_id:
+                await self._refund_one_time_payment(context, one_time_payment_id, reason="download_failed")
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=inline_message_id,
+                text=ChaosText.inline_delivery_failed(),
+            )
+
+    async def _refund_one_time_payment(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        payment_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        """No-op placeholder for Task 5 refund integration."""
+
+    @staticmethod
+    async def _safe_edit_inline_text(
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        inline_message_id: str,
+        text: str,
+    ) -> None:
+        try:
+            await context.bot.edit_message_text(inline_message_id=inline_message_id, text=text)
+        except Exception:
+            logger.debug("Failed to edit inline placeholder text", exc_info=True)
 
     async def _await_request(
         self,

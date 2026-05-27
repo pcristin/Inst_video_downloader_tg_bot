@@ -216,3 +216,15 @@ class ChaosText:
             "twitter": "Twitter/X",
             "youtube_shorts": "YouTube Shorts",
         }.get(provider, provider)
+
+    @staticmethod
+    def inline_preparing(provider_label: str) -> str:
+        return f"Preparing {provider_label} media..."
+
+    @staticmethod
+    def inline_storage_missing() -> str:
+        return "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID."
+
+    @staticmethod
+    def inline_delivery_failed() -> str:
+        return "Inline delivery failed. If this was a one-time payment, it was refunded."
