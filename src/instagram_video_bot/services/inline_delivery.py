@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from telegram import InputMediaPhoto, InputMediaVideo
 
-from .video_downloader import VideoInfo
+from .download_models import VideoInfo
 
 
 @dataclass(frozen=True)
 class InlineCachedMediaItem:
-    media_type: str
+    media_type: Literal["video", "photo"]
     file_id: str
     caption: str | None = None
 
@@ -37,9 +38,11 @@ async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info
     return InlineCachedMediaItem(media_type="video", file_id=message.video.file_id, caption=caption)
 
 
-def build_inline_input_media(item: InlineCachedMediaItem):
+def build_inline_input_media(item: InlineCachedMediaItem) -> InputMediaPhoto | InputMediaVideo:
     """Build an InputMedia object usable with editMessageMedia for inline messages."""
 
     if item.media_type == "photo":
         return InputMediaPhoto(media=item.file_id, caption=item.caption)
-    return InputMediaVideo(media=item.file_id, caption=item.caption, supports_streaming=True)
+    if item.media_type == "video":
+        return InputMediaVideo(media=item.file_id, caption=item.caption, supports_streaming=True)
+    raise ValueError(f"Unsupported inline media type: {item.media_type}")

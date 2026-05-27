@@ -1,14 +1,15 @@
-from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from telegram import InputMediaVideo
 
+from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
 from src.instagram_video_bot.services.inline_delivery import (
     InlineCachedMediaItem,
     build_inline_input_media,
     upload_first_media_to_storage,
 )
-from src.instagram_video_bot.services.video_downloader import MediaItem, VideoInfo
 
 
 class _FakeBot:
@@ -17,6 +18,9 @@ class _FakeBot:
         self.photo_calls = []
 
     async def send_video(self, **kwargs):
+        kwargs["video_readable_during_call"] = kwargs["video"].readable()
+        kwargs["video_closed_during_call"] = kwargs["video"].closed
+        kwargs["video_zero_byte_read"] = kwargs["video"].read(0)
         self.video_calls.append(kwargs)
         return SimpleNamespace(video=SimpleNamespace(file_id="video-file-id"), photo=None)
 
@@ -36,9 +40,19 @@ async def test_upload_first_video_to_storage_returns_file_id(tmp_path):
         primary_media_type="video",
     )
 
-    item = await upload_first_media_to_storage(_FakeBot(), storage_chat_id=-100, video_info=info)
+    bot = _FakeBot()
+
+    item = await upload_first_media_to_storage(bot, storage_chat_id=-100, video_info=info)
 
     assert item == InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+    assert len(bot.video_calls) == 1
+    call = bot.video_calls[0]
+    assert call["chat_id"] == -100
+    assert call["caption"] == "Caption"
+    assert call["supports_streaming"] is True
+    assert call["video_readable_during_call"] is True
+    assert call["video_closed_during_call"] is False
+    assert call["video_zero_byte_read"] == b""
 
 
 def test_build_inline_input_media_for_video():
@@ -46,5 +60,15 @@ def test_build_inline_input_media_for_video():
 
     media = build_inline_input_media(item)
 
+    assert isinstance(media, InputMediaVideo)
     assert media.media == "video-file-id"
     assert media.caption == "Caption"
+    if hasattr(media, "supports_streaming"):
+        assert media.supports_streaming is True
+
+
+def test_build_inline_input_media_rejects_unknown_media_type():
+    item = InlineCachedMediaItem(media_type=cast(Any, "audio"), file_id="audio-file-id")
+
+    with pytest.raises(ValueError, match="Unsupported inline media type: audio"):
+        build_inline_input_media(item)
