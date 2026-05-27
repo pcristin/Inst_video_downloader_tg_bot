@@ -1035,6 +1035,35 @@ class StateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_inline_subscription_by_charge_id(
+        self,
+        telegram_payment_charge_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_subscriptions
+                WHERE telegram_payment_charge_id = ?
+                LIMIT 1
+                """,
+                (telegram_payment_charge_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_inline_subscription_refunded(self, user_id: int) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_subscriptions
+                SET status = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                ("refunded", now, user_id),
+            )
+
     def has_active_inline_subscription(self, user_id: int) -> bool:
         row = self.get_inline_subscription(user_id)
         if row is None or row["status"] != "active":

@@ -457,6 +457,78 @@ class TelegramBot:
         )
         await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
 
+    async def inline_refund_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Refund a Telegram Stars inline payment. Owner-only."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+
+        args = list(getattr(context, "args", []) or [])
+        if len(args) not in {1, 2} or not args[0].strip():
+            await update.message.reply_text(ChaosText.inline_refund_usage())
+            return
+
+        telegram_payment_charge_id = args[0].strip()
+        fallback_user_id = None
+        if len(args) == 2:
+            fallback_user_id = self._parse_positive_int_arg(args[1])
+            if fallback_user_id is None:
+                await update.message.reply_text(ChaosText.inline_refund_usage())
+                return
+
+        payment_kind: str | None = None
+        payment_id: str | None = None
+        user_id = fallback_user_id
+        one_time_payment = self.state_store.get_inline_one_time_payment_by_charge_id(
+            telegram_payment_charge_id
+        )
+        if one_time_payment is not None:
+            if one_time_payment["status"] == "refunded":
+                await update.message.reply_text(ChaosText.inline_refund_already_refunded())
+                return
+            payment_kind = "one_time"
+            payment_id = one_time_payment["payment_id"]
+            user_id = int(one_time_payment["user_id"])
+        else:
+            subscription = self.state_store.get_inline_subscription_by_charge_id(
+                telegram_payment_charge_id
+            )
+            if subscription is not None:
+                if subscription["status"] == "refunded":
+                    await update.message.reply_text(ChaosText.inline_refund_already_refunded())
+                    return
+                payment_kind = "subscription"
+                user_id = int(subscription["user_id"])
+
+        if user_id is None:
+            await update.message.reply_text(ChaosText.inline_refund_not_found())
+            return
+
+        try:
+            await context.bot.refund_star_payment(
+                user_id=user_id,
+                telegram_payment_charge_id=telegram_payment_charge_id,
+            )
+        except TelegramError:
+            logger.exception("Owner inline refund failed for charge %s", telegram_payment_charge_id)
+            if payment_kind == "one_time" and payment_id is not None:
+                self.state_store.mark_inline_one_time_payment_refund_failed(
+                    payment_id,
+                    reason="owner_command:TelegramError",
+                )
+            await update.message.reply_text(ChaosText.inline_refund_failed())
+            return
+
+        if payment_kind == "one_time" and payment_id is not None:
+            self.state_store.mark_inline_one_time_payment_refunded(
+                payment_id,
+                reason="owner_command",
+            )
+        elif payment_kind == "subscription":
+            self.state_store.mark_inline_subscription_refunded(user_id)
+        await update.message.reply_text(ChaosText.inline_refund_sent(user_id))
+
     async def inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Return true inline placeholder results that will be edited into media."""
 
@@ -1882,6 +1954,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("inline_whitelist", self.inline_whitelist_command))
         self.application.add_handler(CommandHandler("inline_price", self.inline_price_command))
         self.application.add_handler(CommandHandler("inline_onetime", self.inline_onetime_command))
+        self.application.add_handler(CommandHandler("inline_refund", self.inline_refund_command))
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,

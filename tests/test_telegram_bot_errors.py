@@ -70,6 +70,7 @@ def test_run_registers_global_error_handler(monkeypatch):
         ("inline_whitelist_command", "CommandHandler"),
         ("inline_price_command", "CommandHandler"),
         ("inline_onetime_command", "CommandHandler"),
+        ("inline_refund_command", "CommandHandler"),
     ]
     callback_names = [
         handler.callback.__name__
@@ -103,6 +104,7 @@ def test_run_registers_global_error_handler(monkeypatch):
     assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset({"inline_whitelist"})
     assert handlers_by_callback_name["inline_price_command"].commands == frozenset({"inline_price"})
     assert handlers_by_callback_name["inline_onetime_command"].commands == frozenset({"inline_onetime"})
+    assert handlers_by_callback_name["inline_refund_command"].commands == frozenset({"inline_refund"})
     assert "handle_message" in callback_names
     assert registered["error_handler"] == bot._global_error_handler
     assert registered["post_init"] is not None
