@@ -60,23 +60,46 @@ def test_run_registers_global_error_handler(monkeypatch):
     bot = TelegramBot()
     bot.run()
 
+    inline_handler_contract = [
+        ("inline_query_handler", "InlineQueryHandler"),
+        ("chosen_inline_result_handler", "ChosenInlineResultHandler"),
+        ("inline_callback_handler", "CallbackQueryHandler"),
+        ("pre_checkout_handler", "PreCheckoutQueryHandler"),
+        ("successful_payment_handler", "MessageHandler"),
+        ("inline_whitelist_command", "CommandHandler"),
+        ("inline_price_command", "CommandHandler"),
+        ("inline_onetime_command", "CommandHandler"),
+    ]
     callback_names = [
         handler.callback.__name__
         for handler in registered["handlers"]
         if getattr(handler, "callback", None) is not None
     ]
-    for callback_name in [
-        "inline_query_handler",
-        "chosen_inline_result_handler",
-        "inline_callback_handler",
-        "pre_checkout_handler",
-        "successful_payment_handler",
-        "inline_whitelist_command",
-        "inline_price_command",
-        "inline_onetime_command",
-        "handle_message",
-    ]:
-        assert callback_name in callback_names
+    inline_callback_names = [name for name, _class_name in inline_handler_contract]
+    inline_block_start = callback_names.index("inline_query_handler")
+    assert (
+        callback_names[inline_block_start : inline_block_start + len(inline_callback_names)]
+        == inline_callback_names
+    )
+    assert all(
+        callback_names.index(callback_name) < callback_names.index("handle_message")
+        for callback_name in inline_callback_names
+    )
+    assert len([name for name in callback_names if name in inline_callback_names]) == len(inline_callback_names)
+
+    handlers_by_callback_name = {
+        handler.callback.__name__: handler
+        for handler in registered["handlers"]
+        if getattr(handler, "callback", None) is not None
+    }
+    for callback_name, class_name in inline_handler_contract:
+        assert type(handlers_by_callback_name[callback_name]).__name__ == class_name
+    assert handlers_by_callback_name["inline_callback_handler"].pattern.pattern == r"^inline:[A-Za-z0-9_-]+$"
+    assert type(handlers_by_callback_name["successful_payment_handler"].filters).__name__ == "SuccessfulPayment"
+    assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset({"inline_whitelist"})
+    assert handlers_by_callback_name["inline_price_command"].commands == frozenset({"inline_price"})
+    assert handlers_by_callback_name["inline_onetime_command"].commands == frozenset({"inline_onetime"})
+    assert "handle_message" in callback_names
     assert registered["error_handler"] == bot._global_error_handler
     assert registered["post_init"] is not None
     assert registered["ran"] is True

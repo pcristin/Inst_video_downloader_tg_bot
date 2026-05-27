@@ -1815,7 +1815,7 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("admin_global_status", self.admin_global_status_command))
         self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
         self.application.add_handler(ChosenInlineResultHandler(self.chosen_inline_result_handler))
-        self.application.add_handler(CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline:"))
+        self.application.add_handler(CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline:[A-Za-z0-9_-]+$"))
         self.application.add_handler(PreCheckoutQueryHandler(self.pre_checkout_handler))
         self.application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler))
         self.application.add_handler(CommandHandler("inline_whitelist", self.inline_whitelist_command))
