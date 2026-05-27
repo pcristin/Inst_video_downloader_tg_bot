@@ -102,7 +102,10 @@ class TelegramBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages by queueing supported provider links."""
-        if not update.message or not update.effective_chat or not update.effective_user:
+        if not update.message or not update.effective_chat:
+            return
+        request_user_id = self._request_user_id(update)
+        if request_user_id is None:
             return
         if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
             await self.legacy_redirect_handler(update, context)
@@ -127,7 +130,7 @@ class TelegramBot:
             )
 
         for parsed_link in extracted_links:
-            rate_limit = self._consume_user_rate_limit(update.effective_user.id, source="direct")
+            rate_limit = self._consume_user_rate_limit(request_user_id, source="direct")
             if not rate_limit["allowed"]:
                 await update.message.reply_text(
                     ChaosText.rate_limited(rate_limit["retry_after_seconds"])
@@ -135,8 +138,8 @@ class TelegramBot:
                 break
             submission = self.job_manager.submit(
                 chat_id=update.effective_chat.id,
-                user_id=update.effective_user.id,
-                user_label=self._user_label(update),
+                user_id=request_user_id,
+                user_label=self._request_user_label(update),
                 provider=parsed_link.provider,
                 provider_label=parsed_link.provider_label,
                 original_url=parsed_link.original_url,
@@ -155,7 +158,7 @@ class TelegramBot:
             request_context = RequestContext(
                 request_id=submission.request_id,
                 chat_id=update.effective_chat.id,
-                user_id=update.effective_user.id,
+                user_id=request_user_id,
                 provider_label=parsed_link.provider_label,
                 normalized_url=parsed_link.normalized_url,
                 original_url=parsed_link.original_url,
@@ -1931,6 +1934,31 @@ class TelegramBot:
         if user.full_name:
             return user.full_name
         return str(user.id)
+
+    @staticmethod
+    def _request_user_id(update: Update) -> int | None:
+        if update.effective_user is not None:
+            return update.effective_user.id
+        sender_chat = getattr(update.message, "sender_chat", None) if update.message else None
+        if sender_chat is not None:
+            return getattr(sender_chat, "id", None)
+        return None
+
+    @classmethod
+    def _request_user_label(cls, update: Update) -> str:
+        if update.effective_user is not None:
+            return cls._user_label(update)
+        sender_chat = getattr(update.message, "sender_chat", None) if update.message else None
+        if sender_chat is None:
+            return "unknown"
+        title = getattr(sender_chat, "title", None)
+        if title:
+            return str(title)
+        username = getattr(sender_chat, "username", None)
+        if username:
+            return f"@{username}"
+        sender_chat_id = getattr(sender_chat, "id", None)
+        return str(sender_chat_id) if sender_chat_id is not None else "unknown"
 
     def _message_is_from_owner(self, update: Update) -> bool:
         return (
