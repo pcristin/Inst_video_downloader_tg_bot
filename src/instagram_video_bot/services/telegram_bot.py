@@ -96,11 +96,11 @@ class TelegramBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages by queueing supported provider links."""
-        if not update.message or not update.message.text or not update.effective_chat or not update.effective_user:
+        if not update.message or not update.effective_chat or not update.effective_user:
             return
 
         self._purge_expired_cache()
-        message_text = update.message.text
+        message_text = update.message.text or ""
         extracted_links = RequestParser.extract_supported_links(
             message_text,
             limit=settings.MAX_LINKS_PER_MESSAGE,
@@ -504,7 +504,7 @@ class TelegramBot:
         chosen = update.chosen_inline_result
         if not chosen or not chosen.inline_message_id:
             return
-        session_token = parse_inline_result_id(chosen.result_id)
+        session_token = self._parse_chosen_inline_session_token(chosen.result_id)
         if not session_token:
             return
         claim_status = self._claim_inline_delivery_session(
@@ -625,10 +625,7 @@ class TelegramBot:
         if payload is None or payload.user_id != update.effective_user.id or payment.currency != "XTR":
             return
 
-        runtime = self.state_store.get_inline_runtime_settings()
         if payload.kind == "subscription":
-            if payment.total_amount != runtime["subscription_stars"]:
-                return
             self.state_store.record_inline_subscription(
                 user_id=payload.user_id,
                 expires_at=self._subscription_expires_at(payment),
@@ -645,11 +642,7 @@ class TelegramBot:
                 )
             return
 
-        if (
-            payload.kind != "one_time"
-            or not runtime["one_time_enabled"]
-            or payment.total_amount != runtime["one_time_stars"]
-        ):
+        if payload.kind != "one_time":
             return
         payment_id = self.state_store.record_inline_one_time_payment(
             user_id=payload.user_id,
@@ -682,6 +675,17 @@ class TelegramBot:
         if isinstance(expires_at, (int, float)):
             return datetime.fromtimestamp(expires_at, tz=timezone.utc)
         return datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS)
+
+    @staticmethod
+    def _parse_chosen_inline_session_token(result_id: str) -> str | None:
+        session_token = parse_inline_result_id(result_id)
+        if session_token:
+            return session_token
+        for prefix in ("sub:", "once:"):
+            if result_id.startswith(prefix):
+                token = result_id.removeprefix(prefix).strip()
+                return token or None
+        return None
 
     @staticmethod
     def _inline_session_is_expired(session: dict[str, Any]) -> bool:

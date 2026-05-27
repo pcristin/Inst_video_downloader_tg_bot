@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.instagram_video_bot.config.settings import settings
-from src.instagram_video_bot.services.inline_access import build_one_time_payload
+from src.instagram_video_bot.services.inline_access import build_one_time_payload, build_subscription_payload
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
 
@@ -125,6 +125,33 @@ async def test_chosen_inline_result_attaches_inline_message_id(tmp_path):
     )
 
     assert store.get_inline_session("s1", user_id=1001)["inline_message_id"] == "inline-msg"
+
+
+@pytest.mark.asyncio
+async def test_paid_invoice_chosen_inline_result_attaches_inline_message_id(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+    paid_result = query.answers[0]["results"][0]
+    session_token = paid_result.id.split(":", 1)[1]
+
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult(paid_result.id, "inline-msg")),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    assert store.get_inline_session(session_token, user_id=1001)["inline_message_id"] == "inline-msg"
+    assert len(scheduled) == 1
 
 
 @pytest.mark.asyncio
@@ -306,6 +333,22 @@ async def test_owner_can_whitelist_forwarded_visible_user(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_owner_can_whitelist_forwarded_non_text_visible_user(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
+    store = StateStore(tmp_path / "state.db")
+    bot = TelegramBot(state_store=store)
+    forwarded_user = SimpleNamespace(id=1001)
+    message = _FakeMessage(None, forward_from=forwarded_user)
+
+    await bot.handle_message(
+        _FakeUpdate(message=message, user_id=42),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    assert bot.state_store.is_inline_whitelisted(1001) is True
+
+
+@pytest.mark.asyncio
 async def test_owner_can_change_subscription_price(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
     store = StateStore(tmp_path / "state.db")
@@ -341,6 +384,65 @@ async def test_owner_can_enable_one_time_payment(monkeypatch, tmp_path):
 async def test_one_time_failure_refunds_payment(monkeypatch, tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=5)
+    expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=expires_at,
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+    successful_payment = SimpleNamespace(
+        invoice_payload=build_one_time_payload(user_id=1001, session_token="s1"),
+        currency="XTR",
+        total_amount=5,
+        telegram_payment_charge_id="tg-charge",
+        provider_payment_charge_id="provider-charge",
+    )
+    message = _FakeMessage(successful_payment=successful_payment)
+
+    await bot.successful_payment_handler(
+        _FakeUpdate(message=message, user_id=1001),
+        SimpleNamespace(bot=fake_bot),
+    )
+
+    assert fake_bot.refunds == [{"user_id": 1001, "telegram_payment_charge_id": "tg-charge"}]
+
+
+@pytest.mark.asyncio
+async def test_subscription_success_records_after_price_changed_post_checkout(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(subscription_stars=9)
+    bot = TelegramBot(state_store=store)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    successful_payment = SimpleNamespace(
+        invoice_payload=build_subscription_payload(user_id=1001, session_token="s1"),
+        currency="XTR",
+        total_amount=5,
+        telegram_payment_charge_id="tg-charge",
+        provider_payment_charge_id="provider-charge",
+        subscription_expiration_date=expires_at,
+    )
+    message = _FakeMessage(successful_payment=successful_payment)
+
+    await bot.successful_payment_handler(
+        _FakeUpdate(message=message, user_id=1001),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    subscription = store.get_inline_subscription(1001)
+    assert subscription["total_amount"] == 5
+    assert subscription["telegram_payment_charge_id"] == "tg-charge"
+
+
+@pytest.mark.asyncio
+async def test_one_time_success_refunds_expired_session_after_disabled_post_checkout(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.update_inline_runtime_settings(one_time_enabled=False, one_time_stars=9)
     expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     store.create_inline_session(
         session_token="s1",
