@@ -19,14 +19,14 @@ async def test_global_error_handler_handles_network_error():
 def test_run_registers_global_error_handler(monkeypatch):
     registered = {
         "error_handler": None,
-        "message_handler": None,
+        "handlers": [],
         "post_init": None,
         "ran": False,
     }
 
     class FakeApplication:
         def add_handler(self, handler):
-            registered["message_handler"] = handler
+            registered["handlers"].append(handler)
 
         def add_error_handler(self, handler):
             registered["error_handler"] = handler
@@ -60,7 +60,23 @@ def test_run_registers_global_error_handler(monkeypatch):
     bot = TelegramBot()
     bot.run()
 
-    assert registered["message_handler"] is not None
+    callback_names = [
+        handler.callback.__name__
+        for handler in registered["handlers"]
+        if getattr(handler, "callback", None) is not None
+    ]
+    for callback_name in [
+        "inline_query_handler",
+        "chosen_inline_result_handler",
+        "inline_callback_handler",
+        "pre_checkout_handler",
+        "successful_payment_handler",
+        "inline_whitelist_command",
+        "inline_price_command",
+        "inline_onetime_command",
+        "handle_message",
+    ]:
+        assert callback_name in callback_names
     assert registered["error_handler"] == bot._global_error_handler
     assert registered["post_init"] is not None
     assert registered["ran"] is True

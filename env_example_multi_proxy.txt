@@ -34,4 +34,13 @@ PROXIES=user1:pass1@proxy1.com:8080,user2:pass2@proxy2.com:8080,user3:pass3@prox
 # How proxy assignment works:
 # - Accounts are assigned proxies in round-robin fashion
 # - Account 1 gets proxy 1, Account 2 gets proxy 2, ..., Account 11 gets proxy 1 again
-# - This ensures even distribution across your 10 proxies 
+# - This ensures even distribution across your 10 proxies
+
+INLINE_MODE_ENABLED=true
+INLINE_SUBSCRIPTION_REQUIRED=true
+INLINE_SUBSCRIPTION_STARS=1
+INLINE_SUBSCRIPTION_PERIOD_SECONDS=2592000
+INLINE_ONE_TIME_ENABLED=false
+INLINE_ONE_TIME_STARS=1
+INLINE_SESSION_TTL_SECONDS=900
+INLINE_STORAGE_CHAT_ID=-1001234567890

@@ -332,6 +332,21 @@ uv run python manage_accounts.py setup
 uv run python manage_accounts.py status
 ```
 
+## Paid true inline mode
+
+Inline mode sends media into the chat where the inline result is selected. Directly pasting links into a bot chat remains free.
+
+Required setup:
+
+1. In BotFather, run `/setinline`.
+2. In BotFather, run `/setinlinefeedback` and set feedback to 100%.
+3. Create a private storage channel or chat, add the bot, and set `INLINE_STORAGE_CHAT_ID`.
+4. Set `INLINE_SUBSCRIPTION_STARS` or use `/inline_price subscription <stars>`.
+5. Optionally enable one-time access with `/inline_onetime on <stars>`.
+6. Grant free inline access with `/inline_whitelist add <telegram_id>` or forward a visible-origin user message to the bot as owner.
+
+Telegram cannot upload a new file while editing an inline message, so the bot first uploads media to the storage chat, then edits the selected inline message using the resulting `file_id`.
+
 ## Troubleshooting
 
 ### Common Issues
