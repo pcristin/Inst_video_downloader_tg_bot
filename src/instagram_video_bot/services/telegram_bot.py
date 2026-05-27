@@ -16,9 +16,11 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InlineQueryResultArticle,
+    InputInvoiceMessageContent,
     InputMediaPhoto,
     InputMediaVideo,
     InputTextMessageContent,
+    LabeledPrice,
     Message,
     Update,
 )
@@ -35,7 +37,15 @@ from telegram.ext import (
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
 from .download_models import ProviderExecutionMetrics
-from .inline_access import build_inline_result_id, generate_session_token, parse_inline_result_id
+from .inline_access import (
+    build_inline_result_id,
+    build_one_time_payload,
+    build_subscription_payload,
+    generate_session_token,
+    parse_inline_payment_payload,
+    parse_inline_result_id,
+    validate_star_amount,
+)
 from .inline_delivery import (
     InlineCachedMediaItem,
     build_inline_input_media,
@@ -96,6 +106,8 @@ class TelegramBot:
             limit=settings.MAX_LINKS_PER_MESSAGE,
         )
         if not extracted_links:
+            if self._message_is_from_owner(update) and await self._whitelist_forwarded_visible_user(update):
+                return
             return
 
         group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
@@ -367,6 +379,78 @@ class TelegramBot:
             f"{self._format_performance_summary(performance)}"
         )
 
+    async def inline_whitelist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage owner-controlled true-inline whitelist."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        action = args[0].lower() if args else ""
+        if action == "list":
+            users = self.state_store.list_inline_whitelist_users()
+            await update.message.reply_text(ChaosText.inline_whitelist_list(users))
+            return
+        if action not in {"add", "remove"} or len(args) != 2:
+            await update.message.reply_text(ChaosText.inline_whitelist_usage())
+            return
+        user_id = self._parse_positive_int_arg(args[1])
+        if user_id is None:
+            await update.message.reply_text(ChaosText.inline_whitelist_usage())
+            return
+        if action == "add":
+            self.state_store.add_inline_whitelist_user(
+                user_id,
+                added_by_user_id=update.effective_user.id,
+                note="owner_command",
+            )
+            await update.message.reply_text(ChaosText.inline_whitelist_added(user_id))
+            return
+        self.state_store.remove_inline_whitelist_user(user_id)
+        await update.message.reply_text(ChaosText.inline_whitelist_removed(user_id))
+
+    async def inline_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage Stars subscription price for true-inline mode."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        if len(args) != 2 or args[0].lower() != "subscription":
+            await update.message.reply_text(ChaosText.inline_price_usage())
+            return
+        stars = validate_star_amount(args[1])
+        if stars is None:
+            await update.message.reply_text(ChaosText.inline_price_usage())
+            return
+        runtime = self.state_store.update_inline_runtime_settings(subscription_stars=stars)
+        await update.message.reply_text(ChaosText.inline_subscription_price_updated(runtime["subscription_stars"]))
+
+    async def inline_onetime_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manage optional one-time Stars payments for true-inline mode."""
+        if not update.message:
+            return
+        if not await self._require_owner(update):
+            return
+        args = list(getattr(context, "args", []) or [])
+        action = args[0].lower() if args else ""
+        if action == "off" and len(args) == 1:
+            runtime = self.state_store.update_inline_runtime_settings(one_time_enabled=False)
+            await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
+            return
+        if action != "on" or len(args) != 2:
+            await update.message.reply_text(ChaosText.inline_onetime_usage())
+            return
+        stars = validate_star_amount(args[1])
+        if stars is None:
+            await update.message.reply_text(ChaosText.inline_onetime_usage())
+            return
+        runtime = self.state_store.update_inline_runtime_settings(
+            one_time_enabled=True,
+            one_time_stars=stars,
+        )
+        await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
+
     async def inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Return true inline placeholder results that will be edited into media."""
 
@@ -454,17 +538,150 @@ class TelegramBot:
         self._schedule_inline_delivery(context, session_token=session_token, one_time_payment_id=None)
 
     async def _answer_paid_inline_options(self, query: Any, parsed_link: ParsedRequestLink) -> None:
-        """Minimal paid-inline placeholder until payment handling is wired."""
-
-        result = InlineQueryResultArticle(
-            id="inline-paywall",
-            title="Inline access required",
-            description=parsed_link.provider_label,
-            input_message_content=InputTextMessageContent(
-                "Inline delivery requires access. Direct messages remain free."
-            ),
+        runtime = self.state_store.get_inline_runtime_settings()
+        session_token = generate_session_token()
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        self.state_store.create_inline_session(
+            session_token=session_token,
+            user_id=query.from_user.id,
+            original_url=parsed_link.original_url,
+            normalized_url=parsed_link.normalized_url,
+            provider=parsed_link.provider,
+            provider_label=parsed_link.provider_label,
+            expires_at=expires_at,
         )
-        await query.answer([result], cache_time=0, is_personal=True)
+        results = [
+            InlineQueryResultArticle(
+                id=f"sub:{session_token}",
+                title=f"Subscribe for {runtime['subscription_stars']} Stars/month",
+                input_message_content=InputInvoiceMessageContent(
+                    title="Inline Mode",
+                    description="Monthly access to send downloaded media into any chat.",
+                    payload=build_subscription_payload(user_id=query.from_user.id, session_token=session_token),
+                    provider_token="",
+                    currency="XTR",
+                    prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
+                    api_kwargs={
+                        "subscription_period": settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
+                    },
+                ),
+            ),
+        ]
+        if runtime["one_time_enabled"]:
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"once:{session_token}",
+                    title=f"Pay {runtime['one_time_stars']} Stars for this link",
+                    input_message_content=InputInvoiceMessageContent(
+                        title="One Inline Download",
+                        description="One-time access for this inline media link.",
+                        payload=build_one_time_payload(user_id=query.from_user.id, session_token=session_token),
+                        provider_token="",
+                        currency="XTR",
+                        prices=[LabeledPrice("One Inline Download", runtime["one_time_stars"])],
+                    ),
+                )
+            )
+        await query.answer(results, cache_time=0, is_personal=True)
+
+    async def pre_checkout_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Approve Telegram Stars inline invoices only when payload and amount match runtime settings."""
+
+        query = getattr(update, "pre_checkout_query", None)
+        if not query or not query.from_user:
+            return
+        payload = parse_inline_payment_payload(query.invoice_payload)
+        runtime = self.state_store.get_inline_runtime_settings()
+        approved = (
+            payload is not None
+            and query.currency == "XTR"
+            and payload.user_id == query.from_user.id
+            and (
+                (
+                    payload.kind == "subscription"
+                    and query.total_amount == runtime["subscription_stars"]
+                )
+                or (
+                    payload.kind == "one_time"
+                    and runtime["one_time_enabled"]
+                    and query.total_amount == runtime["one_time_stars"]
+                )
+            )
+        )
+        if approved:
+            await query.answer(ok=True)
+            return
+        await query.answer(ok=False, error_message="Inline payment details are no longer valid.")
+
+    async def successful_payment_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Record successful Stars payments and deliver or refund linked inline sessions."""
+
+        if not update.message or not update.effective_user:
+            return
+        payment = getattr(update.message, "successful_payment", None)
+        if payment is None:
+            return
+        payload = parse_inline_payment_payload(payment.invoice_payload)
+        if payload is None or payload.user_id != update.effective_user.id or payment.currency != "XTR":
+            return
+
+        runtime = self.state_store.get_inline_runtime_settings()
+        if payload.kind == "subscription":
+            if payment.total_amount != runtime["subscription_stars"]:
+                return
+            self.state_store.record_inline_subscription(
+                user_id=payload.user_id,
+                expires_at=self._subscription_expires_at(payment),
+                telegram_payment_charge_id=payment.telegram_payment_charge_id,
+                provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", "") or "",
+                total_amount=payment.total_amount,
+            )
+            session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
+            if session and session.get("inline_message_id") and not self._inline_session_is_expired(session):
+                await self._deliver_inline_session(
+                    context,
+                    session_token=payload.session_token,
+                    one_time_payment_id=None,
+                )
+            return
+
+        if (
+            payload.kind != "one_time"
+            or not runtime["one_time_enabled"]
+            or payment.total_amount != runtime["one_time_stars"]
+        ):
+            return
+        payment_id = self.state_store.record_inline_one_time_payment(
+            user_id=payload.user_id,
+            session_token=payload.session_token,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            total_amount=payment.total_amount,
+        )
+        session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
+        if session is None or self._inline_session_is_expired(session):
+            await self._refund_one_time_payment(
+                context,
+                payment_id=payment_id,
+                user_id=payload.user_id,
+                reason="inline_session_expired",
+            )
+            return
+        await self._deliver_inline_session(
+            context,
+            session_token=payload.session_token,
+            one_time_payment_id=payment_id,
+        )
+
+    @staticmethod
+    def _subscription_expires_at(payment: Any) -> datetime:
+        expires_at = getattr(payment, "subscription_expiration_date", None)
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                return expires_at.replace(tzinfo=timezone.utc)
+            return expires_at.astimezone(timezone.utc)
+        if isinstance(expires_at, (int, float)):
+            return datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        return datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS)
 
     @staticmethod
     def _inline_session_is_expired(session: dict[str, Any]) -> bool:
@@ -537,7 +754,8 @@ class TelegramBot:
                 if one_time_payment_id:
                     await self._refund_one_time_payment(
                         context,
-                        one_time_payment_id,
+                        payment_id=one_time_payment_id,
+                        user_id=int(session["user_id"]),
                         reason="inline_storage_missing",
                     )
                 await self._safe_edit_inline_text(
@@ -590,7 +808,14 @@ class TelegramBot:
             logger.exception("Inline delivery failed for session %s", session_token)
             self.state_store.mark_inline_session_status(session_token, "failed")
             if one_time_payment_id:
-                await self._refund_one_time_payment(context, one_time_payment_id, reason="download_failed")
+                session = self.state_store.get_inline_session(session_token)
+                user_id = int(session["user_id"]) if session else 0
+                await self._refund_one_time_payment(
+                    context,
+                    payment_id=one_time_payment_id,
+                    user_id=user_id,
+                    reason="download_failed",
+                )
             if inline_message_id is not None:
                 await self._safe_edit_inline_text(
                     context,
@@ -603,11 +828,26 @@ class TelegramBot:
     async def _refund_one_time_payment(
         self,
         context: ContextTypes.DEFAULT_TYPE,
-        payment_id: str,
         *,
+        payment_id: str,
+        user_id: int,
         reason: str,
     ) -> None:
-        """No-op placeholder for Task 5 refund integration."""
+        payment = self.state_store.get_inline_one_time_payment(payment_id)
+        if not payment or payment["status"] != "paid":
+            return
+        try:
+            await context.bot.refund_star_payment(
+                user_id=user_id,
+                telegram_payment_charge_id=payment["telegram_payment_charge_id"],
+            )
+        except TelegramError as exc:
+            self.state_store.mark_inline_one_time_payment_refund_failed(
+                payment_id,
+                reason=f"{reason}:{exc.__class__.__name__}",
+            )
+            return
+        self.state_store.mark_inline_one_time_payment_refunded(payment_id, reason=reason)
 
     @staticmethod
     async def _safe_edit_inline_text(
@@ -1284,6 +1524,38 @@ class TelegramBot:
         if user.full_name:
             return user.full_name
         return str(user.id)
+
+    def _message_is_from_owner(self, update: Update) -> bool:
+        return (
+            settings.BOT_OWNER_USER_ID is not None
+            and update.effective_user is not None
+            and update.effective_user.id == settings.BOT_OWNER_USER_ID
+        )
+
+    async def _whitelist_forwarded_visible_user(self, update: Update) -> bool:
+        if not update.message or not update.effective_user:
+            return False
+        forwarded_user_id = self._forwarded_visible_user_id(update.message)
+        if forwarded_user_id is None:
+            return False
+        self.state_store.add_inline_whitelist_user(
+            forwarded_user_id,
+            added_by_user_id=update.effective_user.id,
+            note="owner_forward",
+        )
+        await update.message.reply_text(ChaosText.inline_whitelist_forward_added(forwarded_user_id))
+        return True
+
+    @staticmethod
+    def _forwarded_visible_user_id(message: Message) -> int | None:
+        forward_from = getattr(message, "forward_from", None)
+        if getattr(forward_from, "id", None) is not None:
+            return int(forward_from.id)
+        forward_origin = getattr(message, "forward_origin", None)
+        sender_user = getattr(forward_origin, "sender_user", None)
+        if getattr(sender_user, "id", None) is not None:
+            return int(sender_user.id)
+        return None
 
     async def _toggle_group_setting(
         self,
