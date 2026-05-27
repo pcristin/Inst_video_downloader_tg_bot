@@ -25,10 +25,22 @@ class _FakeChosenInlineResult:
         self.from_user = SimpleNamespace(id=user_id)
 
 
+class _FakeCallbackQuery:
+    def __init__(self, data: str, inline_message_id: str, user_id: int = 1001):
+        self.data = data
+        self.inline_message_id = inline_message_id
+        self.from_user = SimpleNamespace(id=user_id)
+        self.answers = []
+
+    async def answer(self, text=None, **kwargs):
+        self.answers.append({"text": text, **kwargs})
+
+
 class _FakeUpdate:
-    def __init__(self, *, inline_query=None, chosen_inline_result=None, user_id=1001):
+    def __init__(self, *, inline_query=None, chosen_inline_result=None, callback_query=None, user_id=1001):
         self.inline_query = inline_query
         self.chosen_inline_result = chosen_inline_result
+        self.callback_query = callback_query
         self.effective_user = SimpleNamespace(id=user_id, username="alice", full_name="Alice")
 
 
@@ -68,3 +80,69 @@ async def test_chosen_inline_result_attaches_inline_message_id(tmp_path):
     )
 
     assert store.get_inline_session("s1", user_id=1001)["inline_message_id"] == "inline-msg"
+
+
+@pytest.mark.asyncio
+async def test_expired_chosen_inline_result_does_not_attach_or_schedule(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=expires_at,
+    )
+    bot = TelegramBot(state_store=store)
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult("inline:s1", "inline-msg")),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    session = store.get_inline_session("s1", user_id=1001)
+    assert session["inline_message_id"] is None
+    assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_expired_inline_callback_answers_expired_without_attach_or_schedule(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=expires_at,
+    )
+    bot = TelegramBot(state_store=store)
+    callback_query = _FakeCallbackQuery("inline:s1", "inline-msg")
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.inline_callback_handler(
+        _FakeUpdate(callback_query=callback_query),
+        SimpleNamespace(bot=SimpleNamespace()),
+    )
+
+    session = store.get_inline_session("s1", user_id=1001)
+    assert session["inline_message_id"] is None
+    assert callback_query.answers == [{"text": "This inline request expired."}]
+    assert scheduled == []

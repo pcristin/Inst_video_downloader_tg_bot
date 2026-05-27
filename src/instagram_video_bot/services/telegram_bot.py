@@ -426,7 +426,7 @@ class TelegramBot:
         if not session_token:
             return
         session = self.state_store.get_inline_session(session_token, user_id=chosen.from_user.id)
-        if session is None:
+        if session is None or self._inline_session_is_expired(session):
             return
         self.state_store.attach_inline_message(session_token, inline_message_id=chosen.inline_message_id)
         asyncio.create_task(self._deliver_inline_session(context, session_token=session_token, one_time_payment_id=None))
@@ -439,7 +439,7 @@ class TelegramBot:
             return
         session_token = query.data.removeprefix("inline:")
         session = self.state_store.get_inline_session(session_token, user_id=query.from_user.id)
-        if session is None:
+        if session is None or self._inline_session_is_expired(session):
             await query.answer("This inline request expired.")
             return
         self.state_store.attach_inline_message(session_token, inline_message_id=query.inline_message_id)
@@ -458,6 +458,19 @@ class TelegramBot:
             ),
         )
         await query.answer([result], cache_time=0, is_personal=True)
+
+    @staticmethod
+    def _inline_session_is_expired(session: dict[str, Any]) -> bool:
+        expires_at_raw = session.get("expires_at")
+        if not expires_at_raw:
+            return True
+        try:
+            expires_at = datetime.fromisoformat(str(expires_at_raw))
+        except ValueError:
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
 
     async def _deliver_inline_session(
         self,
