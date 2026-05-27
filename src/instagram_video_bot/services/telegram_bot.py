@@ -104,6 +104,9 @@ class TelegramBot:
         """Handle incoming messages by queueing supported provider links."""
         if not update.message or not update.effective_chat or not update.effective_user:
             return
+        if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
+            await self.legacy_redirect_handler(update, context)
+            return
 
         self._purge_expired_cache()
         message_text = update.message.text or ""
@@ -181,6 +184,43 @@ class TelegramBot:
         if not await self._require_owner(update):
             return
         await update.message.reply_text(ChaosText.admin_help())
+
+    async def legacy_redirect_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Redirect any old-bot message to the new bot username."""
+        if not update.message or not settings.BOT_MIGRATION_TARGET_USERNAME:
+            return
+        await update.message.reply_text(
+            ChaosText.bot_migration_redirect(settings.BOT_MIGRATION_TARGET_USERNAME)
+        )
+
+    async def legacy_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Redirect stale inline callbacks from the old bot."""
+        if not update.callback_query or not settings.BOT_MIGRATION_TARGET_USERNAME:
+            return
+        await update.callback_query.answer(
+            ChaosText.bot_migration_redirect(settings.BOT_MIGRATION_TARGET_USERNAME),
+            show_alert=True,
+        )
+
+    async def legacy_inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Return a migration result for inline queries sent to the old bot."""
+        if not update.inline_query or not settings.BOT_MIGRATION_TARGET_USERNAME:
+            return
+        username = settings.BOT_MIGRATION_TARGET_USERNAME.strip().removeprefix("@")
+        await update.inline_query.answer(
+            [
+                InlineQueryResultArticle(
+                    id=f"bot_migration_{username}",
+                    title=f"Мы переехали в @{username}",
+                    description=f"Открой нового бота: https://t.me/{username}",
+                    input_message_content=InputTextMessageContent(
+                        ChaosText.bot_migration_redirect(username)
+                    ),
+                )
+            ],
+            cache_time=30,
+            is_personal=True,
+        )
 
     async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show supported URL shapes."""
@@ -2068,25 +2108,45 @@ class TelegramBot:
             .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
         )
 
-        if settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None:
+        has_inline_post_init = settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None
+        has_migration_post_init = bool(settings.BOT_MIGRATION_TARGET_USERNAME)
+        if has_inline_post_init or has_migration_post_init:
             from .post_deploy_notifications import (
+                send_bot_migration_announcement_once,
                 send_inline_mode_announcement_once,
                 send_inline_promo_refund_announcement_once,
             )
 
             async def _post_init(application: Application) -> None:
-                application.create_task(_send_inline_mode_announcement(application))
+                application.create_task(_run_post_deploy_tasks(application))
 
-            async def _send_inline_mode_announcement(application: Application) -> None:
-                await self._evaluate_expired_inline_subscription_refunds(application)
-                inline_result = await send_inline_mode_announcement_once(application.bot, self.state_store)
-                promo_result = await send_inline_promo_refund_announcement_once(application.bot, self.state_store)
-                logger.info("Inline mode announcement result: %s", inline_result)
-                logger.info("Inline promo/refund announcement result: %s", promo_result)
+            async def _run_post_deploy_tasks(application: Application) -> None:
+                if has_inline_post_init:
+                    await self._evaluate_expired_inline_subscription_refunds(application)
+                    inline_result = await send_inline_mode_announcement_once(application.bot, self.state_store)
+                    promo_result = await send_inline_promo_refund_announcement_once(application.bot, self.state_store)
+                    logger.info("Inline mode announcement result: %s", inline_result)
+                    logger.info("Inline promo/refund announcement result: %s", promo_result)
+                if settings.BOT_MIGRATION_TARGET_USERNAME:
+                    migration_result = await send_bot_migration_announcement_once(
+                        application.bot,
+                        self.state_store,
+                        target_username=settings.BOT_MIGRATION_TARGET_USERNAME,
+                    )
+                    logger.info("Bot migration announcement result: %s", migration_result)
 
             builder = builder.post_init(_post_init)
 
         self.application = builder.build()
+
+        if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
+            self.application.add_handler(InlineQueryHandler(self.legacy_inline_query_handler))
+            self.application.add_handler(CallbackQueryHandler(self.legacy_callback_handler))
+            self.application.add_handler(MessageHandler(filters.ALL, self.legacy_redirect_handler))
+            self.application.add_error_handler(self._global_error_handler)
+            logger.info("Bot started in legacy redirect mode")
+            self.application.run_polling()
+            return
 
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("admin_help", self.admin_help_command))

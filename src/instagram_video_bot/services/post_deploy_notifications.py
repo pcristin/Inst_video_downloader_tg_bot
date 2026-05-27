@@ -32,6 +32,32 @@ INLINE_PROMO_REFUND_ANNOUNCEMENT_TEXT = (
 )
 
 
+def normalize_bot_username(username: str) -> str:
+    """Return a Telegram bot username without the leading @."""
+
+    return username.strip().removeprefix("@")
+
+
+def build_bot_migration_announcement_key(target_username: str) -> str:
+    """Build the send-once key for a bot migration target."""
+
+    normalized_username = normalize_bot_username(target_username)
+    return f"bot_migration_to_{normalized_username}_2026_05_27"
+
+
+def build_bot_migration_announcement_text(target_username: str) -> str:
+    """Build the user-facing bot migration announcement."""
+
+    normalized_username = normalize_bot_username(target_username)
+    return (
+        f"Мы переехали: теперь бот работает как @{normalized_username}\n\n"
+        "Inline-режим стал короче и удобнее:\n"
+        f"@{normalized_username} <ссылка>\n\n"
+        "Твои подписки, whitelist и бесплатные inline-попытки сохраняются.\n"
+        f"Открыть нового бота: https://t.me/{normalized_username}"
+    )
+
+
 async def send_inline_mode_announcement_once(
     bot,
     state_store: StateStore,
@@ -65,6 +91,25 @@ async def send_inline_promo_refund_announcement_once(
         text=INLINE_PROMO_REFUND_ANNOUNCEMENT_TEXT,
         pause_seconds=pause_seconds,
         log_label="Inline promo/refund announcement",
+    )
+
+
+async def send_bot_migration_announcement_once(
+    bot,
+    state_store: StateStore,
+    *,
+    target_username: str,
+    pause_seconds: float = 0.05,
+) -> dict[str, int]:
+    """Send the bot migration announcement once per historical requester."""
+
+    return await _send_announcement_once(
+        bot,
+        state_store,
+        notification_key=build_bot_migration_announcement_key(target_username),
+        text=build_bot_migration_announcement_text(target_username),
+        pause_seconds=pause_seconds,
+        log_label="Bot migration announcement",
     )
 
 
