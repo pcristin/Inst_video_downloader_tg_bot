@@ -22,6 +22,10 @@ def test_subscription_payload_round_trips():
     )
 
 
+def test_subscription_payload_accepts_positional_arguments():
+    assert build_subscription_payload(1001, "s1") == "inline_sub:v1:1001:s1"
+
+
 def test_one_time_payload_round_trips():
     payload = build_one_time_payload(user_id=1001, session_token="s1")
 
@@ -30,6 +34,10 @@ def test_one_time_payload_round_trips():
         user_id=1001,
         session_token="s1",
     )
+
+
+def test_one_time_payload_accepts_positional_arguments():
+    assert build_one_time_payload(1001, "s1") == "inline_once:v1:1001:s1"
 
 
 def test_invalid_payload_returns_none():

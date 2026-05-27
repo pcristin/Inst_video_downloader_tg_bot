@@ -33,11 +33,11 @@ def parse_inline_result_id(result_id: str) -> str | None:
     return token or None
 
 
-def build_subscription_payload(*, user_id: int, session_token: str) -> str:
+def build_subscription_payload(user_id: int, session_token: str) -> str:
     return f"{SUBSCRIPTION_PREFIX}:{user_id}:{session_token}"
 
 
-def build_one_time_payload(*, user_id: int, session_token: str) -> str:
+def build_one_time_payload(user_id: int, session_token: str) -> str:
     return f"{ONE_TIME_PREFIX}:{user_id}:{session_token}"
 
 
