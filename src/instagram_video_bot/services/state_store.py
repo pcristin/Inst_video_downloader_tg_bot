@@ -128,6 +128,7 @@ class StateStore:
                     normalized_url TEXT NOT NULL,
                     provider TEXT NOT NULL,
                     provider_label TEXT NOT NULL,
+                    access_kind TEXT NOT NULL DEFAULT 'free',
                     inline_message_id TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -145,10 +146,13 @@ class StateStore:
                 CREATE TABLE IF NOT EXISTS inline_subscriptions (
                     user_id INTEGER PRIMARY KEY,
                     status TEXT NOT NULL,
+                    started_at TEXT NOT NULL DEFAULT '',
                     expires_at TEXT NOT NULL,
                     telegram_payment_charge_id TEXT NOT NULL,
                     provider_payment_charge_id TEXT NOT NULL,
                     total_amount INTEGER NOT NULL,
+                    auto_refund_checked_at TEXT,
+                    refund_reason TEXT,
                     updated_at TEXT NOT NULL
                 );
 
@@ -181,6 +185,28 @@ class StateStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS user_rate_limit_events (
+                    event_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_promo_usage (
+                    user_id INTEGER PRIMARY KEY,
+                    success_count INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inline_delivery_events (
+                    event_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    session_token TEXT NOT NULL,
+                    access_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS user_notifications (
                     notification_key TEXT NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -201,6 +227,10 @@ class StateStore:
                     ON performance_metrics (chat_id, finished_at);
                 CREATE INDEX IF NOT EXISTS idx_user_notifications_key_status
                     ON user_notifications (notification_key, status);
+                CREATE INDEX IF NOT EXISTS idx_user_rate_limit_user_created
+                    ON user_rate_limit_events (user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_inline_delivery_user_period
+                    ON inline_delivery_events (user_id, access_kind, occurred_at);
                 """
             )
             existing_columns = {
@@ -259,6 +289,37 @@ class StateStore:
                 self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT")
             if "normalized_url" not in one_time_payment_columns:
                 self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT")
+            inline_session_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(inline_sessions)").fetchall()
+            }
+            if "access_kind" not in inline_session_columns:
+                self._conn.execute(
+                    "ALTER TABLE inline_sessions ADD COLUMN access_kind TEXT NOT NULL DEFAULT 'free'"
+                )
+            subscription_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(inline_subscriptions)").fetchall()
+            }
+            if "started_at" not in subscription_columns:
+                self._conn.execute(
+                    "ALTER TABLE inline_subscriptions ADD COLUMN started_at TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.execute(
+                    """
+                    UPDATE inline_subscriptions
+                    SET started_at = updated_at
+                    WHERE started_at = ''
+                    """
+                )
+            if "auto_refund_checked_at" not in subscription_columns:
+                self._conn.execute(
+                    "ALTER TABLE inline_subscriptions ADD COLUMN auto_refund_checked_at TEXT"
+                )
+            if "refund_reason" not in subscription_columns:
+                self._conn.execute(
+                    "ALTER TABLE inline_subscriptions ADD COLUMN refund_reason TEXT"
+                )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
         with self._lock, self._conn:
@@ -862,6 +923,7 @@ class StateStore:
         provider: str,
         provider_label: str,
         expires_at: datetime,
+        access_kind: str = "free",
     ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
@@ -869,15 +931,16 @@ class StateStore:
                 """
                 INSERT INTO inline_sessions (
                     session_token, user_id, original_url, normalized_url, provider,
-                    provider_label, status, created_at, expires_at, updated_at
+                    provider_label, access_kind, status, created_at, expires_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_token) DO UPDATE SET
                     user_id = excluded.user_id,
                     original_url = excluded.original_url,
                     normalized_url = excluded.normalized_url,
                     provider = excluded.provider,
                     provider_label = excluded.provider_label,
+                    access_kind = excluded.access_kind,
                     status = excluded.status,
                     expires_at = excluded.expires_at,
                     updated_at = excluded.updated_at
@@ -889,6 +952,7 @@ class StateStore:
                     normalized_url,
                     provider,
                     provider_label,
+                    access_kind,
                     "created",
                     now,
                     self._normalize_utc_datetime(expires_at).isoformat(),
@@ -998,31 +1062,41 @@ class StateStore:
         telegram_payment_charge_id: str,
         provider_payment_charge_id: str,
         total_amount: int,
+        started_at: datetime | None = None,
     ) -> None:
         now = _utc_now().isoformat()
+        normalized_started_at = self._normalize_utc_datetime(started_at or _utc_now()).isoformat()
+        normalized_expires_at = self._normalize_utc_datetime(expires_at).isoformat()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO inline_subscriptions (
-                    user_id, status, expires_at, telegram_payment_charge_id,
-                    provider_payment_charge_id, total_amount, updated_at
+                    user_id, status, started_at, expires_at, telegram_payment_charge_id,
+                    provider_payment_charge_id, total_amount, auto_refund_checked_at,
+                    refund_reason, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     status = excluded.status,
+                    started_at = excluded.started_at,
                     expires_at = excluded.expires_at,
                     telegram_payment_charge_id = excluded.telegram_payment_charge_id,
                     provider_payment_charge_id = excluded.provider_payment_charge_id,
                     total_amount = excluded.total_amount,
+                    auto_refund_checked_at = excluded.auto_refund_checked_at,
+                    refund_reason = excluded.refund_reason,
                     updated_at = excluded.updated_at
                 """,
                 (
                     user_id,
                     "active",
-                    expires_at.isoformat(),
+                    normalized_started_at,
+                    normalized_expires_at,
                     telegram_payment_charge_id,
                     provider_payment_charge_id,
                     total_amount,
+                    None,
+                    None,
                     now,
                 ),
             )
@@ -1064,6 +1138,71 @@ class StateStore:
                 ("refunded", now, user_id),
             )
 
+    def mark_inline_subscription_auto_refunded(self, user_id: int, *, reason: str) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_subscriptions
+                SET status = ?,
+                    auto_refund_checked_at = ?,
+                    refund_reason = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                ("auto_refunded", now, reason, now, user_id),
+            )
+
+    def mark_inline_subscription_auto_refund_failed(self, user_id: int, *, reason: str) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_subscriptions
+                SET status = ?,
+                    auto_refund_checked_at = ?,
+                    refund_reason = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                ("auto_refund_failed", now, reason, now, user_id),
+            )
+
+    def mark_inline_subscription_refund_checked(self, user_id: int, *, reason: str) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_subscriptions
+                SET status = ?,
+                    auto_refund_checked_at = ?,
+                    refund_reason = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                ("completed", now, reason, now, user_id),
+            )
+
+    def list_expired_unchecked_inline_subscriptions(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        now_value = self._normalize_utc_datetime(now or _utc_now()).isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_subscriptions
+                WHERE status = 'active'
+                  AND expires_at <= ?
+                  AND auto_refund_checked_at IS NULL
+                ORDER BY expires_at ASC
+                """,
+                (now_value,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def has_active_inline_subscription(self, user_id: int) -> bool:
         row = self.get_inline_subscription(user_id)
         if row is None or row["status"] != "active":
@@ -1077,6 +1216,126 @@ class StateStore:
 
     def user_has_inline_access(self, user_id: int) -> bool:
         return self.is_inline_whitelisted(user_id) or self.has_active_inline_subscription(user_id)
+
+    def check_user_rate_limit(
+        self,
+        user_id: int,
+        *,
+        limit: int,
+        window_seconds: int,
+        now: datetime | None = None,
+        source: str = "request",
+    ) -> dict[str, Any]:
+        now_dt = self._normalize_utc_datetime(now or _utc_now())
+        window_start = now_dt - timedelta(seconds=max(0, window_seconds))
+        now_iso = now_dt.isoformat()
+        window_start_iso = window_start.isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM user_rate_limit_events WHERE created_at <= ?",
+                (window_start_iso,),
+            )
+            rows = self._conn.execute(
+                """
+                SELECT created_at
+                FROM user_rate_limit_events
+                WHERE user_id = ? AND created_at > ?
+                ORDER BY created_at ASC
+                """,
+                (user_id, window_start_iso),
+            ).fetchall()
+            if len(rows) >= max(1, limit):
+                oldest = datetime.fromisoformat(str(rows[0]["created_at"]))
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+                retry_after = max(1, int((oldest + timedelta(seconds=window_seconds) - now_dt).total_seconds()))
+                return {"allowed": False, "retry_after_seconds": retry_after}
+            self._conn.execute(
+                """
+                INSERT INTO user_rate_limit_events (event_id, user_id, source, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, user_id, source, now_iso),
+            )
+        return {"allowed": True, "retry_after_seconds": 0}
+
+    def record_inline_promo_success(self, user_id: int) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_promo_usage (user_id, success_count, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    success_count = success_count + 1,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, 1, now),
+            )
+
+    def get_inline_promo_success_count(self, user_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT success_count FROM inline_promo_usage WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        return int(row["success_count"]) if row is not None else 0
+
+    def record_inline_delivery_event(
+        self,
+        *,
+        user_id: int,
+        session_token: str,
+        access_kind: str,
+        status: str,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        now = self._normalize_utc_datetime(occurred_at or _utc_now()).isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO inline_delivery_events (
+                    event_id, user_id, session_token, access_kind, status, occurred_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (uuid.uuid4().hex, user_id, session_token, access_kind, status, now),
+            )
+
+    def get_subscription_delivery_stats(
+        self,
+        *,
+        user_id: int,
+        started_at: datetime,
+        expires_at: datetime,
+    ) -> dict[str, Any]:
+        started_iso = self._normalize_utc_datetime(started_at).isoformat()
+        expires_iso = self._normalize_utc_datetime(expires_at).isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM inline_delivery_events
+                WHERE user_id = ?
+                  AND access_kind = 'subscription'
+                  AND occurred_at >= ?
+                  AND occurred_at <= ?
+                  AND status IN ('success', 'failed')
+                GROUP BY status
+                """,
+                (user_id, started_iso, expires_iso),
+            ).fetchall()
+        counts = {str(row["status"]): int(row["count"]) for row in rows}
+        success = counts.get("success", 0)
+        failed = counts.get("failed", 0)
+        attempts = success + failed
+        failure_rate = failed / attempts if attempts else 0.0
+        return {
+            "success": success,
+            "failed": failed,
+            "attempts": attempts,
+            "failure_rate": failure_rate,
+        }
 
     def get_inline_runtime_settings(self) -> dict[str, Any]:
         values: dict[str, Any] = {

@@ -341,6 +341,26 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_handle_message_rejects_user_over_rate_limit(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_REQUESTS", 1)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_WINDOW_SECONDS", 600)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate("https://x.com/example/status/1", user_id=1001)
+    second_update = _FakeUpdate("https://x.com/example/status/2", user_id=1001)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+
+    tasks = list(telegram_bot.active_request_tasks.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    assert first_update.message.replies == ["Принял Twitter/X. Скоро начну скачивать."]
+    assert second_update.message.replies == ["Слишком много запросов. Попробуй снова примерно через 10 мин."]
+
+
+@pytest.mark.asyncio
 async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
@@ -860,6 +880,9 @@ async def test_admin_help_lists_owner_commands(monkeypatch, tmp_path):
     assert "Admin commands" in reply
     assert "/admin_status" in reply
     assert "/inline_refund <telegram_payment_charge_id> [user_id]" in reply
+    assert "USER_RATE_LIMIT_REQUESTS" in reply
+    assert "first 3 successful inline deliveries" in reply
+    assert "30% subscription refund protection" in reply
 
 
 @pytest.mark.asyncio

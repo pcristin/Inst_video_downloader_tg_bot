@@ -124,6 +124,12 @@ class TelegramBot:
             )
 
         for parsed_link in extracted_links:
+            rate_limit = self._consume_user_rate_limit(update.effective_user.id, source="direct")
+            if not rate_limit["allowed"]:
+                await update.message.reply_text(
+                    ChaosText.rate_limited(rate_limit["retry_after_seconds"])
+                )
+                break
             submission = self.job_manager.submit(
                 chat_id=update.effective_chat.id,
                 user_id=update.effective_user.id,
@@ -543,6 +549,7 @@ class TelegramBot:
         query = update.inline_query
         if not query or not settings.INLINE_MODE_ENABLED:
             return
+        await self._evaluate_expired_inline_subscription_refunds(context)
         parsed_links = RequestParser.extract_supported_links(query.query, limit=1)
         if not parsed_links:
             result = InlineQueryResultArticle(
@@ -565,7 +572,17 @@ class TelegramBot:
             await query.answer([result], cache_time=0, is_personal=True)
             return
 
-        if settings.INLINE_SUBSCRIPTION_REQUIRED and not self.state_store.user_has_inline_access(query.from_user.id):
+        access_kind = self._paid_or_free_inline_access_kind_for_user(query.from_user.id)
+        if access_kind is not None:
+            await self._answer_inline_delivery_option(
+                query,
+                parsed_link,
+                one_time_entitlement=False,
+                access_kind=access_kind,
+            )
+            return
+
+        if settings.INLINE_SUBSCRIPTION_REQUIRED:
             self.state_store.release_stale_inline_one_time_claims(
                 older_than=datetime.now(timezone.utc)
                 - timedelta(seconds=settings.INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS)
@@ -580,12 +597,29 @@ class TelegramBot:
                     query,
                     parsed_link,
                     one_time_entitlement=True,
+                    access_kind="one_time",
+                )
+                return
+            if (
+                self.state_store.get_inline_promo_success_count(query.from_user.id)
+                < settings.INLINE_FREE_SUCCESSFUL_DELIVERIES
+            ):
+                await self._answer_inline_delivery_option(
+                    query,
+                    parsed_link,
+                    one_time_entitlement=False,
+                    access_kind="promo",
                 )
                 return
             await self._answer_paid_inline_options(context, query, parsed_link)
             return
 
-        await self._answer_inline_delivery_option(query, parsed_link, one_time_entitlement=False)
+        await self._answer_inline_delivery_option(
+            query,
+            parsed_link,
+            one_time_entitlement=False,
+            access_kind="free",
+        )
 
     async def _answer_inline_delivery_option(
         self,
@@ -593,6 +627,7 @@ class TelegramBot:
         parsed_link: ParsedRequestLink,
         *,
         one_time_entitlement: bool,
+        access_kind: str,
     ) -> None:
         session_token = generate_session_token()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
@@ -604,6 +639,7 @@ class TelegramBot:
             provider=parsed_link.provider,
             provider_label=parsed_link.provider_label,
             expires_at=expires_at,
+            access_kind=access_kind,
         )
         result_id = (
             build_one_time_entitlement_result_id(session_token)
@@ -641,6 +677,16 @@ class TelegramBot:
             inline_message_id=chosen.inline_message_id,
         )
         if claim_status != "claimed":
+            return
+        rate_limit = self._consume_user_rate_limit(chosen.from_user.id, source="inline")
+        if not rate_limit["allowed"]:
+            self._inline_delivery_session_tokens.discard(session_token)
+            self.state_store.mark_inline_session_status(session_token, "failed")
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=chosen.inline_message_id,
+                text=ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+            )
             return
         one_time_payment_id = None
         if result_kind == "one_time":
@@ -682,6 +728,17 @@ class TelegramBot:
             return
         if claim_status == "duplicate":
             await query.answer("Already preparing media.")
+            return
+        rate_limit = self._consume_user_rate_limit(query.from_user.id, source="inline")
+        if not rate_limit["allowed"]:
+            self._inline_delivery_session_tokens.discard(session_token)
+            self.state_store.mark_inline_session_status(session_token, "failed")
+            await query.answer("Rate limit reached.")
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=query.inline_message_id,
+                text=ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+            )
             return
         await query.answer("Preparing media.")
         one_time_payment_id = None
@@ -823,6 +880,7 @@ class TelegramBot:
                 telegram_payment_charge_id=payment.telegram_payment_charge_id,
                 provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", "") or "",
                 total_amount=payment.total_amount,
+                started_at=datetime.now(timezone.utc),
             )
             return
 
@@ -929,6 +987,23 @@ class TelegramBot:
             return None
         return payment_id
 
+    def _paid_or_free_inline_access_kind_for_user(self, user_id: int) -> str | None:
+        if not settings.INLINE_SUBSCRIPTION_REQUIRED:
+            return "free"
+        if self.state_store.is_inline_whitelisted(user_id):
+            return "whitelist"
+        if self.state_store.has_active_inline_subscription(user_id):
+            return "subscription"
+        return None
+
+    def _consume_user_rate_limit(self, user_id: int, *, source: str) -> dict[str, Any]:
+        return self.state_store.check_user_rate_limit(
+            user_id,
+            limit=settings.USER_RATE_LIMIT_REQUESTS,
+            window_seconds=settings.USER_RATE_LIMIT_WINDOW_SECONDS,
+            source=source,
+        )
+
     def _schedule_inline_delivery(
         self,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1020,6 +1095,7 @@ class TelegramBot:
             input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
             await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media)
             self.state_store.mark_inline_session_status(session_token, "delivered")
+            self._record_successful_inline_access(session)
             if one_time_payment_id:
                 self.state_store.mark_inline_one_time_payment_delivered(
                     one_time_payment_id,
@@ -1028,6 +1104,8 @@ class TelegramBot:
         except Exception:
             logger.exception("Inline delivery failed for session %s", session_token)
             self.state_store.mark_inline_session_status(session_token, "failed")
+            if session := self.state_store.get_inline_session(session_token):
+                self._record_failed_inline_access(session)
             if one_time_payment_id:
                 session = self.state_store.get_inline_session(session_token)
                 user_id = int(session["user_id"]) if session else 0
@@ -1045,6 +1123,71 @@ class TelegramBot:
                 )
         finally:
             self._inline_delivery_session_tokens.discard(session_token)
+
+    def _record_successful_inline_access(self, session: dict[str, Any]) -> None:
+        access_kind = str(session.get("access_kind") or "free")
+        user_id = int(session["user_id"])
+        session_token = str(session["session_token"])
+        if access_kind == "promo":
+            self.state_store.record_inline_promo_success(user_id)
+        if access_kind == "subscription":
+            self.state_store.record_inline_delivery_event(
+                user_id=user_id,
+                session_token=session_token,
+                access_kind=access_kind,
+                status="success",
+            )
+
+    def _record_failed_inline_access(self, session: dict[str, Any]) -> None:
+        access_kind = str(session.get("access_kind") or "free")
+        if access_kind != "subscription":
+            return
+        self.state_store.record_inline_delivery_event(
+            user_id=int(session["user_id"]),
+            session_token=str(session["session_token"]),
+            access_kind=access_kind,
+            status="failed",
+        )
+
+    async def _evaluate_expired_inline_subscription_refunds(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        for subscription in self.state_store.list_expired_unchecked_inline_subscriptions():
+            user_id = int(subscription["user_id"])
+            try:
+                started_at = datetime.fromisoformat(str(subscription["started_at"]))
+                expires_at = datetime.fromisoformat(str(subscription["expires_at"]))
+            except ValueError:
+                self.state_store.mark_inline_subscription_auto_refund_failed(
+                    user_id,
+                    reason="malformed_subscription_period",
+                )
+                continue
+            stats = self.state_store.get_subscription_delivery_stats(
+                user_id=user_id,
+                started_at=started_at,
+                expires_at=expires_at,
+            )
+            reason = f"failure_rate:{stats['failure_rate']:.2f}"
+            if (
+                stats["attempts"] > 0
+                and stats["failure_rate"] >= settings.INLINE_SUBSCRIPTION_AUTO_REFUND_FAILURE_THRESHOLD
+            ):
+                try:
+                    await context.bot.refund_star_payment(
+                        user_id=user_id,
+                        telegram_payment_charge_id=str(subscription["telegram_payment_charge_id"]),
+                    )
+                except TelegramError as exc:
+                    self.state_store.mark_inline_subscription_auto_refund_failed(
+                        user_id,
+                        reason=f"{reason}:{exc.__class__.__name__}",
+                    )
+                else:
+                    self.state_store.mark_inline_subscription_auto_refunded(user_id, reason=reason)
+                continue
+            self.state_store.mark_inline_subscription_refund_checked(user_id, reason=reason)
 
     async def _refund_one_time_payment(
         self,
@@ -1926,14 +2069,20 @@ class TelegramBot:
         )
 
         if settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None:
-            from .post_deploy_notifications import send_inline_mode_announcement_once
+            from .post_deploy_notifications import (
+                send_inline_mode_announcement_once,
+                send_inline_promo_refund_announcement_once,
+            )
 
             async def _post_init(application: Application) -> None:
                 application.create_task(_send_inline_mode_announcement(application))
 
             async def _send_inline_mode_announcement(application: Application) -> None:
-                result = await send_inline_mode_announcement_once(application.bot, self.state_store)
-                logger.info("Inline mode announcement result: %s", result)
+                await self._evaluate_expired_inline_subscription_refunds(application)
+                inline_result = await send_inline_mode_announcement_once(application.bot, self.state_store)
+                promo_result = await send_inline_promo_refund_announcement_once(application.bot, self.state_store)
+                logger.info("Inline mode announcement result: %s", inline_result)
+                logger.info("Inline promo/refund announcement result: %s", promo_result)
 
             builder = builder.post_init(_post_init)
 

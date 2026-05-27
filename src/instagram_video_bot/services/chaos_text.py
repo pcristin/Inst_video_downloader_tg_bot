@@ -60,6 +60,9 @@ class ChaosText:
             "/inline_price subscription <stars> - set inline monthly subscription price\n"
             "/inline_onetime on <stars> | off - manage one-time inline payments\n"
             "/inline_refund <telegram_payment_charge_id> [user_id] - refund an inline Stars payment\n"
+            "Rate limits: USER_RATE_LIMIT_REQUESTS per USER_RATE_LIMIT_WINDOW_SECONDS.\n"
+            "Promo: first 3 successful inline deliveries are free per user lifetime.\n"
+            "Refunds: 30% subscription refund protection is evaluated after subscription expiry.\n"
             "/admin_help - show this admin command list"
         )
 
@@ -261,6 +264,11 @@ class ChaosText:
     @staticmethod
     def inline_delivery_failed() -> str:
         return "Inline delivery failed. If this was a one-time payment, it was refunded."
+
+    @staticmethod
+    def rate_limited(retry_after_seconds: int) -> str:
+        minutes = max(1, (retry_after_seconds + 59) // 60)
+        return f"Слишком много запросов. Попробуй снова примерно через {minutes} мин."
 
     @staticmethod
     def inline_whitelist_usage() -> str:

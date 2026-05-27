@@ -194,6 +194,8 @@ async def test_paid_subscription_chosen_inline_result_does_not_attach_or_schedul
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES):
+        store.record_inline_promo_success(1001)
     bot = TelegramBot(state_store=store)
     query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
     scheduled = []
@@ -222,6 +224,8 @@ async def test_paid_one_time_chosen_inline_result_does_not_attach_or_schedule(mo
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(one_time_enabled=True, one_time_stars=2)
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES):
+        store.record_inline_promo_success(1001)
     bot = TelegramBot(state_store=store)
     query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
     scheduled = []
@@ -250,6 +254,8 @@ async def test_paid_subscription_inline_result_uses_subscription_invoice_link(mo
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.update_inline_runtime_settings(subscription_stars=5)
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES):
+        store.record_inline_promo_success(1001)
     bot = TelegramBot(state_store=store)
     query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
     fake_bot = _FakeInvoiceLinkBot()
@@ -269,6 +275,8 @@ async def test_paid_subscription_inline_result_uses_subscription_invoice_link(mo
 async def test_paid_subscription_invoice_link_failure_returns_safe_inline_result(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES):
+        store.record_inline_promo_success(1001)
     bot = TelegramBot(state_store=store)
     query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
 
@@ -282,6 +290,41 @@ async def test_paid_subscription_invoice_link_failure_returns_safe_inline_result
     assert result.id == "inline-payment-unavailable"
     assert result.title == "Inline payments are temporarily unavailable"
     assert session_count == 0
+
+
+@pytest.mark.asyncio
+async def test_inline_query_allows_first_three_successful_inline_deliveries_free(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES - 1):
+        store.record_inline_promo_success(1001)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=SimpleNamespace()))
+
+    result = query.answers[0]["results"][0]
+    session_token = result.id.split(":", 1)[1]
+    session = store.get_inline_session(session_token, user_id=1001)
+    assert result.title == "Send media here"
+    assert session["access_kind"] == "promo"
+
+
+@pytest.mark.asyncio
+async def test_inline_query_requires_payment_after_three_successful_free_deliveries(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    for _ in range(settings.INLINE_FREE_SUCCESSFUL_DELIVERIES):
+        store.record_inline_promo_success(1001)
+    bot = TelegramBot(state_store=store)
+    query = _FakeInlineQuery("https://www.instagram.com/reel/abc/")
+    fake_bot = _FakeInvoiceLinkBot()
+
+    await bot.inline_query_handler(_FakeUpdate(inline_query=query), SimpleNamespace(bot=fake_bot))
+
+    result = query.answers[0]["results"][0]
+    assert result.id.startswith("sub:")
+    assert result.title.startswith("Subscribe for ")
 
 
 @pytest.mark.asyncio
@@ -313,6 +356,56 @@ async def test_free_chosen_inline_result_still_schedules_delivery(monkeypatch, t
 
     assert store.get_inline_session("s1", user_id=1001)["inline_message_id"] == "inline-msg"
     assert len(scheduled) == 1
+
+
+@pytest.mark.asyncio
+async def test_chosen_inline_result_over_user_rate_limit_edits_placeholder(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "USER_RATE_LIMIT_REQUESTS", 1)
+    monkeypatch.setattr(settings, "USER_RATE_LIMIT_WINDOW_SECONDS", 600)
+    store = StateStore(tmp_path / "state.db")
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    for session_token in ("s1", "s2"):
+        store.create_inline_session(
+            session_token=session_token,
+            user_id=1001,
+            original_url=f"https://x.com/example/status/{session_token}",
+            normalized_url=f"https://x.com/example/status/{session_token}",
+            provider="twitter",
+            provider_label="Twitter/X",
+            expires_at=expires_at,
+            access_kind="promo",
+        )
+    bot = TelegramBot(state_store=store)
+    scheduled = []
+
+    def fake_create_task(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.asyncio.create_task", fake_create_task)
+
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult("inline:s1", "inline-msg-1")),
+        SimpleNamespace(bot=SimpleNamespace(edit_message_text=edit_message_text)),
+    )
+    await bot.chosen_inline_result_handler(
+        _FakeUpdate(chosen_inline_result=_FakeChosenInlineResult("inline:s2", "inline-msg-2")),
+        SimpleNamespace(bot=SimpleNamespace(edit_message_text=edit_message_text)),
+    )
+
+    assert len(scheduled) == 1
+    assert store.get_inline_session("s2", user_id=1001)["status"] == "failed"
+    assert edits == [
+        {
+            "inline_message_id": "inline-msg-2",
+            "text": "Слишком много запросов. Попробуй снова примерно через 10 мин.",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -474,6 +567,241 @@ async def test_inline_delivery_removes_download_files_after_storage_upload(monke
     assert store.get_inline_session("s1")["status"] == "delivered"
     assert fake_telegram_bot.edited_media["inline_message_id"] == "inline-msg"
     assert output_dir.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_successful_promo_inline_delivery_consumes_lifetime_free_credit(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="promo-session",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        access_kind="promo",
+    )
+    store.attach_inline_message("promo-session", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+
+    async def edit_message_media(**kwargs):
+        return None
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_media=edit_message_media)),
+        session_token="promo-session",
+        one_time_payment_id=None,
+    )
+
+    assert store.get_inline_promo_success_count(1001) == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_inline_delivery_records_success_event(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    started_at = datetime.now(timezone.utc) - timedelta(days=1)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=29)
+    store = StateStore(tmp_path / "state.db")
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=expires_at,
+        telegram_payment_charge_id="sub-charge",
+        provider_payment_charge_id="provider-charge",
+        total_amount=100,
+        started_at=started_at,
+    )
+    store.create_inline_session(
+        session_token="sub-session",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        access_kind="subscription",
+    )
+    store.attach_inline_message("sub-session", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+
+    async def edit_message_media(**kwargs):
+        return None
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_media=edit_message_media)),
+        session_token="sub-session",
+        one_time_payment_id=None,
+    )
+
+    stats = store.get_subscription_delivery_stats(
+        user_id=1001,
+        started_at=started_at,
+        expires_at=expires_at,
+    )
+    assert stats["success"] == 1
+    assert stats["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_subscription_inline_delivery_records_failure_event(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    started_at = datetime.now(timezone.utc) - timedelta(days=1)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=29)
+    store = StateStore(tmp_path / "state.db")
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=expires_at,
+        telegram_payment_charge_id="sub-charge",
+        provider_payment_charge_id="provider-charge",
+        total_amount=100,
+        started_at=started_at,
+    )
+    store.create_inline_session(
+        session_token="sub-session",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        access_kind="subscription",
+    )
+    store.attach_inline_message("sub-session", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+
+    class FailingDownloader:
+        async def download_video(self, original_url, target_dir):
+            raise RuntimeError("provider failed")
+
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FailingDownloader)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_text=edit_message_text)),
+        session_token="sub-session",
+        one_time_payment_id=None,
+    )
+
+    stats = store.get_subscription_delivery_stats(
+        user_id=1001,
+        started_at=started_at,
+        expires_at=expires_at,
+    )
+    assert stats["success"] == 0
+    assert stats["failed"] == 1
+    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+
+
+@pytest.mark.asyncio
+async def test_expired_subscription_auto_refunds_when_failures_reach_threshold(tmp_path):
+    now = datetime.now(timezone.utc)
+    started_at = now - timedelta(days=31)
+    expires_at = now - timedelta(days=1)
+    store = StateStore(tmp_path / "state.db")
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=expires_at,
+        telegram_payment_charge_id="sub-charge",
+        provider_payment_charge_id="provider-charge",
+        total_amount=100,
+        started_at=started_at,
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s1",
+        access_kind="subscription",
+        status="success",
+        occurred_at=started_at + timedelta(days=1),
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s2",
+        access_kind="subscription",
+        status="failed",
+        occurred_at=started_at + timedelta(days=2),
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+
+    await bot._evaluate_expired_inline_subscription_refunds(SimpleNamespace(bot=fake_bot))
+
+    subscription = store.get_inline_subscription(1001)
+    assert fake_bot.refunds == [{"user_id": 1001, "telegram_payment_charge_id": "sub-charge"}]
+    assert subscription["status"] == "auto_refunded"
+    assert subscription["refund_reason"] == "failure_rate:0.50"
+
+
+@pytest.mark.asyncio
+async def test_expired_subscription_below_threshold_is_marked_checked(tmp_path):
+    now = datetime.now(timezone.utc)
+    started_at = now - timedelta(days=31)
+    expires_at = now - timedelta(days=1)
+    store = StateStore(tmp_path / "state.db")
+    store.record_inline_subscription(
+        user_id=1001,
+        expires_at=expires_at,
+        telegram_payment_charge_id="sub-charge",
+        provider_payment_charge_id="provider-charge",
+        total_amount=100,
+        started_at=started_at,
+    )
+    store.record_inline_delivery_event(
+        user_id=1001,
+        session_token="s1",
+        access_kind="subscription",
+        status="success",
+        occurred_at=started_at + timedelta(days=1),
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _FakeTelegramBot()
+
+    await bot._evaluate_expired_inline_subscription_refunds(SimpleNamespace(bot=fake_bot))
+
+    subscription = store.get_inline_subscription(1001)
+    assert fake_bot.refunds == []
+    assert subscription["status"] == "completed"
+    assert subscription["refund_reason"] == "failure_rate:0.00"
 
 
 @pytest.mark.asyncio
