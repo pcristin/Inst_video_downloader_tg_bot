@@ -779,7 +779,7 @@ class StateStore:
                     provider_label,
                     "created",
                     now,
-                    expires_at.isoformat(),
+                    self._normalize_utc_datetime(expires_at).isoformat(),
                     now,
                 ),
             )
@@ -931,6 +931,7 @@ class StateStore:
             expires_at = datetime.fromisoformat(row["expires_at"])
         except ValueError:
             return False
+        expires_at = self._normalize_utc_datetime(expires_at)
         return expires_at > _utc_now()
 
     def user_has_inline_access(self, user_id: int) -> bool:
@@ -948,9 +949,14 @@ class StateStore:
             ).fetchall()
         for row in rows:
             if row["key"] in {"subscription_stars", "one_time_stars"}:
-                values[row["key"]] = int(row["value"])
+                try:
+                    values[row["key"]] = int(row["value"])
+                except (TypeError, ValueError):
+                    continue
             elif row["key"] == "one_time_enabled":
-                values[row["key"]] = row["value"] == "1"
+                parsed = self._parse_runtime_bool(row["value"])
+                if parsed is not None:
+                    values[row["key"]] = parsed
         return values
 
     def update_inline_runtime_settings(
@@ -1420,13 +1426,28 @@ class StateStore:
                 """
                 UPDATE inline_one_time_payments
                 SET status = ?,
-                    request_id = COALESCE(?, request_id),
-                    refund_reason = COALESCE(?, refund_reason),
+                    request_id = ?,
+                    refund_reason = ?,
                     updated_at = ?
-                WHERE payment_id = ?
+                WHERE payment_id = ? AND status = 'paid'
                 """,
                 (status, request_id, refund_reason, now, payment_id),
             )
+
+    @staticmethod
+    def _normalize_utc_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _parse_runtime_bool(value: Any) -> bool | None:
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return None
 
     def _safe_metrics_write(self, query: str, params: tuple[Any, ...]) -> None:
         try:
