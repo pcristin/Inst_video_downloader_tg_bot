@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import datetime as dtm
 import logging
 from pathlib import Path
+import shutil
 import time
 from typing import Any, List, Optional
 
@@ -895,13 +896,22 @@ class TelegramBot:
                     provider_label=session["provider_label"],
                 )
                 output_dir = settings.CACHE_DIR / "inline" / session_token
-                output_dir.mkdir(parents=True, exist_ok=True)
-                video_info = await VideoDownloader().download_video(parsed_link.original_url, output_dir)
-                inline_item = await upload_first_media_to_storage(
-                    context.bot,
-                    storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
-                    video_info=video_info,
-                )
+                try:
+                    async with self.job_manager.bounded_execution(
+                        chat_id=int(session["user_id"]),
+                        user_id=int(session["user_id"]),
+                        provider=parsed_link.provider,
+                        provider_label=parsed_link.provider_label,
+                    ):
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        video_info = await VideoDownloader().download_video(parsed_link.original_url, output_dir)
+                        inline_item = await upload_first_media_to_storage(
+                            context.bot,
+                            storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
+                            video_info=video_info,
+                        )
+                finally:
+                    shutil.rmtree(output_dir, ignore_errors=True)
                 media_item = {
                     "media_type": inline_item.media_type,
                     "file_id": inline_item.file_id,

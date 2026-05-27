@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -6,7 +7,9 @@ from telegram import InputInvoiceMessageContent
 from telegram.error import TelegramError
 
 from src.instagram_video_bot.config.settings import settings
+from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
 from src.instagram_video_bot.services.inline_access import build_one_time_payload, build_subscription_payload
+from src.instagram_video_bot.services.inline_delivery import InlineCachedMediaItem
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
 
@@ -395,6 +398,119 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
         "inline_message_id": "inline-msg",
         "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.",
     }
+
+
+@pytest.mark.asyncio
+async def test_inline_delivery_removes_download_files_after_storage_upload(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+    output_dir = settings.CACHE_DIR / "inline" / "s1"
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+
+    fake_telegram_bot = SimpleNamespace(edited_media=None)
+
+    async def edit_message_media(**kwargs):
+        fake_telegram_bot.edited_media = kwargs
+
+    fake_telegram_bot.edit_message_media = edit_message_media
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=fake_telegram_bot),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    assert store.get_inline_session("s1")["status"] == "delivered"
+    assert fake_telegram_bot.edited_media["inline_message_id"] == "inline-msg"
+    assert output_dir.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_uncached_inline_delivery_runs_inside_job_manager_limits(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+    limit_calls = []
+
+    @asynccontextmanager
+    async def fake_bounded_execution(**kwargs):
+        limit_calls.append(kwargs)
+        yield
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            assert limit_calls
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+
+    async def edit_message_media(**kwargs):
+        return None
+
+    bot.job_manager.bounded_execution = fake_bounded_execution
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_media=edit_message_media)),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    assert limit_calls == [
+        {
+            "chat_id": 1001,
+            "user_id": 1001,
+            "provider": "instagram",
+            "provider_label": "Instagram",
+        }
+    ]
 
 
 @pytest.mark.asyncio
