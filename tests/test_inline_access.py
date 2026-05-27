@@ -1,0 +1,44 @@
+from src.instagram_video_bot.services.inline_access import (
+    InlinePaymentPayload,
+    build_inline_result_id,
+    build_one_time_payload,
+    build_subscription_payload,
+    parse_inline_payment_payload,
+    validate_star_amount,
+)
+
+
+def test_inline_result_id_contains_session_token():
+    assert build_inline_result_id("abc123") == "inline:abc123"
+
+
+def test_subscription_payload_round_trips():
+    payload = build_subscription_payload(user_id=1001, session_token="s1")
+
+    assert parse_inline_payment_payload(payload) == InlinePaymentPayload(
+        kind="subscription",
+        user_id=1001,
+        session_token="s1",
+    )
+
+
+def test_one_time_payload_round_trips():
+    payload = build_one_time_payload(user_id=1001, session_token="s1")
+
+    assert parse_inline_payment_payload(payload) == InlinePaymentPayload(
+        kind="one_time",
+        user_id=1001,
+        session_token="s1",
+    )
+
+
+def test_invalid_payload_returns_none():
+    assert parse_inline_payment_payload("bad:v1:1001:s1") is None
+    assert parse_inline_payment_payload("inline_once:v1:nope:s1") is None
+
+
+def test_star_amount_validation_accepts_telegram_range():
+    assert validate_star_amount("1") == 1
+    assert validate_star_amount("10000") == 10000
+    assert validate_star_amount("0") is None
+    assert validate_star_amount("10001") is None

@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     GROUP_STATS_ENABLED: bool = True
     YOUTUBE_SHORTS_ENABLED: bool = True
     DUPLICATE_SUPPRESSION_ENABLED: bool = True
+    INLINE_MODE_ENABLED: bool = True
+    INLINE_SUBSCRIPTION_REQUIRED: bool = True
+    INLINE_SUBSCRIPTION_STARS: int = 1
+    INLINE_SUBSCRIPTION_PERIOD_SECONDS: int = 30 * 24 * 60 * 60
+    INLINE_ONE_TIME_ENABLED: bool = False
+    INLINE_ONE_TIME_STARS: int = 1
+    INLINE_SESSION_TTL_SECONDS: int = 15 * 60
+    INLINE_STORAGE_CHAT_ID: Optional[int] = None
 
     # Concurrency and caching
     GLOBAL_MAX_CONCURRENT_JOBS: int = 3
