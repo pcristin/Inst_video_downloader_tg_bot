@@ -194,7 +194,7 @@ class JobManager:
             self.store.update_job_status(job.job_id, "cancelled")
             self.store.finalize_job_metrics(job.job_id, status="cancelled")
             if job.result_future and not job.result_future.done():
-                job.result_future.set_exception(asyncio.CancelledError())
+                job.result_future.cancel()
             await self._set_state(job, "cancelled")
             raise
         except Exception as error:
@@ -360,10 +360,11 @@ class JobManager:
                     job.delivery_future and job.delivery_future.done()
                 ):
                     self._promote_delivery_request(job)
-                if job.state in {"completed", "failed", "cancelled"} and not any(
-                    item.active for item in job.requesters.values()
-                ):
-                    self._jobs.pop(job_id, None)
+                if not any(item.active for item in job.requesters.values()):
+                    if job.state in {"completed", "failed", "cancelled"}:
+                        self._jobs.pop(job_id, None)
+                    elif job.task and not job.task.done():
+                        job.task.cancel()
                 return
 
     def _promote_delivery_request(self, job: SharedJob) -> None:

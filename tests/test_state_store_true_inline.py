@@ -192,13 +192,20 @@ def test_one_time_payment_can_be_claimed_as_link_entitlement(tmp_path):
         provider="instagram",
         normalized_url="https://www.instagram.com/reel/abc/",
     )
-    claimed = store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
-    duplicate_claimed = store.claim_inline_one_time_payment(payment_id, request_id="inline:other")
+    claimed = store.claim_inline_one_time_payment(
+        payment_id, request_id="inline:delivery-session"
+    )
+    duplicate_claimed = store.claim_inline_one_time_payment(
+        payment_id, request_id="inline:other"
+    )
 
     assert payment["payment_id"] == payment_id
     assert claimed is True
     assert duplicate_claimed is False
-    assert store.get_inline_one_time_payment(payment_id)["request_id"] == "inline:delivery-session"
+    assert (
+        store.get_inline_one_time_payment(payment_id)["request_id"]
+        == "inline:delivery-session"
+    )
     assert (
         store.get_available_inline_one_time_payment(
             user_id=1001,
@@ -270,7 +277,9 @@ def test_stale_one_time_payment_claim_keeps_active_delivery_claimed(tmp_path):
     )
     store.attach_inline_message("delivery-session", inline_message_id="inline-msg")
     store.mark_inline_session_status("delivery-session", "delivering")
-    store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
+    store.claim_inline_one_time_payment(
+        payment_id, request_id="inline:delivery-session"
+    )
     stale_time = datetime.now(timezone.utc) - timedelta(hours=2)
     with store._lock, store._conn:
         store._conn.execute(
@@ -283,7 +292,10 @@ def test_stale_one_time_payment_claim_keeps_active_delivery_claimed(tmp_path):
     )
 
     assert released == 0
-    assert store.get_inline_one_time_payment(payment_id)["request_id"] == "inline:delivery-session"
+    assert (
+        store.get_inline_one_time_payment(payment_id)["request_id"]
+        == "inline:delivery-session"
+    )
 
 
 def test_stale_one_time_payment_claim_releases_abandoned_delivery_session(tmp_path):
@@ -314,7 +326,9 @@ def test_stale_one_time_payment_claim_releases_abandoned_delivery_session(tmp_pa
     )
     store.attach_inline_message("delivery-session", inline_message_id="inline-msg")
     store.mark_inline_session_status("delivery-session", "delivering")
-    store.claim_inline_one_time_payment(payment_id, request_id="inline:delivery-session")
+    store.claim_inline_one_time_payment(
+        payment_id, request_id="inline:delivery-session"
+    )
     stale_time = datetime.now(timezone.utc) - timedelta(hours=8)
     with store._lock, store._conn:
         store._conn.execute(
@@ -389,7 +403,9 @@ def test_one_time_payment_delivered_and_refund_failed_transitions(tmp_path):
         total_amount=2,
     )
 
-    store.mark_inline_one_time_payment_delivered(delivered_payment_id, request_id="request-1")
+    store.mark_inline_one_time_payment_delivered(
+        delivered_payment_id, request_id="request-1"
+    )
     store.mark_inline_one_time_payment_refund_failed(
         refund_failed_payment_id,
         reason="telegram_refund_error",
@@ -426,10 +442,14 @@ def test_cached_inline_media_round_trips(tmp_path):
         cache_key="instagram:https://www.instagram.com/reel/abc/",
         provider="instagram",
         normalized_url="https://www.instagram.com/reel/abc/",
-        media_items=[{"media_type": "video", "file_id": "video-file-id", "caption": "caption"}],
+        media_items=[
+            {"media_type": "video", "file_id": "video-file-id", "caption": "caption"}
+        ],
     )
 
-    cached = store.get_inline_cached_media("instagram:https://www.instagram.com/reel/abc/")
+    cached = store.get_inline_cached_media(
+        "instagram:https://www.instagram.com/reel/abc/"
+    )
     assert cached is not None
     assert cached["media_items"][0]["file_id"] == "video-file-id"
 
@@ -439,9 +459,15 @@ def test_user_rate_limit_uses_sliding_window(tmp_path):
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
 
     first = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now)
-    second = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=10))
-    third = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=20))
-    after_window = store.check_user_rate_limit(1001, limit=2, window_seconds=60, now=now + timedelta(seconds=61))
+    second = store.check_user_rate_limit(
+        1001, limit=2, window_seconds=60, now=now + timedelta(seconds=10)
+    )
+    third = store.check_user_rate_limit(
+        1001, limit=2, window_seconds=60, now=now + timedelta(seconds=20)
+    )
+    after_window = store.check_user_rate_limit(
+        1001, limit=2, window_seconds=60, now=now + timedelta(seconds=61)
+    )
 
     assert first["allowed"] is True
     assert second["allowed"] is True
@@ -533,3 +559,15 @@ def test_expired_unchecked_subscriptions_are_listed_and_marked(tmp_path):
     assert subscription["status"] == "auto_refunded"
     assert subscription["refund_reason"] == "failure_rate:0.50"
     assert subscription["auto_refund_checked_at"] is not None
+
+
+def test_user_language_defaults_to_none_and_can_be_persisted(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+
+    assert store.get_user_language(1001) is None
+
+    store.set_user_language(1001, "en")
+    assert store.get_user_language(1001) == "en"
+
+    store.set_user_language(1001, "ru")
+    assert store.get_user_language(1001) == "ru"

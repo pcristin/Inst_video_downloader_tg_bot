@@ -107,6 +107,35 @@ async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_mark_request_failed_cancels_job_when_no_active_requesters_remain(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    manager = JobManager(store)
+    started = asyncio.Event()
+
+    async def execute(_job):
+        started.set()
+        await asyncio.Future()
+
+    submission = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/1",
+        normalized_url="https://x.com/a/status/1",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    manager.mark_request_failed(submission.request_id, status="cancelled")
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(submission.job.task, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_job_manager_passes_job_to_executor_and_records_metrics(tmp_path):
     store = StateStore(tmp_path / "state.db")
     manager = JobManager(store)

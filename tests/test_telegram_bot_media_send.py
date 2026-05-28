@@ -11,7 +11,11 @@ from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
 from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
 from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
-from src.instagram_video_bot.services.video_downloader import DownloadError, MediaItem, VideoInfo
+from src.instagram_video_bot.services.video_downloader import (
+    DownloadError,
+    MediaItem,
+    VideoInfo,
+)
 from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
@@ -28,11 +32,15 @@ class _FakeBot:
 
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
-        return SimpleNamespace(video=SimpleNamespace(file_id="tg-video-file-id"), photo=None)
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="tg-video-file-id"), photo=None
+        )
 
     async def send_photo(self, **kwargs):
         self.photo_calls.append(kwargs)
-        return SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="tg-photo-file-id")])
+        return SimpleNamespace(
+            video=None, photo=[SimpleNamespace(file_id="tg-photo-file-id")]
+        )
 
     async def send_media_group(self, **kwargs):
         self.group_calls.append(kwargs)
@@ -40,9 +48,17 @@ class _FakeBot:
         for item in kwargs["media"]:
             media_type = getattr(item, "type", "")
             if media_type == "video":
-                messages.append(SimpleNamespace(video=SimpleNamespace(file_id="tg-group-video-id"), photo=None))
+                messages.append(
+                    SimpleNamespace(
+                        video=SimpleNamespace(file_id="tg-group-video-id"), photo=None
+                    )
+                )
             else:
-                messages.append(SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="tg-group-photo-id")]))
+                messages.append(
+                    SimpleNamespace(
+                        video=None, photo=[SimpleNamespace(file_id="tg-group-photo-id")]
+                    )
+                )
         return messages
 
     async def get_chat_member(self, chat_id: int, user_id: int):
@@ -54,15 +70,25 @@ class _RejectStaleFileIdBot(_FakeBot):
         self.video_calls.append(kwargs)
         if kwargs["video"] == "stale-video-file-id":
             raise BadRequest("Wrong file identifier/HTTP URL specified")
-        return SimpleNamespace(video=SimpleNamespace(file_id="fresh-video-file-id"), photo=None)
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="fresh-video-file-id"), photo=None
+        )
 
 
 class _RejectStaleGroupFileIdBot(_FakeBot):
     async def send_media_group(self, **kwargs):
         self.group_calls.append(kwargs)
-        if any(getattr(item, "media", None) == "stale-photo-file-id" for item in kwargs["media"]):
+        if any(
+            getattr(item, "media", None) == "stale-photo-file-id"
+            for item in kwargs["media"]
+        ):
             raise BadRequest("Wrong file identifier/HTTP URL specified")
-        return [SimpleNamespace(video=None, photo=[SimpleNamespace(file_id="fresh-group-photo-id")]) for _ in kwargs["media"]]
+        return [
+            SimpleNamespace(
+                video=None, photo=[SimpleNamespace(file_id="fresh-group-photo-id")]
+            )
+            for _ in kwargs["media"]
+        ]
 
 
 class _FakeStatusMessage:
@@ -107,6 +133,7 @@ class _FakeUpdate:
         full_name: str = "Alice",
         message_id: int = 10,
         chat_type: str = "private",
+        language_code: str | None = "ru",
         effective_user_present: bool = True,
         sender_chat=None,
         message_present: bool = True,
@@ -116,7 +143,12 @@ class _FakeUpdate:
         self.effective_message = message
         self.effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.effective_user = (
-            SimpleNamespace(id=user_id, username=username, full_name=full_name)
+            SimpleNamespace(
+                id=user_id,
+                username=username,
+                full_name=full_name,
+                language_code=language_code,
+            )
             if effective_user_present
             else None
         )
@@ -338,8 +370,14 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
             primary_media_type="video",
         )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
@@ -352,9 +390,58 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_handle_message_uses_english_profile_language(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate("https://www.instagram.com/reel/a/", language_code="en")
+
+    media_file = tmp_path / "english.mp4"
+    media_file.write_bytes(b"video")
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        return VideoInfo(
+            file_path=media_file,
+            title="english",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+
+    await telegram_bot.handle_message(update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert update.message.replies == ["Got Instagram. I will start downloading soon."]
+    assert update.message.status_messages[0].texts == ["Instagram: downloading."]
+
+
+@pytest.mark.asyncio
 async def test_handle_message_rejects_user_over_rate_limit(monkeypatch, tmp_path):
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_REQUESTS", 1)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_WINDOW_SECONDS", 600)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_REQUESTS",
+        1,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.USER_RATE_LIMIT_WINDOW_SECONDS",
+        600,
+    )
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.Future()
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     context = _FakeContext(_FakeBot())
     first_update = _FakeUpdate("https://x.com/example/status/1", user_id=1001)
@@ -368,7 +455,9 @@ async def test_handle_message_rejects_user_over_rate_limit(monkeypatch, tmp_path
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     assert first_update.message.replies == ["Принял Twitter/X. Скоро начну скачивать."]
-    assert second_update.message.replies == ["Слишком много запросов. Попробуй снова примерно через 10 мин."]
+    assert second_update.message.replies == [
+        "Слишком много запросов. Попробуй снова примерно через 10 мин."
+    ]
 
 
 @pytest.mark.asyncio
@@ -376,7 +465,11 @@ async def test_legacy_redirect_mode_replies_without_queueing(monkeypatch, tmp_pa
     monkeypatch.setattr(settings, "BOT_LEGACY_REDIRECT_MODE", True)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", "igclipbot")
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
-    monkeypatch.setattr(telegram_bot.job_manager, "submit", lambda **_kwargs: pytest.fail("submit called"))
+    monkeypatch.setattr(
+        telegram_bot.job_manager,
+        "submit",
+        lambda **_kwargs: pytest.fail("submit called"),
+    )
     update = _FakeUpdate("https://x.com/example/status/1", user_id=1001)
     context = _FakeContext(_FakeBot())
 
@@ -412,13 +505,19 @@ async def test_handle_message_processes_sender_chat_text_link(monkeypatch, tmp_p
             primary_media_type="video",
         )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
-    assert update.message.replies == ["Принял Instagram. Скоро начну скачивать."]
+    assert update.message.replies == ["Got Instagram. I will start downloading soon."]
     assert len(fake_bot.video_calls) == 1
     events = telegram_bot.state_store._conn.execute(
         "SELECT user_id, user_label, normalized_url FROM request_events ORDER BY created_at DESC LIMIT 1"
@@ -431,7 +530,9 @@ async def test_handle_message_processes_sender_chat_text_link(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_handle_message_processes_effective_message_text_link(monkeypatch, tmp_path):
+async def test_handle_message_processes_effective_message_text_link(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
@@ -456,23 +557,45 @@ async def test_handle_message_processes_effective_message_text_link(monkeypatch,
             primary_media_type="video",
         )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
-    assert update.effective_message.replies == ["Принял Instagram. Скоро начну скачивать."]
+    assert update.effective_message.replies == [
+        "Got Instagram. I will start downloading soon."
+    ]
     assert len(fake_bot.video_calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, tmp_path):
+async def test_duplicate_suppressed_requests_send_media_only_once(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
-    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
-    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1001,
+        username="alice",
+        full_name="Alice",
+        message_id=10,
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1002,
+        username="bob",
+        full_name="Bob",
+        message_id=11,
+    )
 
     media_file = tmp_path / "shared.mp4"
     media_file.write_bytes(b"video")
@@ -486,8 +609,14 @@ async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, t
             primary_media_type="video",
         )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
 
     await telegram_bot.handle_message(first_update, context)
     await telegram_bot.handle_message(second_update, context)
@@ -497,12 +626,16 @@ async def test_duplicate_suppressed_requests_send_media_only_once(monkeypatch, t
     assert fake_bot.video_calls[0]["reply_to_message_id"] == 10
     assert first_update.message.status_messages[0].deleted is True
     assert second_update.message.status_messages[0].deleted is True
-    assert second_update.message.replies == ["Instagram уже скачивается. Дождусь общего результата."]
+    assert second_update.message.replies == [
+        "Instagram уже скачивается. Дождусь общего результата."
+    ]
     assert second_update.message.status_messages[0].texts == []
 
 
 @pytest.mark.asyncio
-async def test_concurrent_downloads_keep_account_alerts_scoped_to_job(monkeypatch, tmp_path):
+async def test_concurrent_downloads_keep_account_alerts_scoped_to_job(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
@@ -542,9 +675,16 @@ async def test_concurrent_downloads_keep_account_alerts_scoped_to_job(monkeypatc
                 primary_media_type="video",
             )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
 
     await telegram_bot.handle_message(alert_update, context)
     await telegram_bot.handle_message(clean_update, context)
@@ -552,13 +692,18 @@ async def test_concurrent_downloads_keep_account_alerts_scoped_to_job(monkeypatc
 
     assert len(downloader_instances) == 2
     assert len({id(instance) for instance in downloader_instances}) == 2
-    assert sum(
-        1 for instance in downloader_instances
-        if getattr(instance.last_account_health_event, "should_alert_owner", False)
-    ) == 1
+    assert (
+        sum(
+            1
+            for instance in downloader_instances
+            if getattr(instance.last_account_health_event, "should_alert_owner", False)
+        )
+        == 1
+    )
     assert len(fake_bot.video_calls) == 2
     assert [
-        call for call in fake_bot.message_calls
+        call
+        for call in fake_bot.message_calls
         if "Instagram account pool warning:" in call["text"]
     ] == [
         {
@@ -580,8 +725,20 @@ async def test_chaos_duplicate_request_uses_playful_russian_text(monkeypatch, tm
     telegram_bot.state_store.update_group_settings(77, chaos_mode_enabled=True)
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
-    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
-    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1001,
+        username="alice",
+        full_name="Alice",
+        message_id=10,
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1002,
+        username="bob",
+        full_name="Bob",
+        message_id=11,
+    )
 
     media_file = tmp_path / "shared-chaos.mp4"
     media_file.write_bytes(b"video")
@@ -595,15 +752,23 @@ async def test_chaos_duplicate_request_uses_playful_russian_text(monkeypatch, tm
             primary_media_type="video",
         )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
 
     await telegram_bot.handle_message(first_update, context)
     await telegram_bot.handle_message(second_update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
     assert len(fake_bot.video_calls) == 1
-    assert second_update.message.replies == ["Instagram уже в работе. Повтор засчитан, сидим рядом с таймером."]
+    assert second_update.message.replies == [
+        "Instagram уже в работе. Повтор засчитан, сидим рядом с таймером."
+    ]
 
 
 @pytest.mark.asyncio
@@ -633,7 +798,10 @@ async def test_cache_hit_is_delivered_and_counted(monkeypatch, tmp_path):
     async def fail_download_video(self, url: str, output_dir: Path):
         raise AssertionError("cache hit should skip downloader")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fail_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
@@ -653,16 +821,24 @@ async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
 
         raise DownloadError("rate limit")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fail_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
-    assert update.message.status_messages[0].texts[-1] == "Достигнут лимит провайдера. Попробуй позже."
+    assert (
+        update.message.status_messages[0].texts[-1]
+        == "Достигнут лимит провайдера. Попробуй позже."
+    )
 
 
 @pytest.mark.asyncio
-async def test_download_failure_sends_owner_alert_when_pool_is_low(monkeypatch, tmp_path):
+async def test_download_failure_sends_owner_alert_when_pool_is_low(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
@@ -684,21 +860,26 @@ async def test_download_failure_sends_owner_alert_when_pool_is_low(monkeypatch, 
         async def download_video(self, url: str, output_dir: Path):
             raise RuntimeError("download failed")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
     assert any(
-        call["chat_id"] == 1001
-        and "Instagram account pool warning:" in call["text"]
+        call["chat_id"] == 1001 and "Instagram account pool warning:" in call["text"]
         for call in fake_bot.message_calls
     )
 
 
 @pytest.mark.asyncio
-async def test_download_success_sends_owner_alert_when_retry_quarantines_account(monkeypatch, tmp_path):
+async def test_download_success_sends_owner_alert_when_retry_quarantines_account(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
     context = _FakeContext(fake_bot)
@@ -733,9 +914,16 @@ async def test_download_success_sends_owner_alert_when_retry_quarantines_account
                 primary_media_type="video",
             )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
@@ -745,8 +933,7 @@ async def test_download_success_sends_owner_alert_when_retry_quarantines_account
     assert downloader_instances[0].attempted_accounts == ["acc1", "acc2"]
     assert downloader_instances[0].quarantined_accounts == ["acc1"]
     assert any(
-        call["chat_id"] == 1001
-        and "Instagram account pool warning:" in call["text"]
+        call["chat_id"] == 1001 and "Instagram account pool warning:" in call["text"]
         for call in fake_bot.message_calls
     )
 
@@ -798,7 +985,9 @@ async def test_owner_low_account_pool_alert_is_english(monkeypatch, tmp_path):
         should_alert_owner=True,
     )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot._notify_owner_about_low_account_pool(context, event)
 
@@ -833,7 +1022,9 @@ async def test_owner_low_account_pool_alert_skips_without_owner(monkeypatch, tmp
         should_alert_owner=True,
     )
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", None)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", None
+    )
 
     await telegram_bot._notify_owner_about_low_account_pool(context, event)
 
@@ -841,11 +1032,25 @@ async def test_owner_low_account_pool_alert_skips_without_owner(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(monkeypatch, tmp_path):
+async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     context = _FakeContext(_FakeBot())
-    first_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1001, username="alice", full_name="Alice", message_id=10)
-    second_update = _FakeUpdate("https://www.instagram.com/reel/a/", user_id=1002, username="bob", full_name="Bob", message_id=11)
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1001,
+        username="alice",
+        full_name="Alice",
+        message_id=10,
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/",
+        user_id=1002,
+        username="bob",
+        full_name="Bob",
+        message_id=11,
+    )
 
     media_file = tmp_path / "handoff.mp4"
     media_file.write_bytes(b"video")
@@ -865,8 +1070,14 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(mon
             raise RuntimeError("telegram send failed")
         delivered_message_ids.append(request_context.original_message_id)
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED", False)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fake_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
     monkeypatch.setattr(TelegramBot, "_send_media", fake_send_media)
 
     await telegram_bot.handle_message(first_update, context)
@@ -886,7 +1097,9 @@ async def test_owner_only_quiet_command_requires_owner(monkeypatch, tmp_path):
     update = _FakeUpdate("/quiet on")
     context = _FakeContext(_FakeBot(), args=["on"])
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 9999)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 9999
+    )
 
     await telegram_bot.quiet_command(update, context)
 
@@ -899,11 +1112,15 @@ async def test_owner_can_toggle_quiet_mode(monkeypatch, tmp_path):
     update = _FakeUpdate("/quiet on")
     context = _FakeContext(_FakeBot(), args=["on"])
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.quiet_command(update, context)
 
-    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    settings_row = telegram_bot.state_store.ensure_group_settings(
+        update.effective_chat.id
+    )
     assert settings_row["quiet_mode"] is True
     assert update.message.replies[-1] == "Тихий режим: включено."
 
@@ -914,20 +1131,32 @@ async def test_owner_can_toggle_chaos_mode_on_and_off(monkeypatch, tmp_path):
     context = _FakeContext(_FakeBot(), args=["on"])
     update = _FakeUpdate("/chaos on", chat_type="group")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.chaos_command(update, context)
 
-    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    settings_row = telegram_bot.state_store.ensure_group_settings(
+        update.effective_chat.id
+    )
     assert settings_row["chaos_mode_enabled"] is True
-    assert update.message.replies[-1] == "Режим хаоса включен. Теперь бот будет шуметь по делу."
+    assert (
+        update.message.replies[-1]
+        == "Режим хаоса включен. Теперь бот будет шуметь по делу."
+    )
 
     context.args = ["off"]
     await telegram_bot.chaos_command(update, context)
 
-    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    settings_row = telegram_bot.state_store.ensure_group_settings(
+        update.effective_chat.id
+    )
     assert settings_row["chaos_mode_enabled"] is False
-    assert update.message.replies[-1] == "Режим хаоса выключен. Возвращаюсь к спокойному режиму."
+    assert (
+        update.message.replies[-1]
+        == "Режим хаоса выключен. Возвращаюсь к спокойному режиму."
+    )
 
 
 @pytest.mark.asyncio
@@ -947,11 +1176,16 @@ async def test_chaos_command_rejects_non_admin_group_member(monkeypatch, tmp_pat
     update = _FakeUpdate("/chaos on", chat_type="group")
     context = _FakeContext(_FakeBot(member_status="member"), args=["on"])
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 9999)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 9999
+    )
 
     await telegram_bot.chaos_command(update, context)
 
-    assert update.message.replies[-1] == "Режим хаоса могут переключать только админы чата или владелец бота."
+    assert (
+        update.message.replies[-1]
+        == "Режим хаоса могут переключать только админы чата или владелец бота."
+    )
 
 
 @pytest.mark.asyncio
@@ -974,8 +1208,49 @@ async def test_help_formats_status_and_stats_are_russian(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_start_uses_profile_language_with_english_fallback(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    ru_update = _FakeUpdate("/start", user_id=1001, language_code="ru")
+    en_update = _FakeUpdate("/start", user_id=1002, language_code="es")
+
+    await telegram_bot.start_command(ru_update, context)
+    await telegram_bot.start_command(en_update, context)
+
+    assert "Привет" in ru_update.message.replies[-1]
+    assert "Send me a link" in en_update.message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_language_command_persists_user_override(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    set_update = _FakeUpdate("/language en", language_code="ru")
+    start_update = _FakeUpdate("/start", language_code="ru")
+
+    await telegram_bot.language_command(
+        set_update, _FakeContext(_FakeBot(), args=["en"])
+    )
+    await telegram_bot.start_command(start_update, _FakeContext(_FakeBot()))
+
+    assert set_update.message.replies[-1] == "Language set to English."
+    assert "Send me a link" in start_update.message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_language_command_rejects_unknown_language(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/language de", language_code="en")
+
+    await telegram_bot.language_command(update, _FakeContext(_FakeBot(), args=["de"]))
+
+    assert update.message.replies[-1] == "Usage: /language en|ru"
+
+
+@pytest.mark.asyncio
 async def test_admin_help_lists_owner_commands(monkeypatch, tmp_path):
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42
+    )
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_help", user_id=42)
     context = _FakeContext(_FakeBot())
@@ -993,7 +1268,9 @@ async def test_admin_help_lists_owner_commands(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_admin_help_rejects_non_owner(monkeypatch, tmp_path):
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 42
+    )
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_help", user_id=99)
     context = _FakeContext(_FakeBot())
@@ -1029,7 +1306,11 @@ async def test_quiet_mode_skips_running_status_updates(tmp_path):
         original_url=request_context.original_url,
         normalized_url=request_context.normalized_url,
         state="running",
-        requesters={"req-1": RequestRecord(request_id="req-1", chat_id=77, user_id=1001, user_label="alice")},
+        requesters={
+            "req-1": RequestRecord(
+                request_id="req-1", chat_id=77, user_id=1001, user_label="alice"
+            )
+        },
     )
 
     await telegram_bot._on_job_state_change(job)
@@ -1063,7 +1344,11 @@ async def test_joined_existing_request_skips_running_status_updates(tmp_path):
         original_url=request_context.original_url,
         normalized_url=request_context.normalized_url,
         state="running",
-        requesters={"req-1": RequestRecord(request_id="req-1", chat_id=77, user_id=1001, user_label="alice")},
+        requesters={
+            "req-1": RequestRecord(
+                request_id="req-1", chat_id=77, user_id=1001, user_label="alice"
+            )
+        },
     )
 
     await telegram_bot._on_job_state_change(job)
@@ -1077,11 +1362,15 @@ async def test_owner_can_toggle_stats_mode(monkeypatch, tmp_path):
     update = _FakeUpdate("/statsmode off")
     context = _FakeContext(_FakeBot(), args=["off"])
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.statsmode_command(update, context)
 
-    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    settings_row = telegram_bot.state_store.ensure_group_settings(
+        update.effective_chat.id
+    )
     assert settings_row["stats_enabled"] is False
     assert update.message.replies[-1] == "Статистика: выключено."
 
@@ -1092,11 +1381,15 @@ async def test_owner_can_override_chat_limit(monkeypatch, tmp_path):
     update = _FakeUpdate("/chatlimit 4")
     context = _FakeContext(_FakeBot(), args=["4"])
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.chatlimit_command(update, context)
 
-    settings_row = telegram_bot.state_store.ensure_group_settings(update.effective_chat.id)
+    settings_row = telegram_bot.state_store.ensure_group_settings(
+        update.effective_chat.id
+    )
     snapshot = telegram_bot.job_manager.get_snapshot(update.effective_chat.id)
     assert settings_row["chat_max_concurrent_jobs"] == 4
     assert snapshot["chat_limit"] == 4
@@ -1117,7 +1410,9 @@ async def test_admin_status_reports_owner_settings(monkeypatch, tmp_path):
     update = _FakeUpdate("/admin_status")
     context = _FakeContext(_FakeBot())
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.admin_status_command(update, context)
 
@@ -1134,7 +1429,9 @@ async def test_admin_status_reports_stale_active_jobs(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_status")
     context = _FakeContext(_FakeBot())
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
     telegram_bot.state_store.create_job(
         "stale-job",
         77,
@@ -1165,14 +1462,24 @@ async def test_cache_hit_records_performance_metrics(monkeypatch, tmp_path):
         normalized_url="https://www.instagram.com/reel/perf-cache/",
         provider="instagram",
         title="cached",
-        media_items=[{"file_path": str(media_file), "media_type": "video", "caption": None, "duration": None}],
+        media_items=[
+            {
+                "file_path": str(media_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+            }
+        ],
         ttl_seconds=3600,
     )
 
     async def fail_download_video(self, url: str, output_dir: Path):
         raise AssertionError("cache hit should skip downloader")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video", fail_download_video)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fail_download_video,
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
@@ -1218,19 +1525,25 @@ async def test_send_media_persists_and_reuses_telegram_file_id(tmp_path):
 
     await telegram_bot._send_media(context, request_context, info)
 
-    cached = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
     assert cached is not None
     assert cached.media_items[0]["telegram_file_id"] == "tg-video-file-id"
 
     cached_info = telegram_bot._video_info_from_cache(cached)
     second_fake_bot = _FakeBot()
-    await telegram_bot._send_media(_FakeContext(second_fake_bot), request_context, cached_info)
+    await telegram_bot._send_media(
+        _FakeContext(second_fake_bot), request_context, cached_info
+    )
 
     assert second_fake_bot.video_calls[0]["video"] == "tg-video-file-id"
 
 
 @pytest.mark.asyncio
-async def test_send_media_falls_back_to_local_upload_when_cached_file_id_is_rejected(tmp_path):
+async def test_send_media_falls_back_to_local_upload_when_cached_file_id_is_rejected(
+    tmp_path,
+):
     store = StateStore(tmp_path / "state.db")
     telegram_bot = TelegramBot(state_store=store)
     fake_bot = _RejectStaleFileIdBot()
@@ -1257,7 +1570,9 @@ async def test_send_media_falls_back_to_local_upload_when_cached_file_id_is_reje
         ttl_seconds=3600,
     )
 
-    cached = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
     assert cached is not None
 
     await telegram_bot._send_media(
@@ -1270,13 +1585,17 @@ async def test_send_media_falls_back_to_local_upload_when_cached_file_id_is_reje
     assert fake_bot.video_calls[0]["video"] == "stale-video-file-id"
     assert not isinstance(fake_bot.video_calls[1]["video"], str)
 
-    refreshed = store.get_cached_result(request_context.chat_id, request_context.normalized_url)
+    refreshed = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
     assert refreshed is not None
     assert refreshed.media_items[0]["telegram_file_id"] == "fresh-video-file-id"
 
 
 @pytest.mark.asyncio
-async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_is_rejected(tmp_path):
+async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_is_rejected(
+    tmp_path,
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _RejectStaleGroupFileIdBot()
     request_context = _make_request_context(_FakeStatusMessage())
@@ -1289,8 +1608,16 @@ async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_i
         file_path=first,
         title="cached album",
         media_items=[
-            MediaItem(file_path=first, media_type="photo", telegram_file_id="stale-photo-file-id"),
-            MediaItem(file_path=second, media_type="photo", telegram_file_id="fresh-photo-file-id"),
+            MediaItem(
+                file_path=first,
+                media_type="photo",
+                telegram_file_id="stale-photo-file-id",
+            ),
+            MediaItem(
+                file_path=second,
+                media_type="photo",
+                telegram_file_id="fresh-photo-file-id",
+            ),
         ],
         primary_media_type="photo",
     )
@@ -1302,7 +1629,9 @@ async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_i
         "stale-photo-file-id",
         "fresh-photo-file-id",
     ]
-    assert all(not isinstance(item.media, str) for item in fake_bot.group_calls[1]["media"])
+    assert all(
+        not isinstance(item.media, str) for item in fake_bot.group_calls[1]["media"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1310,7 +1639,9 @@ async def test_admin_status_includes_performance_summary(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_status")
     context = _FakeContext(_FakeBot())
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
     telegram_bot.state_store.start_job_metrics(
         job_id="job-1",
         chat_id=77,
@@ -1342,7 +1673,9 @@ async def test_admin_global_status_reports_all_chats(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_global_status", chat_id=77)
     context = _FakeContext(_FakeBot())
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
     telegram_bot.state_store.create_job(
         "job-current",
         77,
@@ -1374,7 +1707,9 @@ async def test_admin_global_status_requires_owner(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/admin_global_status", user_id=2002)
     context = _FakeContext(_FakeBot())
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.BOT_OWNER_USER_ID", 1001
+    )
 
     await telegram_bot.admin_global_status_command(update, context)
 
@@ -1398,7 +1733,9 @@ async def test_download_failure_records_provider_failure_class(monkeypatch, tmp_
         async def download_video(self, url: str, output_dir: Path):
             raise DownloadError("No Instagram accounts available")
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
 
     await telegram_bot.handle_message(update, context)
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
