@@ -60,7 +60,13 @@ from .inline_delivery import (
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
-from .video_downloader import DownloadError, MediaItem, VideoDownloadError, VideoDownloader, VideoInfo
+from .video_downloader import (
+    DownloadError,
+    MediaItem,
+    VideoDownloadError,
+    VideoDownloader,
+    VideoInfo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +86,7 @@ class RequestContext:
     quiet_mode: bool
     joined_existing: bool
     chaos_enabled: bool = False
+    language_code: str = "ru"
 
 
 class TelegramBot:
@@ -100,7 +107,9 @@ class TelegramBot:
         self.started_at = time.time()
         self._purge_expired_cache()
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def handle_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Handle incoming messages by queueing supported provider links."""
         message = update.effective_message
         if not message or not update.effective_chat:
@@ -113,28 +122,35 @@ class TelegramBot:
             return
 
         self._purge_expired_cache()
+        language_code = self._language_for_update(update)
         message_text = message.text or getattr(message, "caption", None) or ""
         extracted_links = RequestParser.extract_supported_links(
             message_text,
             limit=settings.MAX_LINKS_PER_MESSAGE,
         )
         if not extracted_links:
-            if self._message_is_from_owner(update) and await self._whitelist_forwarded_visible_user(update):
+            if self._message_is_from_owner(
+                update
+            ) and await self._whitelist_forwarded_visible_user(update):
                 return
             return
 
-        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        group_settings = self.state_store.ensure_group_settings(
+            update.effective_chat.id
+        )
         raw_url_count = len(RequestParser.URL_PATTERN.findall(message_text))
         if raw_url_count > settings.MAX_LINKS_PER_MESSAGE:
             await message.reply_text(
-                ChaosText.too_many_links(settings.MAX_LINKS_PER_MESSAGE)
+                ChaosText.too_many_links(settings.MAX_LINKS_PER_MESSAGE, language_code)
             )
 
         for parsed_link in extracted_links:
             rate_limit = self._consume_user_rate_limit(request_user_id, source="direct")
             if not rate_limit["allowed"]:
                 await message.reply_text(
-                    ChaosText.rate_limited(rate_limit["retry_after_seconds"])
+                    ChaosText.rate_limited(
+                        rate_limit["retry_after_seconds"], language_code
+                    )
                 )
                 break
             submission = self.job_manager.submit(
@@ -145,7 +161,9 @@ class TelegramBot:
                 provider_label=parsed_link.provider_label,
                 original_url=parsed_link.original_url,
                 normalized_url=parsed_link.normalized_url,
-                execute=self._build_job_executor(update.effective_chat.id, parsed_link, context),
+                execute=self._build_job_executor(
+                    update.effective_chat.id, parsed_link, context
+                ),
                 duplicate_suppression=group_settings["duplicate_suppression"],
             )
             status_message = await message.reply_text(
@@ -154,6 +172,7 @@ class TelegramBot:
                     queue_position=submission.queue_position,
                     joined_existing=not submission.is_new_job,
                     chaos_enabled=group_settings["chaos_mode_enabled"],
+                    language_code=language_code,
                 )
             )
             request_context = RequestContext(
@@ -168,20 +187,59 @@ class TelegramBot:
                 quiet_mode=group_settings["quiet_mode"],
                 joined_existing=not submission.is_new_job,
                 chaos_enabled=group_settings["chaos_mode_enabled"],
+                language_code=language_code,
             )
             self.request_contexts[submission.request_id] = request_context
-            task = asyncio.create_task(self._await_request(context, request_context, submission.job))
+            task = asyncio.create_task(
+                self._await_request(context, request_context, submission.job)
+            )
             self.active_request_tasks[submission.request_id] = task
-            task.add_done_callback(lambda _task, rid=submission.request_id: self._cleanup_request_task(rid))
+            task.add_done_callback(
+                lambda _task, rid=submission.request_id: self._cleanup_request_task(rid)
+            )
 
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def start_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Greet a user and show the shortest useful onboarding message."""
+        if not update.message:
+            return
+        language_code = self._language_for_update(update)
+        await update.message.reply_text(ChaosText.start(language_code))
+
+    async def language_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Persist a user's language preference."""
+        if not update.message or not update.effective_user:
+            return
+        current_language = self._language_for_update(update)
+        requested_language = (context.args[0] if context.args else "").strip().lower()
+        if requested_language not in {"en", "ru"}:
+            await update.message.reply_text(ChaosText.language_usage(current_language))
+            return
+        self.state_store.set_user_language(update.effective_user.id, requested_language)
+        await update.message.reply_text(ChaosText.language_updated(requested_language))
+
+    async def help_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show supported providers and usage help."""
         if not update.message or not update.effective_chat:
             return
-        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
-        await update.message.reply_text(ChaosText.help(group_settings["chaos_mode_enabled"]))
+        group_settings = self.state_store.ensure_group_settings(
+            update.effective_chat.id
+        )
+        await update.message.reply_text(
+            ChaosText.help(
+                group_settings["chaos_mode_enabled"],
+                self._language_for_update(update),
+            )
+        )
 
-    async def admin_help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def admin_help_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show owner-only operational command usage."""
         if not update.message:
             return
@@ -189,7 +247,9 @@ class TelegramBot:
             return
         await update.message.reply_text(ChaosText.admin_help())
 
-    async def legacy_redirect_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def legacy_redirect_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Redirect any old-bot message to the new bot username."""
         if not update.message or not settings.BOT_MIGRATION_TARGET_USERNAME:
             return
@@ -197,7 +257,9 @@ class TelegramBot:
             ChaosText.bot_migration_redirect(settings.BOT_MIGRATION_TARGET_USERNAME)
         )
 
-    async def legacy_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def legacy_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Redirect stale inline callbacks from the old bot."""
         if not update.callback_query or not settings.BOT_MIGRATION_TARGET_USERNAME:
             return
@@ -206,7 +268,9 @@ class TelegramBot:
             show_alert=True,
         )
 
-    async def legacy_inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def legacy_inline_query_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Return a migration result for inline queries sent to the old bot."""
         if not update.inline_query or not settings.BOT_MIGRATION_TARGET_USERNAME:
             return
@@ -226,24 +290,39 @@ class TelegramBot:
             is_personal=True,
         )
 
-    async def formats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def formats_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show supported URL shapes."""
         if not update.message:
             return
-        await update.message.reply_text(ChaosText.formats())
+        await update.message.reply_text(
+            ChaosText.formats(self._language_for_update(update))
+        )
 
-    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def status_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show a safe queue and health summary."""
         if not update.message or not update.effective_chat:
             return
         snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
         persisted = self.state_store.get_public_status(update.effective_chat.id)
-        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        group_settings = self.state_store.ensure_group_settings(
+            update.effective_chat.id
+        )
         await update.message.reply_text(
-            ChaosText.status(snapshot, persisted, chaos_enabled=group_settings["chaos_mode_enabled"])
+            ChaosText.status(
+                snapshot,
+                persisted,
+                chaos_enabled=group_settings["chaos_mode_enabled"],
+                language_code=self._language_for_update(update),
+            )
         )
 
-    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def cancel_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Cancel the latest active request from the current user."""
         if not update.message or not update.effective_chat or not update.effective_user:
             return
@@ -252,7 +331,9 @@ class TelegramBot:
             update.effective_user.id,
         )
         if not request_id:
-            await update.message.reply_text(ChaosText.no_active_request())
+            await update.message.reply_text(
+                ChaosText.no_active_request(self._language_for_update(update))
+            )
             return
 
         task = self.active_request_tasks.get(request_id)
@@ -263,33 +344,53 @@ class TelegramBot:
         if request_context:
             await self._safe_edit_text(
                 request_context.status_message,
-                ChaosText.cancelled(request_context.chaos_enabled),
+                ChaosText.cancelled(
+                    request_context.chaos_enabled, request_context.language_code
+                ),
             )
         if job and update.message:
-            await update.message.reply_text(ChaosText.latest_cancelled())
+            await update.message.reply_text(
+                ChaosText.latest_cancelled(self._language_for_update(update))
+            )
 
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def stats_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show lightweight group stats."""
         if not update.message or not update.effective_chat:
             return
-        group_settings = self.state_store.ensure_group_settings(update.effective_chat.id)
+        group_settings = self.state_store.ensure_group_settings(
+            update.effective_chat.id
+        )
         if not group_settings["stats_enabled"]:
-            await update.message.reply_text(ChaosText.stats_disabled())
+            await update.message.reply_text(
+                ChaosText.stats_disabled(self._language_for_update(update))
+            )
             return
 
         stats = self.state_store.get_group_stats(update.effective_chat.id)
         await update.message.reply_text(
-            ChaosText.stats(stats, chaos_enabled=group_settings["chaos_mode_enabled"])
+            ChaosText.stats(
+                stats,
+                chaos_enabled=group_settings["chaos_mode_enabled"],
+                language_code=self._language_for_update(update),
+            )
         )
 
-    async def chaos_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def chaos_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Toggle or inspect chat-level chaos mode."""
         if not update.message or not update.effective_chat or not update.effective_user:
             return
         action = (context.args[0] if context.args else "status").strip().lower()
         if action == "status":
-            settings_row = self.state_store.ensure_group_settings(update.effective_chat.id)
-            await update.message.reply_text(ChaosText.chaos_status(settings_row["chaos_mode_enabled"]))
+            settings_row = self.state_store.ensure_group_settings(
+                update.effective_chat.id
+            )
+            await update.message.reply_text(
+                ChaosText.chaos_status(settings_row["chaos_mode_enabled"])
+            )
             return
 
         desired = self._parse_toggle_arg(action)
@@ -303,9 +404,13 @@ class TelegramBot:
             update.effective_chat.id,
             chaos_mode_enabled=desired,
         )
-        await update.message.reply_text(ChaosText.chaos_updated(result["chaos_mode_enabled"]))
+        await update.message.reply_text(
+            ChaosText.chaos_updated(result["chaos_mode_enabled"])
+        )
 
-    async def quiet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def quiet_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Toggle quiet mode for the current chat. Owner-only."""
         await self._toggle_group_setting(
             update,
@@ -315,7 +420,9 @@ class TelegramBot:
             label="Тихий режим",
         )
 
-    async def dupes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def dupes_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Toggle duplicate suppression for the current chat. Owner-only."""
         await self._toggle_group_setting(
             update,
@@ -325,7 +432,9 @@ class TelegramBot:
             label="Защита от повторов",
         )
 
-    async def statsmode_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def statsmode_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Toggle stats collection visibility for the current chat. Owner-only."""
         await self._toggle_group_setting(
             update,
@@ -335,7 +444,9 @@ class TelegramBot:
             label="Статистика",
         )
 
-    async def chatlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def chatlimit_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Override per-chat concurrent job limit. Owner-only."""
         await self._set_numeric_group_setting(
             update,
@@ -345,7 +456,9 @@ class TelegramBot:
             label="Лимит чата",
         )
 
-    async def userlimit_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def userlimit_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Override per-user active job limit for the current chat. Owner-only."""
         await self._set_numeric_group_setting(
             update,
@@ -355,7 +468,9 @@ class TelegramBot:
             label="Лимит на пользователя",
         )
 
-    async def admin_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def admin_status_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show owner-facing operational status for the current chat."""
         if not update.message or not update.effective_chat:
             return
@@ -365,18 +480,28 @@ class TelegramBot:
         admin_status = self.state_store.get_admin_status(update.effective_chat.id)
         performance = self._build_admin_performance_summary(
             chat_id=update.effective_chat.id,
-            duplicate_joins=self.state_store.get_group_stats(update.effective_chat.id)["duplicate_joins"],
+            duplicate_joins=self.state_store.get_group_stats(update.effective_chat.id)[
+                "duplicate_joins"
+            ],
             recent_failures=admin_status["recent_failures"],
         )
         settings_row = admin_status["settings"]
-        provider_lines = ", ".join(
-            f"{provider}:{status}={count}"
-            for provider, status, count in admin_status["provider_job_counts"]
-        ) or "нет"
-        failure_lines = "\n".join(
-            f"  - {provider} | {error_class} | {normalized_url}"
-            for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
-        ) or "  - нет"
+        provider_lines = (
+            ", ".join(
+                f"{provider}:{status}={count}"
+                for provider, status, count in admin_status["provider_job_counts"]
+            )
+            or "нет"
+        )
+        failure_lines = (
+            "\n".join(
+                f"  - {provider} | {error_class} | {normalized_url}"
+                for provider, normalized_url, error_class, _finished_at in admin_status[
+                    "recent_failures"
+                ]
+            )
+            or "  - нет"
+        )
         uptime_seconds = int(time.time() - self.started_at)
         await update.message.reply_text(
             "Админ-статус:\n"
@@ -401,7 +526,9 @@ class TelegramBot:
             f"{self._format_performance_summary(performance)}"
         )
 
-    async def admin_global_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def admin_global_status_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show owner-facing operational status across all chats."""
         if not update.message:
             return
@@ -414,14 +541,22 @@ class TelegramBot:
             duplicate_joins=admin_status["duplicate_joins"],
             recent_failures=admin_status["recent_failures"],
         )
-        provider_lines = ", ".join(
-            f"{provider}:{status}={count}"
-            for provider, status, count in admin_status["provider_job_counts"]
-        ) or "нет"
-        failure_lines = "\n".join(
-            f"  - {provider} | {error_class} | {normalized_url}"
-            for provider, normalized_url, error_class, _finished_at in admin_status["recent_failures"]
-        ) or "  - нет"
+        provider_lines = (
+            ", ".join(
+                f"{provider}:{status}={count}"
+                for provider, status, count in admin_status["provider_job_counts"]
+            )
+            or "нет"
+        )
+        failure_lines = (
+            "\n".join(
+                f"  - {provider} | {error_class} | {normalized_url}"
+                for provider, normalized_url, error_class, _finished_at in admin_status[
+                    "recent_failures"
+                ]
+            )
+            or "  - нет"
+        )
         uptime_seconds = int(time.time() - self.started_at)
         await update.message.reply_text(
             "Глобальный админ-статус:\n"
@@ -443,7 +578,9 @@ class TelegramBot:
             f"{self._format_performance_summary(performance)}"
         )
 
-    async def inline_whitelist_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_whitelist_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Manage owner-controlled true-inline whitelist."""
         if not update.message:
             return
@@ -473,7 +610,9 @@ class TelegramBot:
         self.state_store.remove_inline_whitelist_user(user_id)
         await update.message.reply_text(ChaosText.inline_whitelist_removed(user_id))
 
-    async def inline_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_price_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Manage Stars subscription price for true-inline mode."""
         if not update.message:
             return
@@ -487,10 +626,16 @@ class TelegramBot:
         if stars is None:
             await update.message.reply_text(ChaosText.inline_price_usage())
             return
-        runtime = self.state_store.update_inline_runtime_settings(subscription_stars=stars)
-        await update.message.reply_text(ChaosText.inline_subscription_price_updated(runtime["subscription_stars"]))
+        runtime = self.state_store.update_inline_runtime_settings(
+            subscription_stars=stars
+        )
+        await update.message.reply_text(
+            ChaosText.inline_subscription_price_updated(runtime["subscription_stars"])
+        )
 
-    async def inline_onetime_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_onetime_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Manage optional one-time Stars payments for true-inline mode."""
         if not update.message:
             return
@@ -499,7 +644,9 @@ class TelegramBot:
         args = list(getattr(context, "args", []) or [])
         action = args[0].lower() if args else ""
         if action == "off" and len(args) == 1:
-            runtime = self.state_store.update_inline_runtime_settings(one_time_enabled=False)
+            runtime = self.state_store.update_inline_runtime_settings(
+                one_time_enabled=False
+            )
             await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
             return
         if action != "on" or len(args) != 2:
@@ -515,7 +662,9 @@ class TelegramBot:
         )
         await update.message.reply_text(ChaosText.inline_onetime_updated(runtime))
 
-    async def inline_refund_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_refund_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Refund a Telegram Stars inline payment. Owner-only."""
         if not update.message:
             return
@@ -543,7 +692,9 @@ class TelegramBot:
         )
         if one_time_payment is not None:
             if one_time_payment["status"] == "refunded":
-                await update.message.reply_text(ChaosText.inline_refund_already_refunded())
+                await update.message.reply_text(
+                    ChaosText.inline_refund_already_refunded()
+                )
                 return
             payment_kind = "one_time"
             payment_id = one_time_payment["payment_id"]
@@ -554,7 +705,9 @@ class TelegramBot:
             )
             if subscription is not None:
                 if subscription["status"] == "refunded":
-                    await update.message.reply_text(ChaosText.inline_refund_already_refunded())
+                    await update.message.reply_text(
+                        ChaosText.inline_refund_already_refunded()
+                    )
                     return
                 payment_kind = "subscription"
                 user_id = int(subscription["user_id"])
@@ -569,7 +722,9 @@ class TelegramBot:
                 telegram_payment_charge_id=telegram_payment_charge_id,
             )
         except TelegramError:
-            logger.exception("Owner inline refund failed for charge %s", telegram_payment_charge_id)
+            logger.exception(
+                "Owner inline refund failed for charge %s", telegram_payment_charge_id
+            )
             if payment_kind == "one_time" and payment_id is not None:
                 self.state_store.mark_inline_one_time_payment_refund_failed(
                     payment_id,
@@ -587,7 +742,9 @@ class TelegramBot:
             self.state_store.mark_inline_subscription_refunded(user_id)
         await update.message.reply_text(ChaosText.inline_refund_sent(user_id))
 
-    async def inline_query_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_query_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Return true inline placeholder results that will be edited into media."""
 
         query = update.inline_query
@@ -611,7 +768,9 @@ class TelegramBot:
             result = InlineQueryResultArticle(
                 id="inline-storage-missing",
                 title="Inline delivery is not configured",
-                input_message_content=InputTextMessageContent(ChaosText.inline_storage_missing()),
+                input_message_content=InputTextMessageContent(
+                    ChaosText.inline_storage_missing()
+                ),
             )
             await query.answer([result], cache_time=0, is_personal=True)
             return
@@ -674,7 +833,9 @@ class TelegramBot:
         access_kind: str,
     ) -> None:
         session_token = generate_session_token()
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=settings.INLINE_SESSION_TTL_SECONDS
+        )
         self.state_store.create_inline_session(
             session_token=session_token,
             user_id=query.from_user.id,
@@ -699,18 +860,29 @@ class TelegramBot:
                 ChaosText.inline_preparing(parsed_link.provider_label)
             ),
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Preparing", callback_data=f"{callback_prefix}:{session_token}")]]
+                [
+                    [
+                        InlineKeyboardButton(
+                            "Preparing",
+                            callback_data=f"{callback_prefix}:{session_token}",
+                        )
+                    ]
+                ]
             ),
         )
         await query.answer([result], cache_time=0, is_personal=True)
 
-    async def chosen_inline_result_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def chosen_inline_result_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Capture the inline message ID and start delivery."""
 
         chosen = update.chosen_inline_result
         if not chosen or not chosen.inline_message_id:
             return
-        result_kind, session_token = self._parse_chosen_inline_session_token(chosen.result_id)
+        result_kind, session_token = self._parse_chosen_inline_session_token(
+            chosen.result_id
+        )
         if not session_token:
             return
         if result_kind == "paid":
@@ -753,11 +925,18 @@ class TelegramBot:
             one_time_payment_id=one_time_payment_id,
         )
 
-    async def inline_callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def inline_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Fallback: user taps the inline keyboard if chosen feedback did not start delivery."""
 
         query = update.callback_query
-        if not query or not query.inline_message_id or not query.data or not query.from_user:
+        if (
+            not query
+            or not query.inline_message_id
+            or not query.data
+            or not query.from_user
+        ):
             return
         result_kind, session_token = self._parse_chosen_inline_session_token(query.data)
         if not session_token or result_kind == "paid":
@@ -814,8 +993,12 @@ class TelegramBot:
     ) -> None:
         runtime = self.state_store.get_inline_runtime_settings()
         session_token = generate_session_token()
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SESSION_TTL_SECONDS)
-        subscription_payload = build_subscription_payload(user_id=query.from_user.id, session_token=session_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=settings.INLINE_SESSION_TTL_SECONDS
+        )
+        subscription_payload = build_subscription_payload(
+            user_id=query.from_user.id, session_token=session_token
+        )
         try:
             subscription_invoice_link = await context.bot.create_invoice_link(
                 title="Inline Mode",
@@ -823,7 +1006,9 @@ class TelegramBot:
                 payload=subscription_payload,
                 provider_token="",
                 currency="XTR",
-                prices=[LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])],
+                prices=[
+                    LabeledPrice("Inline Mode Monthly", runtime["subscription_stars"])
+                ],
                 subscription_period=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS,
             )
         except TelegramError:
@@ -831,7 +1016,9 @@ class TelegramBot:
             result = InlineQueryResultArticle(
                 id="inline-payment-unavailable",
                 title="Inline payments are temporarily unavailable",
-                input_message_content=InputTextMessageContent(ChaosText.inline_payment_unavailable()),
+                input_message_content=InputTextMessageContent(
+                    ChaosText.inline_payment_unavailable()
+                ),
             )
             await query.answer([result], cache_time=0, is_personal=True)
             return
@@ -853,7 +1040,13 @@ class TelegramBot:
                     "Open the invoice to activate inline mode, then run this inline query again."
                 ),
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Pay with Stars", url=subscription_invoice_link)]]
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "Pay with Stars", url=subscription_invoice_link
+                            )
+                        ]
+                    ]
                 ),
             ),
         ]
@@ -865,16 +1058,24 @@ class TelegramBot:
                     input_message_content=InputInvoiceMessageContent(
                         title="One Inline Download",
                         description="One-time access for this inline media link.",
-                        payload=build_one_time_payload(user_id=query.from_user.id, session_token=session_token),
+                        payload=build_one_time_payload(
+                            user_id=query.from_user.id, session_token=session_token
+                        ),
                         provider_token="",
                         currency="XTR",
-                        prices=[LabeledPrice("One Inline Download", runtime["one_time_stars"])],
+                        prices=[
+                            LabeledPrice(
+                                "One Inline Download", runtime["one_time_stars"]
+                            )
+                        ],
                     ),
                 )
             )
         await query.answer(results, cache_time=0, is_personal=True)
 
-    async def pre_checkout_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def pre_checkout_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Approve Telegram Stars inline invoices only when payload and amount match runtime settings."""
 
         query = getattr(update, "pre_checkout_query", None)
@@ -899,13 +1100,19 @@ class TelegramBot:
                     payload.session_token,
                     user_id=payload.user_id,
                 )
-                approved = session is not None and not self._inline_session_is_expired(session)
+                approved = session is not None and not self._inline_session_is_expired(
+                    session
+                )
         if approved:
             await query.answer(ok=True)
             return
-        await query.answer(ok=False, error_message="Inline payment details are no longer valid.")
+        await query.answer(
+            ok=False, error_message="Inline payment details are no longer valid."
+        )
 
-    async def successful_payment_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def successful_payment_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Record successful Stars payments and deliver or refund linked inline sessions."""
 
         if not update.message or not update.effective_user:
@@ -914,7 +1121,11 @@ class TelegramBot:
         if payment is None:
             return
         payload = parse_inline_payment_payload(payment.invoice_payload)
-        if payload is None or payload.user_id != update.effective_user.id or payment.currency != "XTR":
+        if (
+            payload is None
+            or payload.user_id != update.effective_user.id
+            or payment.currency != "XTR"
+        ):
             return
 
         if payload.kind == "subscription":
@@ -922,7 +1133,10 @@ class TelegramBot:
                 user_id=payload.user_id,
                 expires_at=self._subscription_expires_at(payment),
                 telegram_payment_charge_id=payment.telegram_payment_charge_id,
-                provider_payment_charge_id=getattr(payment, "provider_payment_charge_id", "") or "",
+                provider_payment_charge_id=getattr(
+                    payment, "provider_payment_charge_id", ""
+                )
+                or "",
                 total_amount=payment.total_amount,
                 started_at=datetime.now(timezone.utc),
             )
@@ -935,7 +1149,9 @@ class TelegramBot:
         )
         if existing_payment is not None:
             return
-        session = self.state_store.get_inline_session(payload.session_token, user_id=payload.user_id)
+        session = self.state_store.get_inline_session(
+            payload.session_token, user_id=payload.user_id
+        )
         payment_id = self.state_store.record_inline_one_time_payment(
             user_id=payload.user_id,
             session_token=payload.session_token,
@@ -963,10 +1179,14 @@ class TelegramBot:
             return expires_at.astimezone(timezone.utc)
         if isinstance(expires_at, (int, float)):
             return datetime.fromtimestamp(expires_at, tz=timezone.utc)
-        return datetime.now(timezone.utc) + timedelta(seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS)
+        return datetime.now(timezone.utc) + timedelta(
+            seconds=settings.INLINE_SUBSCRIPTION_PERIOD_SECONDS
+        )
 
     @staticmethod
-    def _parse_chosen_inline_session_token(result_id: str) -> tuple[str | None, str | None]:
+    def _parse_chosen_inline_session_token(
+        result_id: str,
+    ) -> tuple[str | None, str | None]:
         one_time_prefix = "inline_once:"
         if result_id.startswith(one_time_prefix):
             token = result_id.removeprefix(one_time_prefix).strip()
@@ -1010,11 +1230,15 @@ class TelegramBot:
         ):
             return "duplicate"
         self._inline_delivery_session_tokens.add(session_token)
-        self.state_store.attach_inline_message(session_token, inline_message_id=inline_message_id)
+        self.state_store.attach_inline_message(
+            session_token, inline_message_id=inline_message_id
+        )
         self.state_store.mark_inline_session_status(session_token, "delivering")
         return "claimed"
 
-    def _claim_one_time_payment_for_session(self, session_token: str, *, user_id: int) -> str | None:
+    def _claim_one_time_payment_for_session(
+        self, session_token: str, *, user_id: int
+    ) -> str | None:
         session = self.state_store.get_inline_session(session_token, user_id=user_id)
         if session is None:
             return None
@@ -1027,7 +1251,9 @@ class TelegramBot:
             return None
         payment_id = str(payment["payment_id"])
         request_id = f"inline:{session_token}"
-        if not self.state_store.claim_inline_one_time_payment(payment_id, request_id=request_id):
+        if not self.state_store.claim_inline_one_time_payment(
+            payment_id, request_id=request_id
+        ):
             return None
         return payment_id
 
@@ -1063,7 +1289,11 @@ class TelegramBot:
             )
         )
         if hasattr(task, "add_done_callback"):
-            task.add_done_callback(lambda _task, token=session_token: self._inline_delivery_session_tokens.discard(token))
+            task.add_done_callback(
+                lambda _task, token=session_token: self._inline_delivery_session_tokens.discard(
+                    token
+                )
+            )
 
     async def _deliver_inline_session(
         self,
@@ -1116,7 +1346,9 @@ class TelegramBot:
                         provider_label=parsed_link.provider_label,
                     ):
                         output_dir.mkdir(parents=True, exist_ok=True)
-                        video_info = await VideoDownloader().download_video(parsed_link.original_url, output_dir)
+                        video_info = await VideoDownloader().download_video(
+                            parsed_link.original_url, output_dir
+                        )
                         inline_item = await upload_first_media_to_storage(
                             context.bot,
                             storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
@@ -1140,7 +1372,9 @@ class TelegramBot:
                 )
 
             input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
-            await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media)
+            await context.bot.edit_message_media(
+                inline_message_id=inline_message_id, media=input_media
+            )
             self.state_store.mark_inline_session_status(session_token, "delivered")
             self._record_successful_inline_access(session)
             if one_time_payment_id:
@@ -1200,7 +1434,9 @@ class TelegramBot:
         self,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        for subscription in self.state_store.list_expired_unchecked_inline_subscriptions():
+        for (
+            subscription
+        ) in self.state_store.list_expired_unchecked_inline_subscriptions():
             user_id = int(subscription["user_id"])
             try:
                 started_at = datetime.fromisoformat(str(subscription["started_at"]))
@@ -1219,12 +1455,15 @@ class TelegramBot:
             reason = f"failure_rate:{stats['failure_rate']:.2f}"
             if (
                 stats["attempts"] > 0
-                and stats["failure_rate"] >= settings.INLINE_SUBSCRIPTION_AUTO_REFUND_FAILURE_THRESHOLD
+                and stats["failure_rate"]
+                >= settings.INLINE_SUBSCRIPTION_AUTO_REFUND_FAILURE_THRESHOLD
             ):
                 try:
                     await context.bot.refund_star_payment(
                         user_id=user_id,
-                        telegram_payment_charge_id=str(subscription["telegram_payment_charge_id"]),
+                        telegram_payment_charge_id=str(
+                            subscription["telegram_payment_charge_id"]
+                        ),
                     )
                 except TelegramError as exc:
                     self.state_store.mark_inline_subscription_auto_refund_failed(
@@ -1232,9 +1471,13 @@ class TelegramBot:
                         reason=f"{reason}:{exc.__class__.__name__}",
                     )
                 else:
-                    self.state_store.mark_inline_subscription_auto_refunded(user_id, reason=reason)
+                    self.state_store.mark_inline_subscription_auto_refunded(
+                        user_id, reason=reason
+                    )
                 continue
-            self.state_store.mark_inline_subscription_refund_checked(user_id, reason=reason)
+            self.state_store.mark_inline_subscription_refund_checked(
+                user_id, reason=reason
+            )
 
     async def _refund_one_time_payment(
         self,
@@ -1258,7 +1501,9 @@ class TelegramBot:
                 reason=f"{reason}:{exc.__class__.__name__}",
             )
             return
-        self.state_store.mark_inline_one_time_payment_refunded(payment_id, reason=reason)
+        self.state_store.mark_inline_one_time_payment_refunded(
+            payment_id, reason=reason
+        )
 
     @staticmethod
     async def _safe_edit_inline_text(
@@ -1268,7 +1513,9 @@ class TelegramBot:
         text: str,
     ) -> None:
         try:
-            await context.bot.edit_message_text(inline_message_id=inline_message_id, text=text)
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id, text=text
+            )
         except Exception:
             logger.debug("Failed to edit inline placeholder text", exc_info=True)
 
@@ -1284,7 +1531,9 @@ class TelegramBot:
                 raise DownloadError("Job result future was not initialized")
             video_info = await job.result_future
             while True:
-                if self.job_manager.is_delivery_request(job, request_context.request_id):
+                if self.job_manager.is_delivery_request(
+                    job, request_context.request_id
+                ):
                     try:
                         delivery_started_at = time.perf_counter()
                         await self._send_media(context, request_context, video_info)
@@ -1340,27 +1589,42 @@ class TelegramBot:
             ):
                 self._cleanup_files([item.file_path for item in video_info.media_items])
         except asyncio.CancelledError:
-            self.job_manager.mark_request_failed(request_context.request_id, status="cancelled")
+            self.job_manager.mark_request_failed(
+                request_context.request_id, status="cancelled"
+            )
             raise
         except VideoDownloadError as error:
             error_message = self._build_error_message(
                 error,
                 chaos_enabled=request_context.chaos_enabled,
+                language_code=request_context.language_code,
             )
-            logger.error("Download error for %s: %s", request_context.original_url, error)
+            logger.error(
+                "Download error for %s: %s", request_context.original_url, error
+            )
             if self.job_manager.is_delivery_request(job, request_context.request_id):
-                self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
+                self.job_manager.mark_delivery_failed(
+                    job, request_context.request_id, error
+                )
             await self._safe_edit_text(request_context.status_message, error_message)
-            self.job_manager.mark_request_failed(request_context.request_id, status="failed")
+            self.job_manager.mark_request_failed(
+                request_context.request_id, status="failed"
+            )
         except Exception as error:
-            logger.exception("Unexpected error while delivering %s", request_context.original_url)
+            logger.exception(
+                "Unexpected error while delivering %s", request_context.original_url
+            )
             if self.job_manager.is_delivery_request(job, request_context.request_id):
-                self.job_manager.mark_delivery_failed(job, request_context.request_id, error)
+                self.job_manager.mark_delivery_failed(
+                    job, request_context.request_id, error
+                )
             await self._safe_edit_text(
                 request_context.status_message,
-                ChaosText.unexpected_error()
+                ChaosText.unexpected_error(request_context.language_code),
             )
-            self.job_manager.mark_request_failed(request_context.request_id, status="failed")
+            self.job_manager.mark_request_failed(
+                request_context.request_id, status="failed"
+            )
 
     def _build_job_executor(
         self,
@@ -1373,15 +1637,16 @@ class TelegramBot:
         async def _execute(job: SharedJob) -> VideoInfo:
             cached = None
             if settings.RESULT_CACHE_ENABLED:
-                cached = self.state_store.get_cached_result(chat_id, parsed_link.normalized_url)
+                cached = self.state_store.get_cached_result(
+                    chat_id, parsed_link.normalized_url
+                )
             if cached:
                 self.state_store.record_cache_hit(job.job_id)
                 return self._video_info_from_cache(cached)
 
             downloader = VideoDownloader()
             cache_segment = (
-                parsed_link.normalized_url
-                .replace("https://", "")
+                parsed_link.normalized_url.replace("https://", "")
                 .replace("http://", "")
                 .replace("/", "_")
             )
@@ -1393,7 +1658,9 @@ class TelegramBot:
             output_dir.mkdir(parents=True, exist_ok=True)
             download_started_at = time.perf_counter()
             try:
-                video_info = await downloader.download_video(parsed_link.original_url, output_dir)
+                video_info = await downloader.download_video(
+                    parsed_link.original_url, output_dir
+                )
             except Exception as error:
                 self._record_provider_metrics(
                     job.job_id,
@@ -1448,23 +1715,35 @@ class TelegramBot:
     ) -> None:
         """Persist provider execution metrics without leaking provider internals."""
         metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
-        effective_failure_class = getattr(metrics, "failure_class", None) or failure_class
+        effective_failure_class = (
+            getattr(metrics, "failure_class", None) or failure_class
+        )
         self.state_store.record_download_metrics(
             job_id,
             download_duration_ms=download_duration_ms,
             retry_count=int(getattr(metrics, "retry_count", 0) or 0),
             instagram_fast_status=getattr(metrics, "instagram_fast_status", None),
-            instagram_fast_duration_ms=getattr(metrics, "instagram_fast_duration_ms", None),
+            instagram_fast_duration_ms=getattr(
+                metrics, "instagram_fast_duration_ms", None
+            ),
             instagram_fast_budget_exhausted=bool(
                 getattr(metrics, "instagram_fast_budget_exhausted", False)
             ),
             instagram_fast_endpoint_timings_json=getattr(
                 metrics, "instagram_fast_endpoint_timings_json", None
             ),
-            instagram_fallback_attempted=bool(getattr(metrics, "instagram_fallback_attempted", False)),
-            instagram_account_attempts=int(getattr(metrics, "instagram_account_attempts", 0) or 0),
-            instagram_account_retries=int(getattr(metrics, "instagram_account_retries", 0) or 0),
-            instagram_auth_failures=int(getattr(metrics, "instagram_auth_failures", 0) or 0),
+            instagram_fallback_attempted=bool(
+                getattr(metrics, "instagram_fallback_attempted", False)
+            ),
+            instagram_account_attempts=int(
+                getattr(metrics, "instagram_account_attempts", 0) or 0
+            ),
+            instagram_account_retries=int(
+                getattr(metrics, "instagram_account_retries", 0) or 0
+            ),
+            instagram_auth_failures=int(
+                getattr(metrics, "instagram_auth_failures", 0) or 0
+            ),
             instagram_success_path=getattr(metrics, "instagram_success_path", None),
             instagram_fallback_path=getattr(metrics, "instagram_fallback_path", None),
             instagram_metadata_reused=bool(
@@ -1537,7 +1816,9 @@ class TelegramBot:
     ) -> dict[str, Any]:
         performance = self.state_store.get_performance_summary(chat_id, limit=50)
         performance["duplicate_joins"] = duplicate_joins
-        performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
+        performance["failure_classes"] = list(
+            performance.get("failure_classes", [])
+        ) + [
             error_class
             for _provider, _normalized_url, error_class, _finished_at in recent_failures
         ]
@@ -1557,14 +1838,19 @@ class TelegramBot:
                     TextContext(
                         provider_label=request_context.provider_label,
                         chaos_enabled=request_context.chaos_enabled,
+                        language_code=request_context.language_code,
                     )
                 )
                 await self._edit_status_message(request_context.status_message, text)
             elif job.state == "cancelled":
-                text = ChaosText.cancelled(request_context.chaos_enabled)
+                text = ChaosText.cancelled(
+                    request_context.chaos_enabled, request_context.language_code
+                )
                 await self._safe_edit_text(request_context.status_message, text)
             else:
-                text = ChaosText.failed(request_context.chaos_enabled)
+                text = ChaosText.failed(
+                    request_context.chaos_enabled, request_context.language_code
+                )
                 await self._safe_edit_text(request_context.status_message, text)
 
     async def _global_error_handler(
@@ -1600,7 +1886,10 @@ class TelegramBot:
                 raise VideoDownloadError(f"Media file is empty: {file_path}")
 
     async def _send_media(
-        self, context: ContextTypes.DEFAULT_TYPE, request_context: RequestContext, video_info: VideoInfo
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        video_info: VideoInfo,
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
@@ -1723,7 +2012,9 @@ class TelegramBot:
                 caption_text,
             )
         except BadRequest as exc:
-            if not any(item.telegram_file_id for item in media_items) or not self._is_rejected_telegram_file_id(exc):
+            if not any(
+                item.telegram_file_id for item in media_items
+            ) or not self._is_rejected_telegram_file_id(exc):
                 raise
             logger.info(
                 "Cached Telegram file_id rejected in media group; retrying local media upload",
@@ -1757,7 +2048,9 @@ class TelegramBot:
         with ExitStack() as stack:
             media_group = []
             for index, media_item in enumerate(media_items):
-                media_value = None if force_local_upload else media_item.telegram_file_id
+                media_value = (
+                    None if force_local_upload else media_item.telegram_file_id
+                )
                 if not media_value:
                     media_value = stack.enter_context(open(media_item.file_path, "rb"))
                 item_caption = caption_text if index == 0 else None
@@ -1770,7 +2063,9 @@ class TelegramBot:
                         )
                     )
                 else:
-                    media_group.append(InputMediaPhoto(media=media_value, caption=item_caption))
+                    media_group.append(
+                        InputMediaPhoto(media=media_value, caption=item_caption)
+                    )
             return await context.bot.send_media_group(
                 chat_id=request_context.chat_id,
                 media=media_group,
@@ -1862,9 +2157,14 @@ class TelegramBot:
         queue_position: int,
         joined_existing: bool = False,
         chaos_enabled: bool = False,
+        language_code: str = "ru",
     ) -> str:
         return ChaosText.submission(
-            TextContext(provider_label=provider_label, chaos_enabled=chaos_enabled),
+            TextContext(
+                provider_label=provider_label,
+                chaos_enabled=chaos_enabled,
+                language_code=language_code,
+            ),
             queue_position=queue_position,
             joined_existing=joined_existing,
         )
@@ -1889,14 +2189,23 @@ class TelegramBot:
         if media_item.height:
             kwargs["height"] = int(media_item.height)
         if media_item.duration is not None:
-            kwargs["duration"] = dtm.timedelta(seconds=max(0, round(float(media_item.duration))))
+            kwargs["duration"] = dtm.timedelta(
+                seconds=max(0, round(float(media_item.duration)))
+            )
         if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
             kwargs["supports_streaming"] = True
         return kwargs
 
     @staticmethod
-    def _build_error_message(error: Exception, *, chaos_enabled: bool = False) -> str:
-        return ChaosText.error(error, chaos_enabled=chaos_enabled)
+    def _build_error_message(
+        error: Exception,
+        *,
+        chaos_enabled: bool = False,
+        language_code: str = "ru",
+    ) -> str:
+        return ChaosText.error(
+            error, chaos_enabled=chaos_enabled, language_code=language_code
+        )
 
     @staticmethod
     async def _edit_status_message(message: Message, text: str) -> None:
@@ -1915,7 +2224,9 @@ class TelegramBot:
             try:
                 await message.reply_text(text)
             except Exception:
-                logger.debug("Failed to edit or reply with status update", exc_info=True)
+                logger.debug(
+                    "Failed to edit or reply with status update", exc_info=True
+                )
 
     @staticmethod
     async def _delete_status_message(message: Message) -> None:
@@ -1963,6 +2274,23 @@ class TelegramBot:
         sender_chat_id = getattr(sender_chat, "id", None)
         return str(sender_chat_id) if sender_chat_id is not None else "unknown"
 
+    def _language_for_update(self, update: Update) -> str:
+        """Resolve explicit user preference, then Telegram profile language, then English."""
+        user = update.effective_user
+        if user is None:
+            return "en"
+        stored_language = self.state_store.get_user_language(user.id)
+        if stored_language in {"en", "ru"}:
+            return stored_language
+        return self._language_from_profile(getattr(user, "language_code", None))
+
+    @staticmethod
+    def _language_from_profile(language_code: str | None) -> str:
+        normalized = (language_code or "").strip().lower()
+        if normalized == "ru" or normalized.startswith("ru-"):
+            return "ru"
+        return "en"
+
     def _message_is_from_owner(self, update: Update) -> bool:
         return (
             settings.BOT_OWNER_USER_ID is not None
@@ -1981,7 +2309,9 @@ class TelegramBot:
             added_by_user_id=update.effective_user.id,
             note="owner_forward",
         )
-        await update.message.reply_text(ChaosText.inline_whitelist_forward_added(forwarded_user_id))
+        await update.message.reply_text(
+            ChaosText.inline_whitelist_forward_added(forwarded_user_id)
+        )
         return True
 
     @staticmethod
@@ -2013,8 +2343,12 @@ class TelegramBot:
         if desired is None:
             await update.message.reply_text(ChaosText.setting_usage(command_name))
             return
-        result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: desired})
-        await update.message.reply_text(ChaosText.setting_updated(label, result[setting_name]))
+        result = self.state_store.update_group_settings(
+            update.effective_chat.id, **{setting_name: desired}
+        )
+        await update.message.reply_text(
+            ChaosText.setting_updated(label, result[setting_name])
+        )
 
     async def _set_numeric_group_setting(
         self,
@@ -2032,14 +2366,24 @@ class TelegramBot:
             return
         value = self._parse_positive_int_arg(context.args[0] if context.args else "")
         if value is None:
-            await update.message.reply_text(ChaosText.numeric_setting_usage(command_name))
+            await update.message.reply_text(
+                ChaosText.numeric_setting_usage(command_name)
+            )
             return
-        result = self.state_store.update_group_settings(update.effective_chat.id, **{setting_name: value})
+        result = self.state_store.update_group_settings(
+            update.effective_chat.id, **{setting_name: value}
+        )
         if setting_name == "chat_max_concurrent_jobs":
-            self.job_manager.update_chat_limits(update.effective_chat.id, chat_limit=value)
+            self.job_manager.update_chat_limits(
+                update.effective_chat.id, chat_limit=value
+            )
         elif setting_name == "user_max_active_jobs":
-            self.job_manager.update_chat_limits(update.effective_chat.id, user_limit=value)
-        await update.message.reply_text(ChaosText.numeric_setting_updated(label, result[setting_name]))
+            self.job_manager.update_chat_limits(
+                update.effective_chat.id, user_limit=value
+            )
+        await update.message.reply_text(
+            ChaosText.numeric_setting_updated(label, result[setting_name])
+        )
 
     @staticmethod
     def _ru_on_off(value: bool, *, feminine: bool = False) -> str:
@@ -2069,7 +2413,10 @@ class TelegramBot:
             return False
         if getattr(update.effective_chat, "type", "") == "private":
             return True
-        if settings.BOT_OWNER_USER_ID is not None and update.effective_user.id == settings.BOT_OWNER_USER_ID:
+        if (
+            settings.BOT_OWNER_USER_ID is not None
+            and update.effective_user.id == settings.BOT_OWNER_USER_ID
+        ):
             return True
         try:
             member = await context.bot.get_chat_member(
@@ -2107,10 +2454,14 @@ class TelegramBot:
         if event is None or not event.should_alert_owner:
             return
         if settings.BOT_OWNER_USER_ID is None:
-            logger.warning("Skipping low account pool owner alert: BOT_OWNER_USER_ID is not configured")
+            logger.warning(
+                "Skipping low account pool owner alert: BOT_OWNER_USER_ID is not configured"
+            )
             return
         if not getattr(context, "bot", None):
-            logger.warning("Skipping low account pool owner alert: Telegram bot context is unavailable")
+            logger.warning(
+                "Skipping low account pool owner alert: Telegram bot context is unavailable"
+            )
             return
 
         text = (
@@ -2121,7 +2472,9 @@ class TelegramBot:
             f"Reason: {event.reason} after {event.consecutive_failures} sequential failures."
         )
         try:
-            await context.bot.send_message(chat_id=settings.BOT_OWNER_USER_ID, text=text)
+            await context.bot.send_message(
+                chat_id=settings.BOT_OWNER_USER_ID, text=text
+            )
         except TelegramError as exc:
             logger.warning("Failed to send low account pool owner alert: %s", exc)
 
@@ -2142,7 +2495,9 @@ class TelegramBot:
             .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
         )
 
-        has_inline_post_init = settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None
+        has_inline_post_init = (
+            settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None
+        )
         has_migration_post_init = bool(settings.BOT_MIGRATION_TARGET_USERNAME)
         if has_inline_post_init or has_migration_post_init:
             from .post_deploy_notifications import (
@@ -2156,34 +2511,54 @@ class TelegramBot:
 
             async def _run_post_deploy_tasks(application: Application) -> None:
                 if has_inline_post_init:
-                    await self._evaluate_expired_inline_subscription_refunds(application)
-                    inline_result = await send_inline_mode_announcement_once(application.bot, self.state_store)
-                    promo_result = await send_inline_promo_refund_announcement_once(application.bot, self.state_store)
+                    await self._evaluate_expired_inline_subscription_refunds(
+                        application
+                    )
+                    inline_result = await send_inline_mode_announcement_once(
+                        application.bot, self.state_store
+                    )
+                    promo_result = await send_inline_promo_refund_announcement_once(
+                        application.bot, self.state_store
+                    )
                     logger.info("Inline mode announcement result: %s", inline_result)
-                    logger.info("Inline promo/refund announcement result: %s", promo_result)
+                    logger.info(
+                        "Inline promo/refund announcement result: %s", promo_result
+                    )
                 if settings.BOT_MIGRATION_TARGET_USERNAME:
                     migration_result = await send_bot_migration_announcement_once(
                         application.bot,
                         self.state_store,
                         target_username=settings.BOT_MIGRATION_TARGET_USERNAME,
                     )
-                    logger.info("Bot migration announcement result: %s", migration_result)
+                    logger.info(
+                        "Bot migration announcement result: %s", migration_result
+                    )
 
             builder = builder.post_init(_post_init)
 
         self.application = builder.build()
 
         if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
-            self.application.add_handler(InlineQueryHandler(self.legacy_inline_query_handler))
-            self.application.add_handler(CallbackQueryHandler(self.legacy_callback_handler))
-            self.application.add_handler(MessageHandler(filters.ALL, self.legacy_redirect_handler))
+            self.application.add_handler(
+                InlineQueryHandler(self.legacy_inline_query_handler)
+            )
+            self.application.add_handler(
+                CallbackQueryHandler(self.legacy_callback_handler)
+            )
+            self.application.add_handler(
+                MessageHandler(filters.ALL, self.legacy_redirect_handler)
+            )
             self.application.add_error_handler(self._global_error_handler)
             logger.info("Bot started in legacy redirect mode")
             self.application.run_polling()
             return
 
+        self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("admin_help", self.admin_help_command))
+        self.application.add_handler(CommandHandler("language", self.language_command))
+        self.application.add_handler(
+            CommandHandler("admin_help", self.admin_help_command)
+        )
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("formats", self.formats_command))
         self.application.add_handler(CommandHandler("cancel", self.cancel_command))
@@ -2191,22 +2566,47 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("chaos", self.chaos_command))
         self.application.add_handler(CommandHandler("quiet", self.quiet_command))
         self.application.add_handler(CommandHandler("dupes", self.dupes_command))
-        self.application.add_handler(CommandHandler("statsmode", self.statsmode_command))
-        self.application.add_handler(CommandHandler("chatlimit", self.chatlimit_command))
-        self.application.add_handler(CommandHandler("userlimit", self.userlimit_command))
-        self.application.add_handler(CommandHandler("admin_status", self.admin_status_command))
-        self.application.add_handler(CommandHandler("admin_global_status", self.admin_global_status_command))
-        self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
-        self.application.add_handler(ChosenInlineResultHandler(self.chosen_inline_result_handler))
         self.application.add_handler(
-            CallbackQueryHandler(self.inline_callback_handler, pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$")
+            CommandHandler("statsmode", self.statsmode_command)
+        )
+        self.application.add_handler(
+            CommandHandler("chatlimit", self.chatlimit_command)
+        )
+        self.application.add_handler(
+            CommandHandler("userlimit", self.userlimit_command)
+        )
+        self.application.add_handler(
+            CommandHandler("admin_status", self.admin_status_command)
+        )
+        self.application.add_handler(
+            CommandHandler("admin_global_status", self.admin_global_status_command)
+        )
+        self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
+        self.application.add_handler(
+            ChosenInlineResultHandler(self.chosen_inline_result_handler)
+        )
+        self.application.add_handler(
+            CallbackQueryHandler(
+                self.inline_callback_handler,
+                pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$",
+            )
         )
         self.application.add_handler(PreCheckoutQueryHandler(self.pre_checkout_handler))
-        self.application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler))
-        self.application.add_handler(CommandHandler("inline_whitelist", self.inline_whitelist_command))
-        self.application.add_handler(CommandHandler("inline_price", self.inline_price_command))
-        self.application.add_handler(CommandHandler("inline_onetime", self.inline_onetime_command))
-        self.application.add_handler(CommandHandler("inline_refund", self.inline_refund_command))
+        self.application.add_handler(
+            MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler)
+        )
+        self.application.add_handler(
+            CommandHandler("inline_whitelist", self.inline_whitelist_command)
+        )
+        self.application.add_handler(
+            CommandHandler("inline_price", self.inline_price_command)
+        )
+        self.application.add_handler(
+            CommandHandler("inline_onetime", self.inline_onetime_command)
+        )
+        self.application.add_handler(
+            CommandHandler("inline_refund", self.inline_refund_command)
+        )
         self.application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,

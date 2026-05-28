@@ -13,13 +13,68 @@ class TextContext:
     provider_label: str = ""
     chaos_enabled: bool = False
     private_chat: bool = False
+    language_code: str = "ru"
 
 
 class ChaosText:
     """Build Russian Telegram text without coupling it to bot control flow."""
 
     @staticmethod
-    def help(chaos_enabled: bool) -> str:
+    def start(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return (
+                "Hi! Send me a link and I will download the media here.\n\n"
+                "I support Instagram posts, reels, stories, Twitter/X posts, and YouTube Shorts.\n\n"
+                "Useful commands:\n"
+                "- /help - usage help\n"
+                "- /formats - supported link examples\n"
+                "- /status - queue status\n"
+                "- /language en|ru - switch language"
+            )
+        return (
+            "Привет! Пришли ссылку - я скачаю медиа сюда.\n\n"
+            "Поддерживаю Instagram posts, reels, stories, Twitter/X posts и YouTube Shorts.\n\n"
+            "Полезные команды:\n"
+            "- /help - помощь\n"
+            "- /formats - примеры ссылок\n"
+            "- /status - статус очереди\n"
+            "- /language en|ru - сменить язык"
+        )
+
+    @staticmethod
+    def language_usage(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Usage: /language en|ru"
+        return "Использование: /language en|ru"
+
+    @staticmethod
+    def language_updated(language_code: str) -> str:
+        if language_code == "en":
+            return "Language set to English."
+        return "Язык переключен на русский."
+
+    @staticmethod
+    def help(chaos_enabled: bool, language_code: str = "ru") -> str:
+        if language_code == "en":
+            chaos_line = (
+                "- /chaos status - chaos mode status: on"
+                if chaos_enabled
+                else "- /chaos status - chaos mode status: off"
+            )
+            return (
+                "Send me a link - I will download the media to this chat.\n\n"
+                "Supported:\n"
+                "- Instagram posts, reels, stories\n"
+                "- Twitter/X status links\n"
+                "- YouTube Shorts\n\n"
+                "Commands:\n"
+                "- /formats - supported link examples\n"
+                "- /status - bot queue and health\n"
+                "- /cancel - cancel your latest request\n"
+                "- /stats - stats for this chat\n"
+                "- /language en|ru - switch language\n"
+                f"{chaos_line}"
+            )
         chaos_line = (
             "- /chaos status - статус режима хаоса: включен"
             if chaos_enabled
@@ -36,13 +91,16 @@ class ChaosText:
             "- /status - очередь и состояние бота\n"
             "- /cancel - отменить твой последний запрос\n"
             "- /stats - статистика этого чата\n"
+            "- /language en|ru - сменить язык\n"
             f"{chaos_line}"
         )
 
     @staticmethod
     def bot_migration_redirect(target_username: str) -> str:
         username = target_username.strip().removeprefix("@")
-        return f"Мы переехали в @{username}.\nОткрыть нового бота: https://t.me/{username}"
+        return (
+            f"Мы переехали в @{username}.\nОткрыть нового бота: https://t.me/{username}"
+        )
 
     @staticmethod
     def admin_help() -> str:
@@ -72,7 +130,14 @@ class ChaosText:
         )
 
     @staticmethod
-    def formats() -> str:
+    def formats(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return (
+                "Supported links:\n"
+                "- Instagram: posts, reels, stories, and share links\n"
+                "- Twitter/X: /status/... links\n"
+                "- YouTube Shorts: /shorts/... links"
+            )
         return (
             "Поддерживаемые ссылки:\n"
             "- Instagram: посты, reels, stories и share-ссылки\n"
@@ -81,11 +146,31 @@ class ChaosText:
         )
 
     @staticmethod
-    def submission(context: TextContext, *, queue_position: int, joined_existing: bool = False) -> str:
+    def submission(
+        context: TextContext, *, queue_position: int, joined_existing: bool = False
+    ) -> str:
         provider = context.provider_label
+        if context.language_code == "en":
+            if joined_existing:
+                if context.chaos_enabled:
+                    return f"{provider} is already in progress. Joined the same run."
+                return f"{provider} is already downloading. I will wait for the shared result."
+
+            if queue_position > 1:
+                ahead = queue_position - 1
+                if context.chaos_enabled:
+                    return f"{provider} joined the queue. {ahead} ahead, the chat is already humming."
+                return f"{provider} is queued. Ahead of you: {ahead}."
+
+            if context.chaos_enabled:
+                return f"{provider} accepted. Warming up the download path."
+            return f"Got {provider}. I will start downloading soon."
+
         if joined_existing:
             if context.chaos_enabled:
-                return f"{provider} уже в работе. Повтор засчитан, сидим рядом с таймером."
+                return (
+                    f"{provider} уже в работе. Повтор засчитан, сидим рядом с таймером."
+                )
             return f"{provider} уже скачивается. Дождусь общего результата."
 
         if queue_position > 1:
@@ -100,32 +185,68 @@ class ChaosText:
 
     @staticmethod
     def running(context: TextContext) -> str:
+        if context.language_code == "en":
+            if context.chaos_enabled:
+                return f"{context.provider_label}: fetching media, stay close."
+            return f"{context.provider_label}: downloading."
         if context.chaos_enabled:
             return f"{context.provider_label}: пошла добыча, не моргаем."
         return f"{context.provider_label}: скачиваю."
 
     @staticmethod
-    def cancelled(chaos_enabled: bool) -> str:
+    def cancelled(chaos_enabled: bool, language_code: str = "ru") -> str:
+        if language_code == "en":
+            if chaos_enabled:
+                return "Request cancelled. The drama ended before the download."
+            return "Request cancelled."
         if chaos_enabled:
             return "Запрос отменен. Драма закончилась раньше скачивания."
         return "Запрос отменен."
 
     @staticmethod
-    def failed(chaos_enabled: bool) -> str:
+    def failed(chaos_enabled: bool, language_code: str = "ru") -> str:
+        if language_code == "en":
+            if chaos_enabled:
+                return "The download failed. I will sort out what happened."
+            return "Could not download media."
         if chaos_enabled:
             return "Скачивание упало. Сейчас разберу завалы и скажу, что случилось."
         return "Не удалось скачать медиа."
 
     @staticmethod
-    def unexpected_error() -> str:
+    def unexpected_error(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Something unexpected happened. Try again later."
         return "Произошла неожиданная ошибка. Попробуй позже."
 
     @staticmethod
-    def error(error: Exception, *, chaos_enabled: bool) -> str:
+    def error(
+        error: Exception, *, chaos_enabled: bool, language_code: str = "ru"
+    ) -> str:
         error_text = str(error)
         error_lower = error_text.lower()
-        if "authentication failed" in error_lower or "cookies have expired" in error_lower:
-            return "Не прошла авторизация Instagram. Владельцу бота нужно обновить сессию."
+        if language_code == "en":
+            if (
+                "authentication failed" in error_lower
+                or "cookies have expired" in error_lower
+            ):
+                return "Instagram authorization failed. The bot owner needs to refresh the session."
+            if "rate-limit" in error_lower or "rate limit" in error_lower:
+                if chaos_enabled:
+                    return "The provider hit a rate limit. Backing off for now."
+                return "Provider rate limit reached. Try again later."
+            if "unsupported" in error_lower:
+                return "This link is not supported."
+            if "timed out" in error_lower:
+                return "The download took too long. Try again."
+            return "Could not download media. Try again later."
+        if (
+            "authentication failed" in error_lower
+            or "cookies have expired" in error_lower
+        ):
+            return (
+                "Не прошла авторизация Instagram. Владельцу бота нужно обновить сессию."
+            )
         if "rate-limit" in error_lower or "rate limit" in error_lower:
             if chaos_enabled:
                 return "Провайдер включил лимит. Отступаем, чтобы не получить по шапке."
@@ -137,15 +258,45 @@ class ChaosText:
         return "Не смог скачать медиа. Попробуй позже."
 
     @staticmethod
-    def stats_disabled() -> str:
+    def stats_disabled(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Stats are disabled for this chat."
         return "Статистика выключена для этого чата."
 
     @staticmethod
-    def stats(stats: dict[str, Any], *, chaos_enabled: bool) -> str:
-        top_users = ", ".join(f"{name} ({count})" for name, count in stats["top_users"]) or "пока пусто"
-        top_providers = ", ".join(
-            f"{ChaosText.provider_name(provider)} ({count})" for provider, count in stats["top_providers"]
-        ) or "пока пусто"
+    def stats(
+        stats: dict[str, Any], *, chaos_enabled: bool, language_code: str = "ru"
+    ) -> str:
+        empty = "none yet" if language_code == "en" else "пока пусто"
+        top_users = (
+            ", ".join(f"{name} ({count})" for name, count in stats["top_users"])
+            or empty
+        )
+        top_providers = (
+            ", ".join(
+                f"{ChaosText.provider_name(provider)} ({count})"
+                for provider, count in stats["top_providers"]
+            )
+            or empty
+        )
+
+        if language_code == "en":
+            title = "Chaos stats" if chaos_enabled else "Chat stats"
+            duplicate_label = (
+                "Duplicate links in the same run"
+                if chaos_enabled
+                else "Duplicate links"
+            )
+            return (
+                f"{title}:\n"
+                f"- Successful: {stats['completed']}\n"
+                f"- Failed: {stats['failed']}\n"
+                f"- Cancelled: {stats['cancelled']}\n"
+                f"- From cache: {stats['cache_hits']}\n"
+                f"- {duplicate_label}: {stats['duplicate_joins']}\n"
+                f"- Top users: {top_users}\n"
+                f"- Top providers: {top_providers}"
+            )
 
         if chaos_enabled:
             return (
@@ -171,7 +322,26 @@ class ChaosText:
         )
 
     @staticmethod
-    def status(snapshot: dict[str, int], persisted: dict[str, int], *, chaos_enabled: bool) -> str:
+    def status(
+        snapshot: dict[str, int],
+        persisted: dict[str, int],
+        *,
+        chaos_enabled: bool,
+        language_code: str = "ru",
+    ) -> str:
+        if language_code == "en":
+            title = "Chaos queue status" if chaos_enabled else "Queue status"
+            return (
+                f"{title}:\n"
+                f"- Active jobs: {snapshot['active_jobs']}\n"
+                f"- Queued jobs: {snapshot['queued_jobs']}\n"
+                f"- Active requests: {snapshot['active_requests']}\n"
+                f"- Chat limit: {snapshot['chat_limit']}\n"
+                f"- Per-user limit: {snapshot['user_limit']}\n"
+                f"- Completed: {persisted['completed']}\n"
+                f"- Failed: {persisted['failed']}\n"
+                f"- Cache hits: {persisted['cache_hits']}"
+            )
         title = "Статус очереди хаоса" if chaos_enabled else "Статус очереди"
         return (
             f"{title}:\n"
@@ -231,15 +401,21 @@ class ChaosText:
         return "Режим хаоса могут переключать только админы чата или владелец бота."
 
     @staticmethod
-    def no_active_request() -> str:
+    def no_active_request(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "You do not have any active queued or downloading requests."
         return "У тебя нет активных запросов в очереди или скачивании."
 
     @staticmethod
-    def latest_cancelled() -> str:
+    def latest_cancelled(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Latest request cancelled."
         return "Последний запрос отменен."
 
     @staticmethod
-    def too_many_links(limit: int) -> str:
+    def too_many_links(limit: int, language_code: str = "ru") -> str:
+        if language_code == "en":
+            return f"Only the first {limit} supported links will be queued."
         return f"В очередь попадут только первые {limit} поддерживаемых ссылок."
 
     @staticmethod
@@ -268,11 +444,15 @@ class ChaosText:
 
     @staticmethod
     def inline_delivery_failed() -> str:
-        return "Inline delivery failed. If this was a one-time payment, it was refunded."
+        return (
+            "Inline delivery failed. If this was a one-time payment, it was refunded."
+        )
 
     @staticmethod
-    def rate_limited(retry_after_seconds: int) -> str:
+    def rate_limited(retry_after_seconds: int, language_code: str = "ru") -> str:
         minutes = max(1, (retry_after_seconds + 59) // 60)
+        if language_code == "en":
+            return f"Too many requests. Try again in about {minutes} min."
         return f"Слишком много запросов. Попробуй снова примерно через {minutes} мин."
 
     @staticmethod
@@ -326,7 +506,9 @@ class ChaosText:
 
     @staticmethod
     def inline_refund_not_found() -> str:
-        return "Inline refund charge not found. Add user_id to refund an unknown charge."
+        return (
+            "Inline refund charge not found. Add user_id to refund an unknown charge."
+        )
 
     @staticmethod
     def inline_refund_already_refunded() -> str:

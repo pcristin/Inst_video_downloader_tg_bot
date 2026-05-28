@@ -15,7 +15,9 @@ from typing import Any
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
-USER_NOTIFICATION_STATUSES = frozenset({"attempted", "sent", "failed", "retryable_failed"})
+USER_NOTIFICATION_STATUSES = frozenset(
+    {"attempted", "sent", "failed", "retryable_failed"}
+)
 
 
 def _utc_now() -> datetime:
@@ -44,8 +46,7 @@ class StateStore:
 
     def _initialize(self) -> None:
         with self._lock, self._conn:
-            self._conn.executescript(
-                """
+            self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id TEXT PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
@@ -217,6 +218,12 @@ class StateStore:
                     PRIMARY KEY (notification_key, user_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER PRIMARY KEY,
+                    language_code TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_chat_status
                     ON jobs (chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_requests_chat_status
@@ -231,11 +238,12 @@ class StateStore:
                     ON user_rate_limit_events (user_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_inline_delivery_user_period
                     ON inline_delivery_events (user_id, access_kind, occurred_at);
-                """
-            )
+                """)
             existing_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(group_settings)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(group_settings)"
+                ).fetchall()
             }
             if "chat_max_concurrent_jobs" not in existing_columns:
                 self._conn.execute(
@@ -251,7 +259,9 @@ class StateStore:
                 )
             request_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(request_events)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(request_events)"
+                ).fetchall()
             }
             if "joined_existing" not in request_columns:
                 self._conn.execute(
@@ -259,7 +269,9 @@ class StateStore:
                 )
             performance_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(performance_metrics)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(performance_metrics)"
+                ).fetchall()
             }
             if "failure_class" not in performance_columns:
                 self._conn.execute(
@@ -283,15 +295,23 @@ class StateStore:
                 )
             one_time_payment_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(inline_one_time_payments)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(inline_one_time_payments)"
+                ).fetchall()
             }
             if "provider" not in one_time_payment_columns:
-                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT")
+                self._conn.execute(
+                    "ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT"
+                )
             if "normalized_url" not in one_time_payment_columns:
-                self._conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT")
+                self._conn.execute(
+                    "ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT"
+                )
             inline_session_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(inline_sessions)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(inline_sessions)"
+                ).fetchall()
             }
             if "access_kind" not in inline_session_columns:
                 self._conn.execute(
@@ -299,19 +319,19 @@ class StateStore:
                 )
             subscription_columns = {
                 row["name"]
-                for row in self._conn.execute("PRAGMA table_info(inline_subscriptions)").fetchall()
+                for row in self._conn.execute(
+                    "PRAGMA table_info(inline_subscriptions)"
+                ).fetchall()
             }
             if "started_at" not in subscription_columns:
                 self._conn.execute(
                     "ALTER TABLE inline_subscriptions ADD COLUMN started_at TEXT NOT NULL DEFAULT ''"
                 )
-                self._conn.execute(
-                    """
+                self._conn.execute("""
                     UPDATE inline_subscriptions
                     SET started_at = updated_at
                     WHERE started_at = ''
-                    """
-                )
+                    """)
             if "auto_refund_checked_at" not in subscription_columns:
                 self._conn.execute(
                     "ALTER TABLE inline_subscriptions ADD COLUMN auto_refund_checked_at TEXT"
@@ -320,6 +340,34 @@ class StateStore:
                 self._conn.execute(
                     "ALTER TABLE inline_subscriptions ADD COLUMN refund_reason TEXT"
                 )
+
+    def get_user_language(self, user_id: int) -> str | None:
+        """Return a user's explicit language preference, if one exists."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT language_code FROM user_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None or not row["language_code"]:
+            return None
+        return str(row["language_code"])
+
+    def set_user_language(self, user_id: int, language_code: str) -> None:
+        """Persist a user's explicit language preference."""
+        if language_code not in {"en", "ru"}:
+            raise ValueError("language_code must be 'en' or 'ru'")
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO user_settings (user_id, language_code, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    language_code = excluded.language_code,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, language_code, now),
+            )
 
     def ensure_group_settings(self, chat_id: int) -> dict[str, Any]:
         with self._lock, self._conn:
@@ -351,12 +399,16 @@ class StateStore:
             "duplicate_suppression": bool(row["duplicate_suppression"]),
             "stats_enabled": bool(row["stats_enabled"]),
             "chaos_mode_enabled": bool(row["chaos_mode_enabled"]),
-            "chat_max_concurrent_jobs": int(row["chat_max_concurrent_jobs"])
-            if row["chat_max_concurrent_jobs"] is not None
-            else settings.CHAT_MAX_CONCURRENT_JOBS,
-            "user_max_active_jobs": int(row["user_max_active_jobs"])
-            if row["user_max_active_jobs"] is not None
-            else settings.USER_MAX_ACTIVE_JOBS,
+            "chat_max_concurrent_jobs": (
+                int(row["chat_max_concurrent_jobs"])
+                if row["chat_max_concurrent_jobs"] is not None
+                else settings.CHAT_MAX_CONCURRENT_JOBS
+            ),
+            "user_max_active_jobs": (
+                int(row["user_max_active_jobs"])
+                if row["user_max_active_jobs"] is not None
+                else settings.USER_MAX_ACTIVE_JOBS
+            ),
         }
 
     def update_group_settings(self, chat_id: int, **updates: Any) -> dict[str, Any]:
@@ -376,7 +428,12 @@ class StateStore:
             if not column:
                 continue
             assignments.append(f"{column} = ?")
-            if key in {"quiet_mode", "duplicate_suppression", "stats_enabled", "chaos_mode_enabled"}:
+            if key in {
+                "quiet_mode",
+                "duplicate_suppression",
+                "stats_enabled",
+                "chaos_mode_enabled",
+            }:
                 values.append(1 if value else 0)
             else:
                 values.append(value)
@@ -443,7 +500,9 @@ class StateStore:
         chat_id: int | None = None,
     ) -> int:
         """Return active persisted jobs older than the allowed runtime window."""
-        cutoff = (_utc_now() - timedelta(seconds=max(0.0, older_than_seconds))).isoformat()
+        cutoff = (
+            _utc_now() - timedelta(seconds=max(0.0, older_than_seconds))
+        ).isoformat()
         with self._lock:
             if chat_id is None:
                 row = self._conn.execute(
@@ -502,7 +561,9 @@ class StateStore:
                 ).fetchone()
         return int(row["count"] or 0)
 
-    def create_job(self, job_id: str, chat_id: int, normalized_url: str, provider: str, status: str) -> None:
+    def create_job(
+        self, job_id: str, chat_id: int, normalized_url: str, provider: str, status: str
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -513,7 +574,9 @@ class StateStore:
                 (job_id, chat_id, normalized_url, provider, status, now),
             )
 
-    def update_job_status(self, job_id: str, status: str, error_class: str | None = None) -> None:
+    def update_job_status(
+        self, job_id: str, status: str, error_class: str | None = None
+    ) -> None:
         now = _utc_now().isoformat()
         started_at = now if status == "running" else None
         finished_at = now if status in {"completed", "failed", "cancelled"} else None
@@ -565,7 +628,9 @@ class StateStore:
                 ),
             )
 
-    def update_request_status(self, request_id: str, status: str, cache_hit: bool = False) -> None:
+    def update_request_status(
+        self, request_id: str, status: str, cache_hit: bool = False
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -583,13 +648,11 @@ class StateStore:
         """Return users who have submitted at least one request."""
 
         with self._lock:
-            rows = self._conn.execute(
-                """
+            rows = self._conn.execute("""
                 SELECT DISTINCT user_id
                 FROM request_events
                 ORDER BY user_id
-                """
-            ).fetchall()
+                """).fetchall()
         return [int(row["user_id"]) for row in rows]
 
     def notification_was_attempted(self, notification_key: str, user_id: int) -> bool:
@@ -769,7 +832,9 @@ class StateStore:
             ),
         )
 
-    def record_delivery_metrics(self, job_id: str, *, delivery_duration_ms: int) -> None:
+    def record_delivery_metrics(
+        self, job_id: str, *, delivery_duration_ms: int
+    ) -> None:
         self._safe_metrics_write(
             """
             UPDATE performance_metrics
@@ -791,7 +856,9 @@ class StateStore:
             (status, now, job_id),
         )
 
-    def get_performance_summary(self, chat_id: int | None, limit: int = 50) -> dict[str, Any]:
+    def get_performance_summary(
+        self, chat_id: int | None, limit: int = 50
+    ) -> dict[str, Any]:
         with self._lock:
             if chat_id is None:
                 rows = self._conn.execute(
@@ -833,13 +900,19 @@ class StateStore:
                 },
             )
             provider_summary["jobs"] += 1
-            queue_wait_ms = self._duration_between_ms(row["created_at"], row["started_at"])
+            queue_wait_ms = self._duration_between_ms(
+                row["created_at"], row["started_at"]
+            )
             if queue_wait_ms is not None:
                 provider_summary["_queue_wait_durations"].append(queue_wait_ms)
             if row["download_duration_ms"] is not None:
-                provider_summary["_download_durations"].append(row["download_duration_ms"])
+                provider_summary["_download_durations"].append(
+                    row["download_duration_ms"]
+                )
             if row["delivery_duration_ms"] is not None:
-                provider_summary["_delivery_durations"].append(row["delivery_duration_ms"])
+                provider_summary["_delivery_durations"].append(
+                    row["delivery_duration_ms"]
+                )
 
         for provider_summary in providers.values():
             provider_summary["avg_queue_wait_ms"] = self._safe_average(
@@ -860,7 +933,11 @@ class StateStore:
         queue_wait_durations = [
             queue_wait_ms
             for row in rows
-            if (queue_wait_ms := self._duration_between_ms(row["created_at"], row["started_at"]))
+            if (
+                queue_wait_ms := self._duration_between_ms(
+                    row["created_at"], row["started_at"]
+                )
+            )
             is not None
         ]
         instagram_rows = [row for row in rows if row["provider"] == "instagram"]
@@ -881,17 +958,23 @@ class StateStore:
             "failure_classes": failure_classes,
             "instagram": {
                 "fast_failed": sum(
-                    1 for row in instagram_rows if row["instagram_fast_status"] == "failed"
+                    1
+                    for row in instagram_rows
+                    if row["instagram_fast_status"] == "failed"
                 ),
                 "fallback_count": sum(
                     1 for row in instagram_rows if row["instagram_fallback_attempted"]
                 ),
                 "fast_budget_exhausted": sum(
-                    1 for row in instagram_rows if row["instagram_fast_budget_exhausted"]
+                    1
+                    for row in instagram_rows
+                    if row["instagram_fast_budget_exhausted"]
                 ),
                 "fallback_paths": {
                     path: sum(
-                        1 for row in instagram_rows if row["instagram_fallback_path"] == path
+                        1
+                        for row in instagram_rows
+                        if row["instagram_fallback_path"] == path
                     )
                     for path in sorted(
                         {
@@ -983,7 +1066,9 @@ class StateStore:
                 ).fetchone()
         return dict(row) if row is not None else None
 
-    def attach_inline_message(self, session_token: str, *, inline_message_id: str) -> None:
+    def attach_inline_message(
+        self, session_token: str, *, inline_message_id: str
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -1033,17 +1118,17 @@ class StateStore:
 
     def remove_inline_whitelist_user(self, user_id: int) -> None:
         with self._lock, self._conn:
-            self._conn.execute("DELETE FROM inline_whitelist WHERE user_id = ?", (user_id,))
+            self._conn.execute(
+                "DELETE FROM inline_whitelist WHERE user_id = ?", (user_id,)
+            )
 
     def list_inline_whitelist_users(self) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute(
-                """
+            rows = self._conn.execute("""
                 SELECT *
                 FROM inline_whitelist
                 ORDER BY created_at DESC
-                """
-            ).fetchall()
+                """).fetchall()
         return [dict(row) for row in rows]
 
     def is_inline_whitelisted(self, user_id: int) -> bool:
@@ -1065,7 +1150,9 @@ class StateStore:
         started_at: datetime | None = None,
     ) -> None:
         now = _utc_now().isoformat()
-        normalized_started_at = self._normalize_utc_datetime(started_at or _utc_now()).isoformat()
+        normalized_started_at = self._normalize_utc_datetime(
+            started_at or _utc_now()
+        ).isoformat()
         normalized_expires_at = self._normalize_utc_datetime(expires_at).isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -1138,7 +1225,9 @@ class StateStore:
                 ("refunded", now, user_id),
             )
 
-    def mark_inline_subscription_auto_refunded(self, user_id: int, *, reason: str) -> None:
+    def mark_inline_subscription_auto_refunded(
+        self, user_id: int, *, reason: str
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -1153,7 +1242,9 @@ class StateStore:
                 ("auto_refunded", now, reason, now, user_id),
             )
 
-    def mark_inline_subscription_auto_refund_failed(self, user_id: int, *, reason: str) -> None:
+    def mark_inline_subscription_auto_refund_failed(
+        self, user_id: int, *, reason: str
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -1168,7 +1259,9 @@ class StateStore:
                 ("auto_refund_failed", now, reason, now, user_id),
             )
 
-    def mark_inline_subscription_refund_checked(self, user_id: int, *, reason: str) -> None:
+    def mark_inline_subscription_refund_checked(
+        self, user_id: int, *, reason: str
+    ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
@@ -1215,7 +1308,9 @@ class StateStore:
         return expires_at > _utc_now()
 
     def user_has_inline_access(self, user_id: int) -> bool:
-        return self.is_inline_whitelisted(user_id) or self.has_active_inline_subscription(user_id)
+        return self.is_inline_whitelisted(
+            user_id
+        ) or self.has_active_inline_subscription(user_id)
 
     def check_user_rate_limit(
         self,
@@ -1248,7 +1343,14 @@ class StateStore:
                 oldest = datetime.fromisoformat(str(rows[0]["created_at"]))
                 if oldest.tzinfo is None:
                     oldest = oldest.replace(tzinfo=timezone.utc)
-                retry_after = max(1, int((oldest + timedelta(seconds=window_seconds) - now_dt).total_seconds()))
+                retry_after = max(
+                    1,
+                    int(
+                        (
+                            oldest + timedelta(seconds=window_seconds) - now_dt
+                        ).total_seconds()
+                    ),
+                )
                 return {"allowed": False, "retry_after_seconds": retry_after}
             self._conn.execute(
                 """
@@ -1483,7 +1585,9 @@ class StateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def claim_inline_one_time_payment(self, payment_id: str, *, request_id: str) -> bool:
+    def claim_inline_one_time_payment(
+        self, payment_id: str, *, request_id: str
+    ) -> bool:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             cursor = self._conn.execute(
@@ -1536,7 +1640,9 @@ class StateStore:
             refund_reason=None,
         )
 
-    def mark_inline_one_time_payment_refunded(self, payment_id: str, *, reason: str) -> None:
+    def mark_inline_one_time_payment_refunded(
+        self, payment_id: str, *, reason: str
+    ) -> None:
         self._mark_inline_one_time_payment(
             payment_id,
             status="refunded",
@@ -1594,7 +1700,9 @@ class StateStore:
         cached["media_items"] = json.loads(cached.pop("media_json"))
         return cached
 
-    def get_cached_result(self, chat_id: int, normalized_url: str) -> CachedMediaEntry | None:
+    def get_cached_result(
+        self, chat_id: int, normalized_url: str
+    ) -> CachedMediaEntry | None:
         now = _utc_now().isoformat()
         with self._lock:
             row = self._conn.execute(
@@ -1698,7 +1806,9 @@ class StateStore:
             for row in rows:
                 for media_item in json.loads(row["media_json"]):
                     expired_paths.append(Path(media_item["file_path"]))
-            self._conn.execute("DELETE FROM recent_results WHERE expires_at <= ?", (now,))
+            self._conn.execute(
+                "DELETE FROM recent_results WHERE expires_at <= ?", (now,)
+            )
         return expired_paths
 
     def get_public_status(self, chat_id: int) -> dict[str, int]:
@@ -1819,10 +1929,13 @@ class StateStore:
                 older_than_seconds=settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS * 2,
                 chat_id=chat_id,
             ),
-            "recent_provider_timeouts": self.get_recent_provider_timeout_count(chat_id=chat_id),
+            "recent_provider_timeouts": self.get_recent_provider_timeout_count(
+                chat_id=chat_id
+            ),
             "failed_jobs": int(failed_jobs),
             "provider_job_counts": [
-                (row["provider"], row["status"], int(row["count"])) for row in provider_job_counts
+                (row["provider"], row["status"], int(row["count"]))
+                for row in provider_job_counts
             ],
             "recent_failures": [
                 (
@@ -1859,23 +1972,19 @@ class StateStore:
             duplicate_joins = self._conn.execute(
                 "SELECT COUNT(*) AS count FROM request_events WHERE joined_existing = 1",
             ).fetchone()["count"]
-            provider_job_counts = self._conn.execute(
-                """
+            provider_job_counts = self._conn.execute("""
                 SELECT provider, status, COUNT(*) AS count
                 FROM jobs
                 GROUP BY provider, status
                 ORDER BY provider ASC, status ASC
-                """
-            ).fetchall()
-            recent_failures = self._conn.execute(
-                """
+                """).fetchall()
+            recent_failures = self._conn.execute("""
                 SELECT provider, normalized_url, error_class, finished_at
                 FROM jobs
                 WHERE status = 'failed'
                 ORDER BY finished_at DESC
                 LIMIT 5
-                """
-            ).fetchall()
+                """).fetchall()
         return {
             "cache_entries": int(cache_entries),
             "queued_jobs": int(queued),
@@ -1889,7 +1998,8 @@ class StateStore:
             "users_with_requests": int(users_with_requests),
             "duplicate_joins": int(duplicate_joins),
             "provider_job_counts": [
-                (row["provider"], row["status"], int(row["count"])) for row in provider_job_counts
+                (row["provider"], row["status"], int(row["count"]))
+                for row in provider_job_counts
             ],
             "recent_failures": [
                 (

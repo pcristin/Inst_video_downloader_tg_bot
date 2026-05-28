@@ -54,7 +54,10 @@ def test_run_registers_global_error_handler(monkeypatch):
         def build(self):
             return FakeApplication()
 
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.ApplicationBuilder", lambda: FakeBuilder())
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        lambda: FakeBuilder(),
+    )
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
 
@@ -83,14 +86,18 @@ def test_run_registers_global_error_handler(monkeypatch):
     inline_callback_names = [name for name, _class_name in inline_handler_contract]
     inline_block_start = callback_names.index("inline_query_handler")
     assert (
-        callback_names[inline_block_start : inline_block_start + len(inline_callback_names)]
+        callback_names[
+            inline_block_start : inline_block_start + len(inline_callback_names)
+        ]
         == inline_callback_names
     )
     assert all(
         callback_names.index(callback_name) < callback_names.index("handle_message")
         for callback_name in inline_callback_names
     )
-    assert len([name for name in callback_names if name in inline_callback_names]) == len(inline_callback_names)
+    assert len(
+        [name for name in callback_names if name in inline_callback_names]
+    ) == len(inline_callback_names)
 
     handlers_by_callback_name = {
         handler.callback.__name__: handler
@@ -103,12 +110,29 @@ def test_run_registers_global_error_handler(monkeypatch):
         handlers_by_callback_name["inline_callback_handler"].pattern.pattern
         == r"^inline(?:_once)?:[A-Za-z0-9_-]+$"
     )
-    assert type(handlers_by_callback_name["successful_payment_handler"].filters).__name__ == "SuccessfulPayment"
-    assert handlers_by_callback_name["admin_help_command"].commands == frozenset({"admin_help"})
-    assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset({"inline_whitelist"})
-    assert handlers_by_callback_name["inline_price_command"].commands == frozenset({"inline_price"})
-    assert handlers_by_callback_name["inline_onetime_command"].commands == frozenset({"inline_onetime"})
-    assert handlers_by_callback_name["inline_refund_command"].commands == frozenset({"inline_refund"})
+    assert (
+        type(handlers_by_callback_name["successful_payment_handler"].filters).__name__
+        == "SuccessfulPayment"
+    )
+    assert handlers_by_callback_name["admin_help_command"].commands == frozenset(
+        {"admin_help"}
+    )
+    assert handlers_by_callback_name["inline_whitelist_command"].commands == frozenset(
+        {"inline_whitelist"}
+    )
+    assert handlers_by_callback_name["inline_price_command"].commands == frozenset(
+        {"inline_price"}
+    )
+    assert handlers_by_callback_name["inline_onetime_command"].commands == frozenset(
+        {"inline_onetime"}
+    )
+    assert handlers_by_callback_name["inline_refund_command"].commands == frozenset(
+        {"inline_refund"}
+    )
+    assert handlers_by_callback_name["start_command"].commands == frozenset({"start"})
+    assert handlers_by_callback_name["language_command"].commands == frozenset(
+        {"language"}
+    )
     assert "handle_message" in callback_names
     assert registered["error_handler"] == bot._global_error_handler
     assert registered["post_init"] is not None
@@ -294,7 +318,9 @@ def test_inline_announcement_post_init_is_not_registered_without_storage(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_migration_announcement_post_init_registers_without_inline_storage(monkeypatch):
+async def test_migration_announcement_post_init_registers_without_inline_storage(
+    monkeypatch,
+):
     registered = {
         "post_init": None,
         "scheduled": None,
