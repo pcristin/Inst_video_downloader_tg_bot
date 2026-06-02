@@ -359,14 +359,35 @@ class AccountManager:
         """Return true for accounts that should stay out of rotation until replaced."""
         if not reason:
             return False
-        return reason.startswith(REPLACEMENT_REQUIRED_PREFIX) or reason.startswith(
-            LEGACY_HARD_FAILURE_PREFIX
+        if reason.startswith(REPLACEMENT_REQUIRED_PREFIX):
+            return True
+        if reason.startswith(LEGACY_HARD_FAILURE_PREFIX):
+            legacy_reason = reason.removeprefix(LEGACY_HARD_FAILURE_PREFIX)
+            return AccountManager._requires_replacement_for_failure_reason(legacy_reason)
+        return False
+
+    @staticmethod
+    def _requires_replacement_for_failure_reason(reason: str) -> bool:
+        """Return true when a hard failure indicates the account should be replaced."""
+        text = reason.lower()
+        temporary_hard_tokens = (
+            "rate_limited",
+            "rate limit",
+            "please wait",
         )
+        if any(token in text for token in temporary_hard_tokens):
+            return False
+        return AccountManager._is_hard_account_failure_reason(reason)
 
     @staticmethod
     def _replacement_required_reason(reason: str) -> str:
         """Build the persistent ban tag for accounts that should be replaced."""
         return f"{REPLACEMENT_REQUIRED_PREFIX}{reason}"
+
+    @staticmethod
+    def _temporary_hard_failure_reason(reason: str) -> str:
+        """Build the resettable hard-failure tag for temporary account cooldowns."""
+        return f"{LEGACY_HARD_FAILURE_PREFIX}{reason}"
 
     def record_account_failure(self, account: Account, reason: str) -> AccountHealthEvent:
         """Persist a sequential failure and quarantine accounts at threshold."""
@@ -387,11 +408,14 @@ class AccountManager:
             )
             if threshold_reached:
                 account.is_banned = True
-                account.ban_reason = (
-                    self._replacement_required_reason(reason)
-                    if hard_failure
-                    else f"sequential_failures:{reason}"
-                )
+                if hard_failure:
+                    account.ban_reason = (
+                        self._replacement_required_reason(reason)
+                        if self._requires_replacement_for_failure_reason(reason)
+                        else self._temporary_hard_failure_reason(reason)
+                    )
+                else:
+                    account.ban_reason = f"sequential_failures:{reason}"
                 account.banned_at = now
                 self._leased_accounts.discard(account.username)
 

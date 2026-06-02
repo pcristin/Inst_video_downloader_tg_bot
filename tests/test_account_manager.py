@@ -97,6 +97,34 @@ def test_hard_account_failure_quarantines_immediately(monkeypatch, tmp_path: Pat
     assert saved_account["ban_reason"] == "replacement_required:manual_verification"
 
 
+def test_rate_limit_failure_quarantines_temporarily(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 3)
+    monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_LOW_WATERMARK", 0)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    account = manager.accounts[0]
+
+    event = manager.record_account_failure(account, "rate_limited")
+
+    assert event.consecutive_failures == 1
+    assert event.threshold == 1
+    assert event.threshold_reached is True
+    assert account.is_banned is True
+    assert account.ban_reason == "hard_failure:rate_limited"
+    assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
+
+    account.banned_at = account_manager_module.datetime.now() - timedelta(hours=7)
+    manager.reset_old_banned_accounts(hours=6)
+
+    assert account.is_banned is False
+    assert account.ban_reason is None
+    assert account.consecutive_failures == 0
+    assert [acc.username for acc in manager.get_available_accounts()] == ["first", "second"]
+
+
 def test_hard_account_failure_quarantines_after_prior_soft_failure(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 3)
@@ -172,6 +200,36 @@ def test_old_replacement_required_accounts_are_not_reset(monkeypatch, tmp_path: 
     assert temporary_account.is_banned is False
     assert temporary_account.ban_reason is None
     assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
+
+
+def test_legacy_hard_failure_reset_only_for_temporary_reasons(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "manual", "limited")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    manual_account = manager.accounts[0]
+    limited_account = manager.accounts[1]
+    old_ban_time = account_manager_module.datetime.now() - timedelta(hours=7)
+    for account, reason in (
+        (manual_account, "hard_failure:manual_verification"),
+        (limited_account, "hard_failure:rate_limited"),
+    ):
+        account.is_banned = True
+        account.ban_reason = reason
+        account.banned_at = old_ban_time
+        account.consecutive_failures = 1
+        account.last_failure_reason = reason.split(":", 1)[-1]
+        account.last_failure_at = old_ban_time
+    manager._save_state()
+
+    manager.reset_old_banned_accounts(hours=6)
+
+    assert manual_account.is_banned is True
+    assert manual_account.ban_reason == "hard_failure:manual_verification"
+    assert limited_account.is_banned is False
+    assert limited_account.ban_reason is None
+    assert [acc.username for acc in manager.get_available_accounts()] == ["limited"]
 
 
 def test_account_success_resets_failure_counter(monkeypatch, tmp_path: Path):
