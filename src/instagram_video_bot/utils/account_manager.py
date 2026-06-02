@@ -12,6 +12,9 @@ from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+REPLACEMENT_REQUIRED_PREFIX = "replacement_required:"
+LEGACY_HARD_FAILURE_PREFIX = "hard_failure:"
+
 
 def _redact_proxy(proxy: Optional[str]) -> str:
     """Return proxy value with credentials removed for logs."""
@@ -351,6 +354,20 @@ class AccountManager:
         )
         return any(token in text for token in hard_tokens)
 
+    @staticmethod
+    def _is_replacement_required_ban_reason(reason: Optional[str]) -> bool:
+        """Return true for accounts that should stay out of rotation until replaced."""
+        if not reason:
+            return False
+        return reason.startswith(REPLACEMENT_REQUIRED_PREFIX) or reason.startswith(
+            LEGACY_HARD_FAILURE_PREFIX
+        )
+
+    @staticmethod
+    def _replacement_required_reason(reason: str) -> str:
+        """Build the persistent ban tag for accounts that should be replaced."""
+        return f"{REPLACEMENT_REQUIRED_PREFIX}{reason}"
+
     def record_account_failure(self, account: Account, reason: str) -> AccountHealthEvent:
         """Persist a sequential failure and quarantine accounts at threshold."""
         with self._lock:
@@ -371,7 +388,9 @@ class AccountManager:
             if threshold_reached:
                 account.is_banned = True
                 account.ban_reason = (
-                    f"hard_failure:{reason}" if hard_failure else f"sequential_failures:{reason}"
+                    self._replacement_required_reason(reason)
+                    if hard_failure
+                    else f"sequential_failures:{reason}"
                 )
                 account.banned_at = now
                 self._leased_accounts.discard(account.username)
@@ -547,6 +566,13 @@ class AccountManager:
 
             for account in self.accounts:
                 if account.is_banned and account.banned_at and account.banned_at < cutoff_time:
+                    if self._is_replacement_required_ban_reason(account.ban_reason):
+                        logger.info(
+                            "Keeping account %s unavailable; replacement required for: %s",
+                            account.username,
+                            account.ban_reason,
+                        )
+                        continue
                     logger.info(f"Resetting account {account.username} (banned {hours}+ hours ago for: {account.ban_reason})")
                     account.is_banned = False
                     account.ban_reason = None

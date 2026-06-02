@@ -88,13 +88,13 @@ def test_hard_account_failure_quarantines_immediately(monkeypatch, tmp_path: Pat
     assert event.threshold == 1
     assert event.threshold_reached is True
     assert account.is_banned is True
-    assert account.ban_reason == "hard_failure:manual_verification"
+    assert account.ban_reason == "replacement_required:manual_verification"
     assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
 
     state = json.loads(state_file.read_text())
     saved_account = next(acc for acc in state["accounts"] if acc["username"] == "first")
     assert saved_account["is_banned"] is True
-    assert saved_account["ban_reason"] == "hard_failure:manual_verification"
+    assert saved_account["ban_reason"] == "replacement_required:manual_verification"
 
 
 def test_hard_account_failure_quarantines_after_prior_soft_failure(monkeypatch, tmp_path: Path):
@@ -118,7 +118,7 @@ def test_hard_account_failure_quarantines_after_prior_soft_failure(monkeypatch, 
     assert hard_event.threshold == 1
     assert hard_event.threshold_reached is True
     assert account.is_banned is True
-    assert account.ban_reason == "hard_failure:manual_verification"
+    assert account.ban_reason == "replacement_required:manual_verification"
     assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
 
 
@@ -139,7 +139,38 @@ def test_failure_after_hard_quarantine_preserves_original_ban(monkeypatch, tmp_p
     assert repeated_event.consecutive_failures == 2
     assert repeated_event.threshold_reached is False
     assert account.is_banned is True
-    assert account.ban_reason == "hard_failure:manual_verification"
+    assert account.ban_reason == "replacement_required:manual_verification"
+    assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
+
+
+def test_old_replacement_required_accounts_are_not_reset(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first", "second")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    replace_account = manager.accounts[0]
+    temporary_account = manager.accounts[1]
+    old_ban_time = account_manager_module.datetime.now() - timedelta(hours=7)
+    for account, reason in (
+        (replace_account, "replacement_required:manual_verification"),
+        (temporary_account, "provider_timeout_stale"),
+    ):
+        account.is_banned = True
+        account.ban_reason = reason
+        account.banned_at = old_ban_time
+        account.consecutive_failures = 1
+        account.last_failure_reason = reason.split(":", 1)[-1]
+        account.last_failure_at = old_ban_time
+    manager._save_state()
+
+    manager.reset_old_banned_accounts(hours=6)
+
+    assert replace_account.is_banned is True
+    assert replace_account.ban_reason == "replacement_required:manual_verification"
+    assert replace_account.consecutive_failures == 1
+    assert temporary_account.is_banned is False
+    assert temporary_account.ban_reason is None
     assert [acc.username for acc in manager.get_available_accounts()] == ["second"]
 
 
