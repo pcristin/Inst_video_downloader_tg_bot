@@ -232,6 +232,36 @@ def test_legacy_hard_failure_reset_only_for_temporary_reasons(monkeypatch, tmp_p
     assert [acc.username for acc in manager.get_available_accounts()] == ["limited"]
 
 
+def test_raw_setup_failure_reset_only_for_temporary_reasons(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "challenge", "limited")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    challenge_account = manager.accounts[0]
+    limited_account = manager.accounts[1]
+    old_ban_time = account_manager_module.datetime.now() - timedelta(hours=7)
+    for account, reason in (
+        (challenge_account, "challenge_required"),
+        (limited_account, "rate_limited"),
+    ):
+        account.is_banned = True
+        account.ban_reason = reason
+        account.banned_at = old_ban_time
+        account.consecutive_failures = 1
+        account.last_failure_reason = reason
+        account.last_failure_at = old_ban_time
+    manager._save_state()
+
+    manager.reset_old_banned_accounts(hours=6)
+
+    assert challenge_account.is_banned is True
+    assert challenge_account.ban_reason == "challenge_required"
+    assert limited_account.is_banned is False
+    assert limited_account.ban_reason is None
+    assert [acc.username for acc in manager.get_available_accounts()] == ["limited"]
+
+
 def test_account_success_resets_failure_counter(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(account_manager_module.settings, "ACCOUNT_FAILURE_THRESHOLD", 2)

@@ -364,7 +364,7 @@ class AccountManager:
         if reason.startswith(LEGACY_HARD_FAILURE_PREFIX):
             legacy_reason = reason.removeprefix(LEGACY_HARD_FAILURE_PREFIX)
             return AccountManager._requires_replacement_for_failure_reason(legacy_reason)
-        return False
+        return AccountManager._requires_replacement_for_failure_reason(reason)
 
     @staticmethod
     def _requires_replacement_for_failure_reason(reason: str) -> bool:
