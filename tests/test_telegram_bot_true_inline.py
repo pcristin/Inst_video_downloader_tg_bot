@@ -77,6 +77,7 @@ class _FakeUpdate:
         self.callback_query = callback_query
         self.pre_checkout_query = pre_checkout_query
         self.message = message
+        self.effective_message = message
         self.effective_chat = getattr(message, "chat", SimpleNamespace(id=1, type="private")) if message else None
         self.effective_user = SimpleNamespace(id=user_id, username="alice", full_name="Alice")
 
