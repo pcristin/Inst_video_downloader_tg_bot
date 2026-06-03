@@ -308,7 +308,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = "==25.1.0" },
-    { name = "instagrapi", specifier = "==2.7.0" },
+    { name = "instagrapi", specifier = "==2.7.20" },
     { name = "pillow", specifier = "==12.2.0" },
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", specifier = "==2.13.1" },
@@ -332,7 +332,7 @@ dev = [
 
 [[package]]
 name = "instagrapi"
-version = "2.7.0"
+version = "2.7.20"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pillow", marker = "sys_platform != 'android'" },
@@ -341,9 +341,9 @@ dependencies = [
     { name = "pysocks", marker = "sys_platform != 'android'" },
     { name = "requests", marker = "sys_platform != 'android'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/e7/d8fee79717a9286265ca23a634cb06473fd57707541339720c9031a44e90/instagrapi-2.7.0.tar.gz", hash = "sha256:b4f607d49246879f993f97a91871eba99e664c706ddafa1ebd38eef22fca8293", size = 157455, upload-time = "2026-05-18T10:30:15.415Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c5/f4/08cc9b275beb89a2be4bc83bb384ae3d86618dccbde142bc7ab90b02e35f/instagrapi-2.7.20.tar.gz", hash = "sha256:54f605590d37fd7c790c9500fefebcea73a9a5b194d9bf318fa2220c9aa37e58", size = 174542, upload-time = "2026-05-28T08:34:42.323Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/1a/2c69da08dd791231790d2dd6390c9ca5fdc9fa26809f06b6317caf91885c/instagrapi-2.7.0-py3-none-any.whl", hash = "sha256:4e68234f97509c1b3fd3f5219e959b4c292b751b7b4c1f8eb5adba6da86a3fa1", size = 172399, upload-time = "2026-05-18T10:30:13.374Z" },
+    { url = "https://files.pythonhosted.org/packages/74/25/fe8f6162a5c2dd4b701d3f043562028574706e10ecf3f33cd1e4741d6b36/instagrapi-2.7.20-py3-none-any.whl", hash = "sha256:4354afff235c04e8f2e495be5435fc77c58d01189d7abbe2be7c73b0909df90d", size = 189469, upload-time = "2026-05-28T08:34:40.701Z" },
 ]
 
 [[package]]
