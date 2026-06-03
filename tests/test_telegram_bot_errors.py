@@ -5,18 +5,27 @@ import pytest
 from telegram.error import NetworkError
 
 from src.instagram_video_bot.config.settings import settings
+from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
 
 
+@pytest.fixture
+def telegram_bot_factory(tmp_path):
+    def build_bot():
+        return TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+
+    return build_bot
+
+
 @pytest.mark.asyncio
-async def test_global_error_handler_handles_network_error():
-    bot = TelegramBot()
+async def test_global_error_handler_handles_network_error(telegram_bot_factory):
+    bot = telegram_bot_factory()
     context = SimpleNamespace(error=NetworkError("Bad Gateway"))
 
     await bot._global_error_handler(update=None, context=context)
 
 
-def test_run_registers_global_error_handler(monkeypatch):
+def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
     registered = {
         "error_handler": None,
         "handlers": [],
@@ -61,7 +70,7 @@ def test_run_registers_global_error_handler(monkeypatch):
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
 
-    bot = TelegramBot()
+    bot = telegram_bot_factory()
     bot.run()
 
     admin_handler_contract = [
@@ -140,7 +149,9 @@ def test_run_registers_global_error_handler(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_inline_announcement_post_init_schedules_background_task(monkeypatch):
+async def test_inline_announcement_post_init_schedules_background_task(
+    monkeypatch, telegram_bot_factory
+):
     registered = {
         "post_init": None,
         "scheduled": None,
@@ -197,7 +208,7 @@ async def test_inline_announcement_post_init_schedules_background_task(monkeypat
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", None)
 
-    bot = TelegramBot()
+    bot = telegram_bot_factory()
     bot.run()
 
     await registered["post_init"](bot.application)
@@ -206,7 +217,9 @@ async def test_inline_announcement_post_init_schedules_background_task(monkeypat
     registered["scheduled"].close()
 
 
-def test_legacy_redirect_mode_registers_only_redirect_handlers(monkeypatch):
+def test_legacy_redirect_mode_registers_only_redirect_handlers(
+    monkeypatch, telegram_bot_factory
+):
     registered = {
         "error_handler": None,
         "handlers": [],
@@ -252,7 +265,7 @@ def test_legacy_redirect_mode_registers_only_redirect_handlers(monkeypatch):
     monkeypatch.setattr(settings, "BOT_LEGACY_REDIRECT_MODE", True)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", "igclipbot")
 
-    bot = TelegramBot()
+    bot = telegram_bot_factory()
     bot.run()
 
     callback_names = [
@@ -270,7 +283,9 @@ def test_legacy_redirect_mode_registers_only_redirect_handlers(monkeypatch):
     assert registered["ran"] is True
 
 
-def test_inline_announcement_post_init_is_not_registered_without_storage(monkeypatch):
+def test_inline_announcement_post_init_is_not_registered_without_storage(
+    monkeypatch, telegram_bot_factory
+):
     registered = {"post_init": None}
 
     class FakeApplication:
@@ -311,7 +326,7 @@ def test_inline_announcement_post_init_is_not_registered_without_storage(monkeyp
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", None)
 
-    bot = TelegramBot()
+    bot = telegram_bot_factory()
     bot.run()
 
     assert registered["post_init"] is None
@@ -319,7 +334,7 @@ def test_inline_announcement_post_init_is_not_registered_without_storage(monkeyp
 
 @pytest.mark.asyncio
 async def test_migration_announcement_post_init_registers_without_inline_storage(
-    monkeypatch,
+    monkeypatch, telegram_bot_factory
 ):
     registered = {
         "post_init": None,
@@ -378,7 +393,7 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", "igclipbot")
 
-    bot = TelegramBot()
+    bot = telegram_bot_factory()
     bot.run()
 
     await registered["post_init"](bot.application)
