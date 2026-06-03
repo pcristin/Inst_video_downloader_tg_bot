@@ -346,6 +346,7 @@ class AccountManager:
             "invalid username or password",
             "login_required",
             "login required",
+            "auth_failed",
             "unauthorized",
             "401",
             "rate_limited",

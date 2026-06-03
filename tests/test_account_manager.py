@@ -236,13 +236,15 @@ def test_raw_setup_failure_reset_only_for_temporary_reasons(monkeypatch, tmp_pat
     monkeypatch.chdir(tmp_path)
     accounts_file = tmp_path / "accounts.txt"
     state_file = tmp_path / "accounts_state.json"
-    _write_accounts(accounts_file, "challenge", "limited")
+    _write_accounts(accounts_file, "challenge", "auth", "limited")
     manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
     challenge_account = manager.accounts[0]
-    limited_account = manager.accounts[1]
+    auth_account = manager.accounts[1]
+    limited_account = manager.accounts[2]
     old_ban_time = account_manager_module.datetime.now() - timedelta(hours=7)
     for account, reason in (
         (challenge_account, "challenge_required"),
+        (auth_account, "auth_failed"),
         (limited_account, "rate_limited"),
     ):
         account.is_banned = True
@@ -257,6 +259,8 @@ def test_raw_setup_failure_reset_only_for_temporary_reasons(monkeypatch, tmp_pat
 
     assert challenge_account.is_banned is True
     assert challenge_account.ban_reason == "challenge_required"
+    assert auth_account.is_banned is True
+    assert auth_account.ban_reason == "auth_failed"
     assert limited_account.is_banned is False
     assert limited_account.ban_reason is None
     assert [acc.username for acc in manager.get_available_accounts()] == ["limited"]
