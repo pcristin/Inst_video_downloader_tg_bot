@@ -111,6 +111,12 @@ class TelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming messages by queueing supported provider links."""
+        if (
+            getattr(update, "edited_message", None)
+            or getattr(update, "edited_channel_post", None)
+            or getattr(update, "edited_business_message", None)
+        ):
+            return
         message = update.effective_message
         if not message or not update.effective_chat:
             return
