@@ -137,9 +137,11 @@ class _FakeUpdate:
         effective_user_present: bool = True,
         sender_chat=None,
         message_present: bool = True,
+        edited_message_present: bool = False,
     ):
         message = _FakeMessage(text, message_id=message_id, sender_chat=sender_chat)
         self.message = message if message_present else None
+        self.edited_message = message if edited_message_present else None
         self.effective_message = message
         self.effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.effective_user = (
@@ -573,6 +575,37 @@ async def test_handle_message_processes_effective_message_text_link(
         "Got Instagram. I will start downloading soon."
     ]
     assert len(fake_bot.video_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_message_ignores_edited_message_links(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    update = _FakeUpdate(
+        "https://www.instagram.com/reel/edited/",
+        message_present=False,
+        edited_message_present=True,
+    )
+
+    async def fail_download_video(self, url: str, output_dir: Path):
+        raise AssertionError("edited messages should not trigger downloads")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fail_download_video,
+    )
+
+    await telegram_bot.handle_message(update, context)
+
+    assert fake_bot.video_calls == []
+    assert update.effective_message.replies == []
+    assert (
+        telegram_bot.state_store._conn.execute(
+            "SELECT COUNT(*) FROM request_events"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 @pytest.mark.asyncio
