@@ -3,70 +3,38 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-import datetime as dtm
 import logging
-from pathlib import Path
 import shutil
 import time
-from typing import Any, List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Optional
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InlineQueryResultArticle,
-    InputInvoiceMessageContent,
-    InputMediaPhoto,
-    InputMediaVideo,
-    InputTextMessageContent,
-    LabeledPrice,
-    Message,
-    Update,
-)
-from telegram.error import BadRequest, NetworkError, TelegramError
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    ChosenInlineResultHandler,
-    CommandHandler,
-    ContextTypes,
-    InlineQueryHandler,
-    MessageHandler,
-    PreCheckoutQueryHandler,
-    filters,
-)
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
+                      InlineQueryResultArticle, InputInvoiceMessageContent,
+                      InputTextMessageContent, LabeledPrice, Message, Update)
+from telegram.error import NetworkError, TelegramError
+from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
 from .download_models import ProviderExecutionMetrics
-from .inline_access import (
-    build_inline_result_id,
-    build_one_time_entitlement_result_id,
-    build_one_time_payload,
-    build_subscription_payload,
-    generate_session_token,
-    parse_inline_payment_payload,
-    parse_inline_result_id,
-    validate_star_amount,
-)
-from .inline_delivery import (
-    InlineCachedMediaItem,
-    build_inline_input_media,
-    upload_first_media_to_storage,
-)
+from .inline_access import (build_inline_result_id,
+                            build_one_time_entitlement_result_id,
+                            build_one_time_payload, build_subscription_payload,
+                            generate_session_token,
+                            parse_inline_payment_payload,
+                            parse_inline_result_id, validate_star_amount)
+from .inline_delivery import (InlineCachedMediaItem, build_inline_input_media,
+                              upload_first_media_to_storage)
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
-from .video_downloader import (
-    DownloadError,
-    MediaItem,
-    VideoDownloadError,
-    VideoDownloader,
-    VideoInfo,
-)
+from .telegram_media_sender import TelegramMediaSender
+from .telegram_wiring import build_telegram_application
+from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
+                               VideoDownloadError, VideoInfo)
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +61,13 @@ class TelegramBot:
     """Telegram bot for downloading media links."""
 
     INSTAGRAM_VIDEO_PATTERN = RequestParser.URL_PATTERN
-    MAX_MEDIA_CAPTION_LENGTH = 1024
-    TELEGRAM_MEDIA_GROUP_LIMIT = 10
+    MAX_MEDIA_CAPTION_LENGTH = TelegramMediaSender.MAX_MEDIA_CAPTION_LENGTH
+    TELEGRAM_MEDIA_GROUP_LIMIT = TelegramMediaSender.TELEGRAM_MEDIA_GROUP_LIMIT
 
     def __init__(self, state_store: StateStore | None = None):
         self.application: Optional[Application] = None
         self.state_store = state_store or StateStore()
+        self.media_sender = TelegramMediaSender(self.state_store)
         self.job_manager = JobManager(self.state_store)
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1882,15 +1851,6 @@ class TelegramBot:
             extra={"failure_class": "telegram_unhandled", "error": str(error)},
         )
 
-    @staticmethod
-    def _validate_media_files(files: List[Path]) -> None:
-        """Validate that all files exist and are non-empty."""
-        for file_path in files:
-            if not file_path.exists():
-                raise VideoDownloadError(f"Media file not found at {file_path}")
-            if file_path.stat().st_size == 0:
-                raise VideoDownloadError(f"Media file is empty: {file_path}")
-
     async def _send_media(
         self,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1898,229 +1858,12 @@ class TelegramBot:
         video_info: VideoInfo,
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
-        media_items = video_info.media_items
-        self._validate_media_files([item.file_path for item in media_items])
-        caption_text = self._build_caption_text(video_info.title)
-
-        telegram_file_ids: list[str | None] = []
-
-        if len(media_items) == 1:
-            media_item = media_items[0]
-            telegram_file_ids.append(
-                await self._send_single_media_item(
-                    context,
-                    request_context,
-                    media_item,
-                    caption_text,
-                )
-            )
-            self._persist_telegram_file_ids(request_context, telegram_file_ids)
-            return
-
-        caption_available = caption_text
-        for offset in range(0, len(media_items), self.TELEGRAM_MEDIA_GROUP_LIMIT):
-            chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
-            chunk_caption = caption_available if offset == 0 else None
-            if len(chunk) == 1:
-                telegram_file_ids.append(
-                    await self._send_single_media_item(
-                        context,
-                        request_context,
-                        chunk[0],
-                        chunk_caption,
-                    )
-                )
-            else:
-                telegram_file_ids.extend(
-                    await self._send_media_group_chunk(
-                        context,
-                        request_context,
-                        chunk,
-                        chunk_caption,
-                    )
-                )
-        self._persist_telegram_file_ids(request_context, telegram_file_ids)
-
-    async def _send_single_media_item(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        request_context: RequestContext,
-        media_item: MediaItem,
-        caption_text: str | None,
-    ) -> str | None:
-        if media_item.telegram_file_id:
-            try:
-                message = await self._send_single_media_value(
-                    context,
-                    request_context,
-                    media_item,
-                    caption_text,
-                    media_item.telegram_file_id,
-                )
-                return self._extract_telegram_file_id(message, media_item.media_type)
-            except BadRequest as exc:
-                if not self._is_rejected_telegram_file_id(exc):
-                    raise
-                logger.info(
-                    "Cached Telegram file_id rejected; retrying local media upload",
-                    extra={
-                        "chat_id": request_context.chat_id,
-                        "media_type": media_item.media_type,
-                        "failure_class": "telegram_file_id_rejected",
-                    },
-                )
-
-        with open(media_item.file_path, "rb") as media_file:
-            message = await self._send_single_media_value(
-                context,
-                request_context,
-                media_item,
-                caption_text,
-                media_file,
-            )
-        return self._extract_telegram_file_id(message, media_item.media_type)
-
-    async def _send_single_media_value(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        request_context: RequestContext,
-        media_item: MediaItem,
-        caption_text: str | None,
-        media_value: Any,
-    ) -> Message:
-        if media_item.media_type == "video":
-            return await context.bot.send_video(
-                chat_id=request_context.chat_id,
-                video=media_value,
-                caption=caption_text,
-                reply_to_message_id=request_context.original_message_id,
-                **self._telegram_video_kwargs(media_item),
-            )
-        return await context.bot.send_photo(
-            chat_id=request_context.chat_id,
-            photo=media_value,
-            caption=caption_text,
-            reply_to_message_id=request_context.original_message_id,
-        )
-
-    async def _send_media_group_chunk(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        request_context: RequestContext,
-        media_items: list[MediaItem],
-        caption_text: str | None,
-    ) -> list[str | None]:
-        try:
-            messages = await self._send_media_group_values(
-                context,
-                request_context,
-                media_items,
-                caption_text,
-            )
-        except BadRequest as exc:
-            if not any(
-                item.telegram_file_id for item in media_items
-            ) or not self._is_rejected_telegram_file_id(exc):
-                raise
-            logger.info(
-                "Cached Telegram file_id rejected in media group; retrying local media upload",
-                extra={
-                    "chat_id": request_context.chat_id,
-                    "media_count": len(media_items),
-                    "failure_class": "telegram_file_id_rejected",
-                },
-            )
-            messages = await self._send_media_group_values(
-                context,
-                request_context,
-                media_items,
-                caption_text,
-                force_local_upload=True,
-            )
-        return [
-            self._extract_telegram_file_id(message, media_item.media_type)
-            for message, media_item in zip(messages or [], media_items)
-        ]
-
-    async def _send_media_group_values(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        request_context: RequestContext,
-        media_items: list[MediaItem],
-        caption_text: str | None,
-        *,
-        force_local_upload: bool = False,
-    ) -> list[Message]:
-        with ExitStack() as stack:
-            media_group = []
-            for index, media_item in enumerate(media_items):
-                media_value = (
-                    None if force_local_upload else media_item.telegram_file_id
-                )
-                if not media_value:
-                    media_value = stack.enter_context(open(media_item.file_path, "rb"))
-                item_caption = caption_text if index == 0 else None
-                if media_item.media_type == "video":
-                    media_group.append(
-                        InputMediaVideo(
-                            media=media_value,
-                            caption=item_caption,
-                            **self._telegram_video_kwargs(media_item),
-                        )
-                    )
-                else:
-                    media_group.append(
-                        InputMediaPhoto(media=media_value, caption=item_caption)
-                    )
-            return await context.bot.send_media_group(
-                chat_id=request_context.chat_id,
-                media=media_group,
-                reply_to_message_id=request_context.original_message_id,
-            )
+        await self.media_sender.send_media(context, request_context, video_info)
 
     @staticmethod
-    def _is_rejected_telegram_file_id(error: TelegramError) -> bool:
-        message = str(error).lower()
-        return any(
-            marker in message
-            for marker in (
-                "wrong file identifier",
-                "file_id_invalid",
-                "file reference expired",
-            )
-        )
-
-    def _persist_telegram_file_ids(
-        self,
-        request_context: RequestContext,
-        telegram_file_ids: list[str | None],
-    ) -> None:
-        if not telegram_file_ids or not any(telegram_file_ids):
-            return
-        self.state_store.update_cached_telegram_file_ids(
-            request_context.chat_id,
-            request_context.normalized_url,
-            telegram_file_ids,
-        )
-
-    @staticmethod
-    def _extract_telegram_file_id(message: Any, media_type: str) -> str | None:
-        if media_type == "video":
-            video = getattr(message, "video", None)
-            return getattr(video, "file_id", None)
-        photos = getattr(message, "photo", None)
-        if photos:
-            return getattr(photos[-1], "file_id", None)
-        return None
-
-    @staticmethod
-    def _cleanup_files(files: List[Path]) -> None:
+    def _cleanup_files(files: list[Path]) -> None:
         """Delete downloaded files safely."""
-        for file_path in files:
-            try:
-                file_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Failed to clean up file %s: %s", file_path, exc)
+        TelegramMediaSender.cleanup_files(files)
 
     def _purge_expired_cache(self) -> None:
         """Delete expired cache files and state rows."""
@@ -2178,29 +1921,12 @@ class TelegramBot:
     @classmethod
     def _build_caption_text(cls, title: str) -> str:
         """Build a Telegram-safe media caption."""
-        caption = title.strip()
-        if not caption:
-            return ""
-        full_caption = ChaosText.media_caption(caption)
-        if len(full_caption) <= cls.MAX_MEDIA_CAPTION_LENGTH:
-            return full_caption
-        return full_caption[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
+        return TelegramMediaSender.build_caption_text(title)
 
     @staticmethod
     def _telegram_video_kwargs(media_item: MediaItem) -> dict[str, object]:
         """Build optional Telegram video metadata from a media item."""
-        kwargs: dict[str, object] = {}
-        if media_item.width:
-            kwargs["width"] = int(media_item.width)
-        if media_item.height:
-            kwargs["height"] = int(media_item.height)
-        if media_item.duration is not None:
-            kwargs["duration"] = dtm.timedelta(
-                seconds=max(0, round(float(media_item.duration)))
-            )
-        if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
-            kwargs["supports_streaming"] = True
-        return kwargs
+        return TelegramMediaSender.telegram_video_kwargs(media_item)
 
     @staticmethod
     def _build_error_message(
@@ -2493,133 +2219,11 @@ class TelegramBot:
         if not settings.BOT_TOKEN:
             raise ValueError("BOT_TOKEN is not set in environment variables")
 
-        builder = (
-            ApplicationBuilder()
-            .token(settings.BOT_TOKEN)
-            .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
-            .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
-            .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
-        )
-
-        has_inline_post_init = (
-            settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None
-        )
-        has_migration_post_init = bool(settings.BOT_MIGRATION_TARGET_USERNAME)
-        if has_inline_post_init or has_migration_post_init:
-            from .post_deploy_notifications import (
-                send_bot_migration_announcement_once,
-                send_inline_mode_announcement_once,
-                send_inline_promo_refund_announcement_once,
-            )
-
-            async def _post_init(application: Application) -> None:
-                application.create_task(_run_post_deploy_tasks(application))
-
-            async def _run_post_deploy_tasks(application: Application) -> None:
-                if has_inline_post_init:
-                    await self._evaluate_expired_inline_subscription_refunds(
-                        application
-                    )
-                    inline_result = await send_inline_mode_announcement_once(
-                        application.bot, self.state_store
-                    )
-                    promo_result = await send_inline_promo_refund_announcement_once(
-                        application.bot, self.state_store
-                    )
-                    logger.info("Inline mode announcement result: %s", inline_result)
-                    logger.info(
-                        "Inline promo/refund announcement result: %s", promo_result
-                    )
-                if settings.BOT_MIGRATION_TARGET_USERNAME:
-                    migration_result = await send_bot_migration_announcement_once(
-                        application.bot,
-                        self.state_store,
-                        target_username=settings.BOT_MIGRATION_TARGET_USERNAME,
-                    )
-                    logger.info(
-                        "Bot migration announcement result: %s", migration_result
-                    )
-
-            builder = builder.post_init(_post_init)
-
-        self.application = builder.build()
-
-        if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
-            self.application.add_handler(
-                InlineQueryHandler(self.legacy_inline_query_handler)
-            )
-            self.application.add_handler(
-                CallbackQueryHandler(self.legacy_callback_handler)
-            )
-            self.application.add_handler(
-                MessageHandler(filters.ALL, self.legacy_redirect_handler)
-            )
-            self.application.add_error_handler(self._global_error_handler)
+        self.application, mode = build_telegram_application(self)
+        if mode == "legacy_redirect":
             logger.info("Bot started in legacy redirect mode")
             self.application.run_polling()
             return
-
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(CommandHandler("language", self.language_command))
-        self.application.add_handler(
-            CommandHandler("admin_help", self.admin_help_command)
-        )
-        self.application.add_handler(CommandHandler("status", self.status_command))
-        self.application.add_handler(CommandHandler("formats", self.formats_command))
-        self.application.add_handler(CommandHandler("cancel", self.cancel_command))
-        self.application.add_handler(CommandHandler("stats", self.stats_command))
-        self.application.add_handler(CommandHandler("chaos", self.chaos_command))
-        self.application.add_handler(CommandHandler("quiet", self.quiet_command))
-        self.application.add_handler(CommandHandler("dupes", self.dupes_command))
-        self.application.add_handler(
-            CommandHandler("statsmode", self.statsmode_command)
-        )
-        self.application.add_handler(
-            CommandHandler("chatlimit", self.chatlimit_command)
-        )
-        self.application.add_handler(
-            CommandHandler("userlimit", self.userlimit_command)
-        )
-        self.application.add_handler(
-            CommandHandler("admin_status", self.admin_status_command)
-        )
-        self.application.add_handler(
-            CommandHandler("admin_global_status", self.admin_global_status_command)
-        )
-        self.application.add_handler(InlineQueryHandler(self.inline_query_handler))
-        self.application.add_handler(
-            ChosenInlineResultHandler(self.chosen_inline_result_handler)
-        )
-        self.application.add_handler(
-            CallbackQueryHandler(
-                self.inline_callback_handler,
-                pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$",
-            )
-        )
-        self.application.add_handler(PreCheckoutQueryHandler(self.pre_checkout_handler))
-        self.application.add_handler(
-            MessageHandler(filters.SUCCESSFUL_PAYMENT, self.successful_payment_handler)
-        )
-        self.application.add_handler(
-            CommandHandler("inline_whitelist", self.inline_whitelist_command)
-        )
-        self.application.add_handler(
-            CommandHandler("inline_price", self.inline_price_command)
-        )
-        self.application.add_handler(
-            CommandHandler("inline_onetime", self.inline_onetime_command)
-        )
-        self.application.add_handler(
-            CommandHandler("inline_refund", self.inline_refund_command)
-        )
-        self.application.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self.handle_message,
-            )
-        )
-        self.application.add_error_handler(self._global_error_handler)
 
         logger.info("Bot started and ready to process messages")
         self.application.run_polling()

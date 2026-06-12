@@ -64,7 +64,7 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
             return FakeApplication()
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
         lambda: FakeBuilder(),
     )
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
@@ -197,7 +197,7 @@ async def test_inline_announcement_post_init_schedules_background_task(
         await asyncio.sleep(999)
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
         lambda: FakeBuilder(),
     )
     monkeypatch.setattr(
@@ -258,7 +258,7 @@ def test_legacy_redirect_mode_registers_only_redirect_handlers(
             return FakeApplication()
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
         lambda: FakeBuilder(),
     )
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
@@ -319,7 +319,7 @@ def test_inline_announcement_post_init_is_not_registered_without_storage(
             return FakeApplication()
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
         lambda: FakeBuilder(),
     )
     monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
@@ -382,7 +382,7 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
         await asyncio.sleep(999)
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_bot.ApplicationBuilder",
+        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
         lambda: FakeBuilder(),
     )
     monkeypatch.setattr(
