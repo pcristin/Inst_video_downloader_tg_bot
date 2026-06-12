@@ -32,6 +32,8 @@ from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
 from .telegram_media_sender import TelegramMediaSender
+from .telegram_performance import (build_admin_performance_summary,
+                                   format_performance_summary)
 from .telegram_status import (build_error_message, build_submission_message,
                               delete_status_message, edit_status_message,
                               safe_edit_text)
@@ -1741,54 +1743,7 @@ class TelegramBot:
 
     @staticmethod
     def _format_performance_summary(performance: dict) -> str:
-        total_jobs = int(performance.get("total_jobs", 0) or 0)
-        cache_hits = int(performance.get("cache_hits", 0) or 0)
-        cache_rate = float(performance.get("cache_hit_rate", 0.0) or 0.0) * 100
-        duplicate_joins = int(performance.get("duplicate_joins", 0) or 0)
-        lines = [
-            "Производительность:",
-            f"- Окно: последние {total_jobs} задач",
-            f"- Кэш: {cache_hits} ({cache_rate:.0f}%)",
-            f"- Повторы: {duplicate_joins}",
-            f"- Queue wait avg: {int(performance.get('avg_queue_wait_ms', 0) or 0)}мс",
-            f"- Telegram delivery avg: {int(performance.get('avg_delivery_ms', 0) or 0)}мс",
-        ]
-
-        providers = performance.get("providers", {})
-        if providers:
-            for provider, provider_summary in sorted(providers.items()):
-                lines.append(
-                    "- "
-                    f"{ChaosText.provider_name(provider)}: "
-                    f"{provider_summary.get('jobs', 0)} задач, "
-                    f"queue avg {provider_summary.get('avg_queue_wait_ms', 0)}мс, "
-                    f"download avg {provider_summary.get('avg_download_ms', 0)}мс, "
-                    f"delivery avg {provider_summary.get('avg_delivery_ms', 0)}мс"
-                )
-        else:
-            lines.append("- Провайдеры: нет данных")
-
-        instagram = performance.get("instagram", {})
-        lines.append(
-            "- Instagram fast-path: "
-            f"ошибок {int(instagram.get('fast_failed', 0) or 0)}, "
-            f"fallback {int(instagram.get('fallback_count', 0) or 0)}, "
-            f"retries {int(instagram.get('account_retries', 0) or 0)}, "
-            f"auth {int(instagram.get('auth_failures', 0) or 0)}"
-        )
-
-        failure_classes = sorted(
-            {
-                str(error_class)
-                for error_class in performance.get("failure_classes", [])
-                if error_class and error_class != "unknown"
-            }
-        )
-        lines.append(
-            "- Классы ошибок: "
-            + (", ".join(failure_classes) if failure_classes else "нет")
-        )
-        return "\n".join(lines)
+        return format_performance_summary(performance)
 
     def _build_admin_performance_summary(
         self,
@@ -1797,15 +1752,12 @@ class TelegramBot:
         duplicate_joins: int,
         recent_failures: list[tuple[str, str, str, str]],
     ) -> dict[str, Any]:
-        performance = self.state_store.get_performance_summary(chat_id, limit=50)
-        performance["duplicate_joins"] = duplicate_joins
-        performance["failure_classes"] = list(
-            performance.get("failure_classes", [])
-        ) + [
-            error_class
-            for _provider, _normalized_url, error_class, _finished_at in recent_failures
-        ]
-        return performance
+        return build_admin_performance_summary(
+            self.state_store,
+            chat_id=chat_id,
+            duplicate_joins=duplicate_joins,
+            recent_failures=recent_failures,
+        )
 
     async def _on_job_state_change(self, job: SharedJob) -> None:
         """Propagate shared job state changes to per-request status messages."""
