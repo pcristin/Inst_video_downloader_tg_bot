@@ -31,6 +31,7 @@ from .inline_delivery import (InlineCachedMediaItem, build_inline_input_media,
 from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
+from .telegram_cache import purge_expired_cache_files, video_info_from_cache
 from .telegram_media_sender import TelegramMediaSender
 from .telegram_performance import (build_admin_performance_summary,
                                    format_performance_summary)
@@ -1827,37 +1828,14 @@ class TelegramBot:
 
     def _purge_expired_cache(self) -> None:
         """Delete expired cache files and state rows."""
-        if not settings.RESULT_CACHE_ENABLED:
-            return
-        for path in self.state_store.purge_expired_results():
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                logger.warning("Failed to delete expired cache file %s", path)
+        purge_expired_cache_files(
+            self.state_store,
+            result_cache_enabled=settings.RESULT_CACHE_ENABLED,
+        )
 
     @staticmethod
     def _video_info_from_cache(cached: CachedMediaEntry) -> VideoInfo:
-        media_items = [
-            MediaItem(
-                file_path=Path(item["file_path"]),
-                media_type=item["media_type"],
-                caption=item.get("caption"),
-                duration=item.get("duration"),
-                width=item.get("width"),
-                height=item.get("height"),
-                telegram_file_id=item.get("telegram_file_id"),
-            )
-            for item in cached.media_items
-        ]
-        primary = media_items[0]
-        return VideoInfo(
-            file_path=primary.file_path,
-            title=cached.title,
-            description=cached.title,
-            media_items=media_items,
-            primary_media_type=primary.media_type,
-            from_cache=True,
-        )
+        return video_info_from_cache(cached)
 
     @staticmethod
     def _build_submission_message(
