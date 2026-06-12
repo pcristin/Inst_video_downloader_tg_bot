@@ -32,6 +32,9 @@ from .job_manager import JobManager, SharedJob
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
 from .telegram_media_sender import TelegramMediaSender
+from .telegram_status import (build_error_message, build_submission_message,
+                              delete_status_message, edit_status_message,
+                              safe_edit_text)
 from .telegram_wiring import build_telegram_application
 from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
                                VideoDownloadError, VideoInfo)
@@ -1908,14 +1911,12 @@ class TelegramBot:
         chaos_enabled: bool = False,
         language_code: str = "ru",
     ) -> str:
-        return ChaosText.submission(
-            TextContext(
-                provider_label=provider_label,
-                chaos_enabled=chaos_enabled,
-                language_code=language_code,
-            ),
+        return build_submission_message(
+            provider_label,
             queue_position=queue_position,
             joined_existing=joined_existing,
+            chaos_enabled=chaos_enabled,
+            language_code=language_code,
         )
 
     @classmethod
@@ -1935,38 +1936,24 @@ class TelegramBot:
         chaos_enabled: bool = False,
         language_code: str = "ru",
     ) -> str:
-        return ChaosText.error(
+        return build_error_message(
             error, chaos_enabled=chaos_enabled, language_code=language_code
         )
 
     @staticmethod
     async def _edit_status_message(message: Message, text: str) -> None:
         """Try to edit a transient status message without creating extra chat noise."""
-        try:
-            await message.edit_text(text)
-        except Exception:
-            logger.debug("Failed to edit transient status message", exc_info=True)
+        await edit_status_message(message, text)
 
     @staticmethod
     async def _safe_edit_text(message: Message, text: str) -> None:
         """Edit status text, falling back to a new visible reply for important states."""
-        try:
-            await message.edit_text(text)
-        except Exception:
-            try:
-                await message.reply_text(text)
-            except Exception:
-                logger.debug(
-                    "Failed to edit or reply with status update", exc_info=True
-                )
+        await safe_edit_text(message, text)
 
     @staticmethod
     async def _delete_status_message(message: Message) -> None:
         """Delete a transient status message after successful completion."""
-        try:
-            await message.delete()
-        except Exception:
-            logger.debug("Failed to delete transient status message", exc_info=True)
+        await delete_status_message(message)
 
     @staticmethod
     def _user_label(update: Update) -> str:
