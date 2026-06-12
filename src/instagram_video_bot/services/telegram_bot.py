@@ -35,6 +35,11 @@ from .telegram_media_sender import TelegramMediaSender
 from .telegram_status import (build_error_message, build_submission_message,
                               delete_status_message, edit_status_message,
                               safe_edit_text)
+from .telegram_update_helpers import (forwarded_visible_user_id,
+                                      language_from_profile,
+                                      parse_positive_int_arg, parse_toggle_arg,
+                                      request_user_id, request_user_label,
+                                      user_label)
 from .telegram_wiring import build_telegram_application
 from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
                                VideoDownloadError, VideoInfo)
@@ -1957,41 +1962,15 @@ class TelegramBot:
 
     @staticmethod
     def _user_label(update: Update) -> str:
-        user = update.effective_user
-        if user is None:
-            return "unknown"
-        if user.username:
-            return f"@{user.username}"
-        if user.full_name:
-            return user.full_name
-        return str(user.id)
+        return user_label(update)
 
     @staticmethod
     def _request_user_id(update: Update) -> int | None:
-        if update.effective_user is not None:
-            return update.effective_user.id
-        message = update.effective_message
-        sender_chat = getattr(message, "sender_chat", None) if message else None
-        if sender_chat is not None:
-            return getattr(sender_chat, "id", None)
-        return None
+        return request_user_id(update)
 
     @classmethod
     def _request_user_label(cls, update: Update) -> str:
-        if update.effective_user is not None:
-            return cls._user_label(update)
-        message = update.effective_message
-        sender_chat = getattr(message, "sender_chat", None) if message else None
-        if sender_chat is None:
-            return "unknown"
-        title = getattr(sender_chat, "title", None)
-        if title:
-            return str(title)
-        username = getattr(sender_chat, "username", None)
-        if username:
-            return f"@{username}"
-        sender_chat_id = getattr(sender_chat, "id", None)
-        return str(sender_chat_id) if sender_chat_id is not None else "unknown"
+        return request_user_label(update)
 
     def _language_for_update(self, update: Update) -> str:
         """Resolve explicit user preference, then Telegram profile language, then English."""
@@ -2005,10 +1984,7 @@ class TelegramBot:
 
     @staticmethod
     def _language_from_profile(language_code: str | None) -> str:
-        normalized = (language_code or "").strip().lower()
-        if normalized == "ru" or normalized.startswith("ru-"):
-            return "ru"
-        return "en"
+        return language_from_profile(language_code)
 
     def _message_is_from_owner(self, update: Update) -> bool:
         return (
@@ -2035,14 +2011,7 @@ class TelegramBot:
 
     @staticmethod
     def _forwarded_visible_user_id(message: Message) -> int | None:
-        forward_from = getattr(message, "forward_from", None)
-        if getattr(forward_from, "id", None) is not None:
-            return int(forward_from.id)
-        forward_origin = getattr(message, "forward_origin", None)
-        sender_user = getattr(forward_origin, "sender_user", None)
-        if getattr(sender_user, "id", None) is not None:
-            return int(sender_user.id)
-        return None
+        return forwarded_visible_user_id(message)
 
     async def _toggle_group_setting(
         self,
@@ -2152,22 +2121,11 @@ class TelegramBot:
 
     @staticmethod
     def _parse_toggle_arg(value: str) -> bool | None:
-        normalized = value.strip().lower()
-        if normalized in {"on", "enable", "enabled", "true", "1"}:
-            return True
-        if normalized in {"off", "disable", "disabled", "false", "0"}:
-            return False
-        return None
+        return parse_toggle_arg(value)
 
     @staticmethod
     def _parse_positive_int_arg(value: str) -> int | None:
-        stripped = value.strip()
-        if not stripped.isdigit():
-            return None
-        parsed = int(stripped)
-        if parsed <= 0:
-            return None
-        return parsed
+        return parse_positive_int_arg(value)
 
     async def _notify_owner_about_low_account_pool(self, context, event) -> None:
         if event is None or not event.should_alert_owner:
