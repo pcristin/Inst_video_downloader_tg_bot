@@ -19,7 +19,6 @@ from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
 from .chaos_text import ChaosText, TextContext
-from .download_models import ProviderExecutionMetrics
 from .inline_access import (build_inline_result_id,
                             build_one_time_entitlement_result_id,
                             build_one_time_payload, build_subscription_payload,
@@ -35,6 +34,7 @@ from .telegram_cache import purge_expired_cache_files, video_info_from_cache
 from .telegram_media_sender import TelegramMediaSender
 from .telegram_performance import (build_admin_performance_summary,
                                    format_performance_summary)
+from .telegram_provider_metrics import record_provider_metrics
 from .telegram_status import (build_error_message, build_submission_message,
                               delete_status_message, edit_status_message,
                               safe_edit_text)
@@ -1694,48 +1694,17 @@ class TelegramBot:
     def _record_provider_metrics(
         self,
         job_id: str,
-        provider_metrics: ProviderExecutionMetrics | None,
+        provider_metrics: Any | None,
         *,
         download_duration_ms: int,
         failure_class: str | None = None,
     ) -> None:
-        """Persist provider execution metrics without leaking provider internals."""
-        metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
-        effective_failure_class = (
-            getattr(metrics, "failure_class", None) or failure_class
-        )
-        self.state_store.record_download_metrics(
+        record_provider_metrics(
+            self.state_store,
             job_id,
+            provider_metrics,
             download_duration_ms=download_duration_ms,
-            retry_count=int(getattr(metrics, "retry_count", 0) or 0),
-            instagram_fast_status=getattr(metrics, "instagram_fast_status", None),
-            instagram_fast_duration_ms=getattr(
-                metrics, "instagram_fast_duration_ms", None
-            ),
-            instagram_fast_budget_exhausted=bool(
-                getattr(metrics, "instagram_fast_budget_exhausted", False)
-            ),
-            instagram_fast_endpoint_timings_json=getattr(
-                metrics, "instagram_fast_endpoint_timings_json", None
-            ),
-            instagram_fallback_attempted=bool(
-                getattr(metrics, "instagram_fallback_attempted", False)
-            ),
-            instagram_account_attempts=int(
-                getattr(metrics, "instagram_account_attempts", 0) or 0
-            ),
-            instagram_account_retries=int(
-                getattr(metrics, "instagram_account_retries", 0) or 0
-            ),
-            instagram_auth_failures=int(
-                getattr(metrics, "instagram_auth_failures", 0) or 0
-            ),
-            instagram_success_path=getattr(metrics, "instagram_success_path", None),
-            instagram_fallback_path=getattr(metrics, "instagram_fallback_path", None),
-            instagram_metadata_reused=bool(
-                getattr(metrics, "instagram_metadata_reused", False)
-            ),
-            failure_class=effective_failure_class,
+            failure_class=failure_class,
         )
 
     @staticmethod
