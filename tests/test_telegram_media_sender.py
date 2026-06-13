@@ -182,4 +182,6 @@ async def test_media_sender_allows_cached_album_file_ids_without_local_files(tmp
 
     assert len(fake_bot.media_group_calls) == 1
     sent_media = fake_bot.media_group_calls[0]["media"]
+    assert len(sent_media) == 2
+    assert sent_media[0].media.filename == "present.mp4"
     assert sent_media[1].media == "cached-album-file-id"
