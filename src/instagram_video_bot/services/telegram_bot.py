@@ -47,6 +47,7 @@ from .telegram_update_helpers import (forwarded_visible_user_id,
                                       request_user_id, request_user_label,
                                       user_label)
 from .telegram_wiring import build_telegram_application
+from .telegram.command_handlers import TelegramCommandHandlers
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
 from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
@@ -71,6 +72,7 @@ class TelegramBot:
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
         self.request_contexts: dict[str, RequestContext] = {}
         self.request_intake = TelegramRequestIntake(self)
+        self.command_handlers = TelegramCommandHandlers(self)
         self._inline_delivery_session_tokens: set[str] = set()
         self.started_at = time.time()
         self._purge_expired_cache()
@@ -85,50 +87,25 @@ class TelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Greet a user and show the shortest useful onboarding message."""
-        if not update.message:
-            return
-        language_code = self._language_for_update(update)
-        await update.message.reply_text(ChaosText.start(language_code))
+        await self.command_handlers.start_command(update, context)
 
     async def language_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Persist a user's language preference."""
-        if not update.message or not update.effective_user:
-            return
-        current_language = self._language_for_update(update)
-        requested_language = (context.args[0] if context.args else "").strip().lower()
-        if requested_language not in {"en", "ru"}:
-            await update.message.reply_text(ChaosText.language_usage(current_language))
-            return
-        self.state_store.set_user_language(update.effective_user.id, requested_language)
-        await update.message.reply_text(ChaosText.language_updated(requested_language))
+        await self.command_handlers.language_command(update, context)
 
     async def help_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show supported providers and usage help."""
-        if not update.message or not update.effective_chat:
-            return
-        group_settings = self.state_store.ensure_group_settings(
-            update.effective_chat.id
-        )
-        await update.message.reply_text(
-            ChaosText.help(
-                group_settings["chaos_mode_enabled"],
-                self._language_for_update(update),
-            )
-        )
+        await self.command_handlers.help_command(update, context)
 
     async def admin_help_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show owner-only operational command usage."""
-        if not update.message:
-            return
-        if not await self._require_owner(update):
-            return
-        await update.message.reply_text(ChaosText.admin_help())
+        await self.command_handlers.admin_help_command(update, context)
 
     async def legacy_redirect_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -177,179 +154,61 @@ class TelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show supported URL shapes."""
-        if not update.message:
-            return
-        await update.message.reply_text(
-            ChaosText.formats(self._language_for_update(update))
-        )
+        await self.command_handlers.formats_command(update, context)
 
     async def status_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show a safe queue and health summary."""
-        if not update.message or not update.effective_chat:
-            return
-        snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
-        persisted = self.state_store.get_public_status(update.effective_chat.id)
-        group_settings = self.state_store.ensure_group_settings(
-            update.effective_chat.id
-        )
-        await update.message.reply_text(
-            ChaosText.status(
-                snapshot,
-                persisted,
-                chaos_enabled=group_settings["chaos_mode_enabled"],
-                language_code=self._language_for_update(update),
-            )
-        )
+        await self.command_handlers.status_command(update, context)
 
     async def cancel_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Cancel the latest active request from the current user."""
-        if not update.message or not update.effective_chat or not update.effective_user:
-            return
-        request_id = self.job_manager.get_latest_active_request_id(
-            update.effective_chat.id,
-            update.effective_user.id,
-        )
-        if not request_id:
-            await update.message.reply_text(
-                ChaosText.no_active_request(self._language_for_update(update))
-            )
-            return
-
-        task = self.active_request_tasks.get(request_id)
-        if task and not task.done():
-            task.cancel()
-        job = self.job_manager.cancel_request(request_id)
-        request_context = self.request_contexts.get(request_id)
-        if request_context:
-            await self._safe_edit_text(
-                request_context.status_message,
-                ChaosText.cancelled(
-                    request_context.chaos_enabled, request_context.language_code
-                ),
-            )
-        if job and update.message:
-            await update.message.reply_text(
-                ChaosText.latest_cancelled(self._language_for_update(update))
-            )
+        await self.command_handlers.cancel_command(update, context)
 
     async def stats_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Show lightweight group stats."""
-        if not update.message or not update.effective_chat:
-            return
-        group_settings = self.state_store.ensure_group_settings(
-            update.effective_chat.id
-        )
-        if not group_settings["stats_enabled"]:
-            await update.message.reply_text(
-                ChaosText.stats_disabled(self._language_for_update(update))
-            )
-            return
-
-        stats = self.state_store.get_group_stats(update.effective_chat.id)
-        await update.message.reply_text(
-            ChaosText.stats(
-                stats,
-                chaos_enabled=group_settings["chaos_mode_enabled"],
-                language_code=self._language_for_update(update),
-            )
-        )
+        await self.command_handlers.stats_command(update, context)
 
     async def chaos_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Toggle or inspect chat-level chaos mode."""
-        if not update.message or not update.effective_chat or not update.effective_user:
-            return
-        action = (context.args[0] if context.args else "status").strip().lower()
-        if action == "status":
-            settings_row = self.state_store.ensure_group_settings(
-                update.effective_chat.id
-            )
-            await update.message.reply_text(
-                ChaosText.chaos_status(settings_row["chaos_mode_enabled"])
-            )
-            return
-
-        desired = self._parse_toggle_arg(action)
-        if desired is None:
-            await update.message.reply_text(ChaosText.chaos_usage())
-            return
-        if not await self._require_chaos_admin(update, context):
-            return
-
-        result = self.state_store.update_group_settings(
-            update.effective_chat.id,
-            chaos_mode_enabled=desired,
-        )
-        await update.message.reply_text(
-            ChaosText.chaos_updated(result["chaos_mode_enabled"])
-        )
+        await self.command_handlers.chaos_command(update, context)
 
     async def quiet_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Toggle quiet mode for the current chat. Owner-only."""
-        await self._toggle_group_setting(
-            update,
-            context,
-            setting_name="quiet_mode",
-            command_name="quiet",
-            label="Тихий режим",
-        )
+        await self.command_handlers.quiet_command(update, context)
 
     async def dupes_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Toggle duplicate suppression for the current chat. Owner-only."""
-        await self._toggle_group_setting(
-            update,
-            context,
-            setting_name="duplicate_suppression",
-            command_name="dupes",
-            label="Защита от повторов",
-        )
+        await self.command_handlers.dupes_command(update, context)
 
     async def statsmode_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Toggle stats collection visibility for the current chat. Owner-only."""
-        await self._toggle_group_setting(
-            update,
-            context,
-            setting_name="stats_enabled",
-            command_name="statsmode",
-            label="Статистика",
-        )
+        await self.command_handlers.statsmode_command(update, context)
 
     async def chatlimit_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Override per-chat concurrent job limit. Owner-only."""
-        await self._set_numeric_group_setting(
-            update,
-            context,
-            setting_name="chat_max_concurrent_jobs",
-            command_name="chatlimit",
-            label="Лимит чата",
-        )
+        await self.command_handlers.chatlimit_command(update, context)
 
     async def userlimit_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Override per-user active job limit for the current chat. Owner-only."""
-        await self._set_numeric_group_setting(
-            update,
-            context,
-            setting_name="user_max_active_jobs",
-            command_name="userlimit",
-            label="Лимит на пользователя",
-        )
+        await self.command_handlers.userlimit_command(update, context)
 
     async def admin_status_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
