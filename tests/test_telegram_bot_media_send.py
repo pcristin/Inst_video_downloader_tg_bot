@@ -179,6 +179,24 @@ def _make_request_context(status_message: _FakeStatusMessage) -> RequestContext:
 
 
 @pytest.mark.asyncio
+async def test_handle_message_delegates_to_request_intake(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("https://www.instagram.com/reel/a/")
+    context = _FakeContext(_FakeBot())
+    calls = []
+
+    class FakeRequestIntake:
+        async def handle_message(self, received_update, received_context):
+            calls.append((received_update, received_context))
+
+    telegram_bot.request_intake = FakeRequestIntake()
+
+    await telegram_bot.handle_message(update, context)
+
+    assert calls == [(update, context)]
+
+
+@pytest.mark.asyncio
 async def test_send_single_video_uses_send_video(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     fake_bot = _FakeBot()
