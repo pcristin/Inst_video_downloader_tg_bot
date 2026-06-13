@@ -6,7 +6,6 @@ import asyncio
 import logging
 import shutil
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -48,28 +47,12 @@ from .telegram_update_helpers import (forwarded_visible_user_id,
                                       request_user_id, request_user_label,
                                       user_label)
 from .telegram_wiring import build_telegram_application
+from .telegram.request_context import RequestContext
+from .telegram.request_intake import TelegramRequestIntake
 from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
                                VideoDownloadError, VideoInfo)
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class RequestContext:
-    """Telegram state for one user request tied to a shared job."""
-
-    request_id: str
-    chat_id: int
-    user_id: int
-    provider_label: str
-    normalized_url: str
-    original_url: str
-    original_message_id: int
-    status_message: Message
-    quiet_mode: bool
-    joined_existing: bool
-    chaos_enabled: bool = False
-    language_code: str = "ru"
 
 
 class TelegramBot:
@@ -87,6 +70,7 @@ class TelegramBot:
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
         self.request_contexts: dict[str, RequestContext] = {}
+        self.request_intake = TelegramRequestIntake(self)
         self._inline_delivery_session_tokens: set[str] = set()
         self.started_at = time.time()
         self._purge_expired_cache()
@@ -95,98 +79,7 @@ class TelegramBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming messages by queueing supported provider links."""
-        if (
-            getattr(update, "edited_message", None)
-            or getattr(update, "edited_channel_post", None)
-            or getattr(update, "edited_business_message", None)
-        ):
-            return
-        message = update.effective_message
-        if not message or not update.effective_chat:
-            return
-        request_user_id = self._request_user_id(update)
-        if request_user_id is None:
-            return
-        if settings.BOT_LEGACY_REDIRECT_MODE and settings.BOT_MIGRATION_TARGET_USERNAME:
-            await self.legacy_redirect_handler(update, context)
-            return
-
-        self._purge_expired_cache()
-        language_code = self._language_for_update(update)
-        message_text = message.text or getattr(message, "caption", None) or ""
-        extracted_links = RequestParser.extract_supported_links(
-            message_text,
-            limit=settings.MAX_LINKS_PER_MESSAGE,
-        )
-        if not extracted_links:
-            if self._message_is_from_owner(
-                update
-            ) and await self._whitelist_forwarded_visible_user(update):
-                return
-            return
-
-        group_settings = self.state_store.ensure_group_settings(
-            update.effective_chat.id
-        )
-        raw_url_count = len(RequestParser.URL_PATTERN.findall(message_text))
-        if raw_url_count > settings.MAX_LINKS_PER_MESSAGE:
-            await message.reply_text(
-                ChaosText.too_many_links(settings.MAX_LINKS_PER_MESSAGE, language_code)
-            )
-
-        for parsed_link in extracted_links:
-            rate_limit = self._consume_user_rate_limit(request_user_id, source="direct")
-            if not rate_limit["allowed"]:
-                await message.reply_text(
-                    ChaosText.rate_limited(
-                        rate_limit["retry_after_seconds"], language_code
-                    )
-                )
-                break
-            submission = self.job_manager.submit(
-                chat_id=update.effective_chat.id,
-                user_id=request_user_id,
-                user_label=self._request_user_label(update),
-                provider=parsed_link.provider,
-                provider_label=parsed_link.provider_label,
-                original_url=parsed_link.original_url,
-                normalized_url=parsed_link.normalized_url,
-                execute=self._build_job_executor(
-                    update.effective_chat.id, parsed_link, context
-                ),
-                duplicate_suppression=group_settings["duplicate_suppression"],
-            )
-            status_message = await message.reply_text(
-                self._build_submission_message(
-                    parsed_link.provider_label,
-                    queue_position=submission.queue_position,
-                    joined_existing=not submission.is_new_job,
-                    chaos_enabled=group_settings["chaos_mode_enabled"],
-                    language_code=language_code,
-                )
-            )
-            request_context = RequestContext(
-                request_id=submission.request_id,
-                chat_id=update.effective_chat.id,
-                user_id=request_user_id,
-                provider_label=parsed_link.provider_label,
-                normalized_url=parsed_link.normalized_url,
-                original_url=parsed_link.original_url,
-                original_message_id=message.message_id,
-                status_message=status_message,
-                quiet_mode=group_settings["quiet_mode"],
-                joined_existing=not submission.is_new_job,
-                chaos_enabled=group_settings["chaos_mode_enabled"],
-                language_code=language_code,
-            )
-            self.request_contexts[submission.request_id] = request_context
-            task = asyncio.create_task(
-                self._await_request(context, request_context, submission.job)
-            )
-            self.active_request_tasks[submission.request_id] = task
-            task.add_done_callback(
-                lambda _task, rid=submission.request_id: self._cleanup_request_task(rid)
-            )
+        await self.request_intake.handle_message(update, context)
 
     async def start_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
