@@ -44,7 +44,6 @@ class TelegramMediaSender:
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
-        self.validate_media_files([item.file_path for item in media_items])
         caption_text = self.build_caption_text(video_info.title)
 
         telegram_file_ids: list[str | None] = []
@@ -124,6 +123,7 @@ class TelegramMediaSender:
                     },
                 )
 
+        self.validate_media_files([media_item.file_path])
         with open(media_item.file_path, "rb") as media_file:
             message = await self._send_single_media_value(
                 context,
@@ -212,6 +212,7 @@ class TelegramMediaSender:
                     None if force_local_upload else media_item.telegram_file_id
                 )
                 if not media_value:
+                    self.validate_media_files([media_item.file_path])
                     media_value = stack.enter_context(open(media_item.file_path, "rb"))
                 item_caption = caption_text if index == 0 else None
                 if media_item.media_type == "video":

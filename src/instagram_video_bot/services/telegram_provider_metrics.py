@@ -23,33 +23,21 @@ def record_provider_metrics(
 ) -> None:
     """Persist provider execution metrics without leaking provider internals."""
     metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
-    effective_failure_class = getattr(metrics, "failure_class", None) or failure_class
+    effective_failure_class = metrics.failure_class or failure_class
     state_store.record_download_metrics(
         job_id,
         download_duration_ms=download_duration_ms,
-        retry_count=int(getattr(metrics, "retry_count", 0) or 0),
-        instagram_fast_status=getattr(metrics, "instagram_fast_status", None),
-        instagram_fast_duration_ms=getattr(metrics, "instagram_fast_duration_ms", None),
-        instagram_fast_budget_exhausted=bool(
-            getattr(metrics, "instagram_fast_budget_exhausted", False)
-        ),
-        instagram_fast_endpoint_timings_json=getattr(
-            metrics, "instagram_fast_endpoint_timings_json", None
-        ),
-        instagram_fallback_attempted=bool(
-            getattr(metrics, "instagram_fallback_attempted", False)
-        ),
-        instagram_account_attempts=int(
-            getattr(metrics, "instagram_account_attempts", 0) or 0
-        ),
-        instagram_account_retries=int(
-            getattr(metrics, "instagram_account_retries", 0) or 0
-        ),
-        instagram_auth_failures=int(getattr(metrics, "instagram_auth_failures", 0) or 0),
-        instagram_success_path=getattr(metrics, "instagram_success_path", None),
-        instagram_fallback_path=getattr(metrics, "instagram_fallback_path", None),
-        instagram_metadata_reused=bool(
-            getattr(metrics, "instagram_metadata_reused", False)
-        ),
+        retry_count=int(metrics.retry_count or 0),
+        instagram_fast_status=metrics.instagram_fast_status,
+        instagram_fast_duration_ms=metrics.instagram_fast_duration_ms,
+        instagram_fast_budget_exhausted=bool(metrics.instagram_fast_budget_exhausted),
+        instagram_fast_endpoint_timings_json=metrics.instagram_fast_endpoint_timings_json,
+        instagram_fallback_attempted=bool(metrics.instagram_fallback_attempted),
+        instagram_account_attempts=int(metrics.instagram_account_attempts or 0),
+        instagram_account_retries=int(metrics.instagram_account_retries or 0),
+        instagram_auth_failures=int(metrics.instagram_auth_failures or 0),
+        instagram_success_path=metrics.instagram_success_path,
+        instagram_fallback_path=metrics.instagram_fallback_path,
+        instagram_metadata_reused=bool(metrics.instagram_metadata_reused),
         failure_class=effective_failure_class,
     )

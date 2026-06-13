@@ -79,3 +79,31 @@ async def test_media_sender_sends_video_and_persists_telegram_file_id(tmp_path):
     )
     assert cached is not None
     assert cached.media_items[0]["telegram_file_id"] == "standalone-video-file-id"
+
+
+@pytest.mark.asyncio
+async def test_media_sender_uses_cached_file_id_when_local_file_is_missing(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    missing_file = tmp_path / "missing.mp4"
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=missing_file,
+            title="Cached sender",
+            media_items=[
+                MediaItem(
+                    file_path=missing_file,
+                    media_type="video",
+                    telegram_file_id="cached-video-file-id",
+                )
+            ],
+            primary_media_type="video",
+        ),
+    )
+
+    assert fake_bot.video_calls[0]["video"] == "cached-video-file-id"

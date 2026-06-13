@@ -202,76 +202,104 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             ON inline_delivery_events (user_id, access_kind, occurred_at);
         """)
 
-    group_columns = _column_names(conn, "group_settings")
-    if "chat_max_concurrent_jobs" not in group_columns:
-        conn.execute(
-            "ALTER TABLE group_settings ADD COLUMN chat_max_concurrent_jobs INTEGER"
-        )
-    if "user_max_active_jobs" not in group_columns:
-        conn.execute(
-            "ALTER TABLE group_settings ADD COLUMN user_max_active_jobs INTEGER"
-        )
-    if "chaos_mode_enabled" not in group_columns:
-        conn.execute(
-            "ALTER TABLE group_settings ADD COLUMN chaos_mode_enabled INTEGER NOT NULL DEFAULT 0"
-        )
+    add_column_if_missing(
+        conn, "group_settings", "chat_max_concurrent_jobs", "chat_max_concurrent_jobs INTEGER"
+    )
+    add_column_if_missing(
+        conn, "group_settings", "user_max_active_jobs", "user_max_active_jobs INTEGER"
+    )
+    add_column_if_missing(
+        conn,
+        "group_settings",
+        "chaos_mode_enabled",
+        "chaos_mode_enabled INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(
+        conn,
+        "request_events",
+        "joined_existing",
+        "joined_existing INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(conn, "performance_metrics", "failure_class", "failure_class TEXT")
+    add_column_if_missing(
+        conn,
+        "performance_metrics",
+        "instagram_fast_budget_exhausted",
+        "instagram_fast_budget_exhausted INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(
+        conn,
+        "performance_metrics",
+        "instagram_fast_endpoint_timings_json",
+        "instagram_fast_endpoint_timings_json TEXT",
+    )
+    add_column_if_missing(
+        conn,
+        "performance_metrics",
+        "instagram_fallback_path",
+        "instagram_fallback_path TEXT",
+    )
+    add_column_if_missing(
+        conn,
+        "performance_metrics",
+        "instagram_metadata_reused",
+        "instagram_metadata_reused INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(
+        conn, "inline_one_time_payments", "provider", "provider TEXT"
+    )
+    add_column_if_missing(
+        conn, "inline_one_time_payments", "normalized_url", "normalized_url TEXT"
+    )
+    add_column_if_missing(
+        conn,
+        "inline_sessions",
+        "access_kind",
+        "access_kind TEXT NOT NULL DEFAULT 'free'",
+    )
 
-    request_columns = _column_names(conn, "request_events")
-    if "joined_existing" not in request_columns:
-        conn.execute(
-            "ALTER TABLE request_events ADD COLUMN joined_existing INTEGER NOT NULL DEFAULT 0"
-        )
-
-    performance_columns = _column_names(conn, "performance_metrics")
-    if "failure_class" not in performance_columns:
-        conn.execute("ALTER TABLE performance_metrics ADD COLUMN failure_class TEXT")
-    if "instagram_fast_budget_exhausted" not in performance_columns:
-        conn.execute(
-            "ALTER TABLE performance_metrics ADD COLUMN instagram_fast_budget_exhausted INTEGER NOT NULL DEFAULT 0"
-        )
-    if "instagram_fast_endpoint_timings_json" not in performance_columns:
-        conn.execute(
-            "ALTER TABLE performance_metrics ADD COLUMN instagram_fast_endpoint_timings_json TEXT"
-        )
-    if "instagram_fallback_path" not in performance_columns:
-        conn.execute(
-            "ALTER TABLE performance_metrics ADD COLUMN instagram_fallback_path TEXT"
-        )
-    if "instagram_metadata_reused" not in performance_columns:
-        conn.execute(
-            "ALTER TABLE performance_metrics ADD COLUMN instagram_metadata_reused INTEGER NOT NULL DEFAULT 0"
-        )
-
-    one_time_payment_columns = _column_names(conn, "inline_one_time_payments")
-    if "provider" not in one_time_payment_columns:
-        conn.execute("ALTER TABLE inline_one_time_payments ADD COLUMN provider TEXT")
-    if "normalized_url" not in one_time_payment_columns:
-        conn.execute(
-            "ALTER TABLE inline_one_time_payments ADD COLUMN normalized_url TEXT"
-        )
-
-    inline_session_columns = _column_names(conn, "inline_sessions")
-    if "access_kind" not in inline_session_columns:
-        conn.execute(
-            "ALTER TABLE inline_sessions ADD COLUMN access_kind TEXT NOT NULL DEFAULT 'free'"
-        )
-
-    subscription_columns = _column_names(conn, "inline_subscriptions")
-    if "started_at" not in subscription_columns:
-        conn.execute(
-            "ALTER TABLE inline_subscriptions ADD COLUMN started_at TEXT NOT NULL DEFAULT ''"
-        )
+    had_subscription_started_at = "started_at" in _column_names(
+        conn, "inline_subscriptions"
+    )
+    add_column_if_missing(
+        conn,
+        "inline_subscriptions",
+        "started_at",
+        "started_at TEXT NOT NULL DEFAULT ''",
+    )
+    if not had_subscription_started_at:
         conn.execute("""
             UPDATE inline_subscriptions
             SET started_at = updated_at
             WHERE started_at = ''
             """)
-    if "auto_refund_checked_at" not in subscription_columns:
-        conn.execute(
-            "ALTER TABLE inline_subscriptions ADD COLUMN auto_refund_checked_at TEXT"
-        )
-    if "refund_reason" not in subscription_columns:
-        conn.execute("ALTER TABLE inline_subscriptions ADD COLUMN refund_reason TEXT")
+    add_column_if_missing(
+        conn,
+        "inline_subscriptions",
+        "auto_refund_checked_at",
+        "auto_refund_checked_at TEXT",
+    )
+    add_column_if_missing(
+        conn, "inline_subscriptions", "refund_reason", "refund_reason TEXT"
+    )
+
+
+def add_column_if_missing(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    """Add a column once, tolerating a concurrent duplicate-column migration race."""
+
+    if column_name in _column_names(conn, table_name):
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_definition}")
+    except sqlite3.OperationalError as error:
+        if "duplicate column name" in str(error).lower():
+            return
+        raise
 
 
 def _column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:

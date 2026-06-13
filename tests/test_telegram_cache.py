@@ -33,6 +33,7 @@ def test_video_info_from_cache_preserves_media_metadata_and_file_ids(tmp_path):
     assert info.description == "Cached title"
     assert info.primary_media_type == "video"
     assert info.from_cache is True
+    assert info.duration == 12.3
     assert info.media_items[0].telegram_file_id == "tg-file-id"
     assert info.media_items[0].width == 720
     assert info.media_items[0].height == 1280
