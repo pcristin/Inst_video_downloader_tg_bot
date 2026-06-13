@@ -150,3 +150,36 @@ async def test_media_sender_preflights_uncached_album_files_before_chunks(tmp_pa
         )
 
     assert fake_bot.media_group_calls == []
+
+
+@pytest.mark.asyncio
+async def test_media_sender_allows_cached_album_file_ids_without_local_files(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    media_file = tmp_path / "present.mp4"
+    missing_file = tmp_path / "cached-missing.mp4"
+    media_file.write_bytes(b"video")
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=media_file,
+            title="Cached album item",
+            media_items=[
+                MediaItem(file_path=media_file, media_type="video"),
+                MediaItem(
+                    file_path=missing_file,
+                    media_type="video",
+                    telegram_file_id="cached-album-file-id",
+                ),
+            ],
+            primary_media_type="video",
+        ),
+    )
+
+    assert len(fake_bot.media_group_calls) == 1
+    sent_media = fake_bot.media_group_calls[0]["media"]
+    assert sent_media[1].media == "cached-album-file-id"
