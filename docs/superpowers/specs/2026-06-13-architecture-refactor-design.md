@@ -6,9 +6,9 @@ Date: 2026-06-13
 
 This repository is a Python Telegram bot that downloads Instagram, X/Twitter, and YouTube media. The indexed graph shows `instagram_video_bot` as the core package, with most tests driving it through service-level fakes. The baseline suite passes: `330 passed in 31.71s`.
 
-At the start of this refactor pass, the largest coordination files were:
+After this refactor pass, the largest coordination files are:
 
-- `src/instagram_video_bot/services/telegram_bot.py`: 2029 lines
+- `src/instagram_video_bot/services/telegram_bot.py`: 1781 lines
 - `src/instagram_video_bot/services/state_store.py`: 1786 lines
 - `src/instagram_video_bot/services/video_downloader.py`: 766 lines
 
