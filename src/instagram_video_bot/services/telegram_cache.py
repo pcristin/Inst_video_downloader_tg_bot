@@ -32,6 +32,7 @@ def video_info_from_cache(cached: CachedMediaEntry) -> VideoInfo:
         file_path=primary.file_path,
         title=cached.title,
         description=cached.title,
+        duration=primary.duration,
         media_items=media_items,
         primary_media_type=primary.media_type,
         from_cache=True,

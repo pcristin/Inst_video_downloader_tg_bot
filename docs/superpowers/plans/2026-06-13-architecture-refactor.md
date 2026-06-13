@@ -270,11 +270,11 @@ git commit -m "refactor: extract telegram command handlers"
 
 - [ ] **Step 1: Re-index the repository**
 
-Run codebase-memory `index_repository(repo_path="/root/Inst_video_downloader_tg_bot", mode="full", persistence=true)`.
+Call the codebase-memory MCP tool `index_repository` with `repo_path="/root/Inst_video_downloader_tg_bot"`, `mode="full"`, and `persistence=true`.
 
 - [ ] **Step 2: Inspect architecture**
 
-Run codebase-memory `get_architecture(project="root-Inst_video_downloader_tg_bot", aspects=["all"])` and compare line counts and hotspots.
+Call the codebase-memory MCP tool `get_architecture` with `project="root-Inst_video_downloader_tg_bot"` and `aspects=["all"]`, then compare line counts and hotspots.
 
 - [ ] **Step 3: Run final local E2E verification**
 

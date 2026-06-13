@@ -1,5 +1,6 @@
 import sqlite3
 
+from src.instagram_video_bot.services import state_schema
 from src.instagram_video_bot.services.state_schema import \
     initialize_state_schema
 
@@ -165,4 +166,23 @@ def test_initialize_state_schema_migrates_existing_tables():
     )
     assert {"started_at", "auto_refund_checked_at", "refund_reason"}.issubset(
         migrated_columns["inline_subscriptions"]
+    )
+
+
+def test_add_column_if_missing_ignores_duplicate_column_race():
+    class _EmptyCursor:
+        def fetchall(self):
+            return []
+
+    class _RaceConnection:
+        def execute(self, query):
+            if query.startswith("PRAGMA table_info"):
+                return _EmptyCursor()
+            raise sqlite3.OperationalError("duplicate column name: new_column")
+
+    state_schema.add_column_if_missing(
+        _RaceConnection(),
+        "example_table",
+        "new_column",
+        "new_column TEXT",
     )

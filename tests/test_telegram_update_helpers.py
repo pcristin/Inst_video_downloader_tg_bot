@@ -61,3 +61,6 @@ def test_parse_toggle_arg_and_positive_int_arg():
     assert parse_positive_int_arg("3") == 3
     assert parse_positive_int_arg("0") is None
     assert parse_positive_int_arg("abc") is None
+    assert parse_positive_int_arg("①") is None
+    assert parse_positive_int_arg("²") is None
+    assert parse_positive_int_arg("₀") is None

@@ -86,7 +86,7 @@ def parse_positive_int_arg(value: str) -> int | None:
     """Parse a strictly positive integer command token."""
 
     stripped = value.strip()
-    if not stripped.isdigit():
+    if not stripped.isascii() or not stripped.isdigit():
         return None
     parsed = int(stripped)
     if parsed <= 0:
