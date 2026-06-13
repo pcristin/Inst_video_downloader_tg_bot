@@ -61,6 +61,13 @@ class TelegramMediaSender:
             self._persist_telegram_file_ids(request_context, telegram_file_ids)
             return
 
+        self.validate_media_files(
+            [
+                media_item.file_path
+                for media_item in media_items
+                if not media_item.telegram_file_id
+            ]
+        )
         caption_available = caption_text
         for offset in range(0, len(media_items), self.TELEGRAM_MEDIA_GROUP_LIMIT):
             chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
