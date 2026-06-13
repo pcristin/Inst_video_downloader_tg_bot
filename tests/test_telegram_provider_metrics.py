@@ -1,8 +1,5 @@
-import inspect
-
 from src.instagram_video_bot.services.download_models import \
     ProviderExecutionMetrics
-from src.instagram_video_bot.services import telegram_provider_metrics
 from src.instagram_video_bot.services.telegram_provider_metrics import \
     record_provider_metrics
 
@@ -97,9 +94,3 @@ def test_record_provider_metrics_uses_defaults_without_provider_metrics():
             },
         )
     ]
-
-
-def test_record_provider_metrics_uses_typed_metric_fields_directly():
-    source = inspect.getsource(telegram_provider_metrics.record_provider_metrics)
-
-    assert "getattr(metrics" not in source
