@@ -73,3 +73,36 @@ def test_main_multi_account_startup_does_not_login_before_bot_run(monkeypatch, t
     main_module.main()
 
     assert events == ["run"]
+
+
+def test_main_multi_account_startup_continues_without_available_accounts(
+    monkeypatch, tmp_path
+):
+    class FakeManager:
+        def reset_old_banned_accounts(self, hours):
+            assert hours == 6
+
+        def get_status(self):
+            return {"total_accounts": 3, "available_accounts": 0}
+
+        def get_detailed_status(self):
+            return "all accounts unavailable"
+
+    events = []
+
+    class FakeTelegramBot:
+        def run(self):
+            events.append("run")
+
+    monkeypatch.setattr(main_module, "setup_logging", lambda: None)
+    monkeypatch.setattr(main_module, "check_environment", lambda: None)
+    monkeypatch.setattr(main_module.settings, "TEMP_DIR", tmp_path / "temp", raising=False)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.utils.account_manager.get_account_manager",
+        lambda: FakeManager(),
+    )
+    monkeypatch.setattr(main_module, "TelegramBot", FakeTelegramBot)
+
+    main_module.main()
+
+    assert events == ["run"]

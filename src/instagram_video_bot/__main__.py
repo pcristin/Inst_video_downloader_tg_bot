@@ -70,7 +70,10 @@ def main() -> None:
                 logger.error("No available accounts!")
                 logger.info("Account status:")
                 logger.info(manager.get_detailed_status())
-                sys.exit(1)
+                logger.warning(
+                    "Starting bot with no available Instagram accounts; "
+                    "Instagram downloads will fail until accounts recover or are replaced."
+                )
         else:
             logger.info("Using single account mode")
 
