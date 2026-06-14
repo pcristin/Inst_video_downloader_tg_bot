@@ -136,6 +136,24 @@ class _FailingInvoiceLinkBot:
 
 
 @pytest.mark.asyncio
+async def test_start_command_delegates_to_command_handlers(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate(message=_FakeMessage("/start"))
+    context = SimpleNamespace(bot=_FakeTelegramBot())
+    calls = []
+
+    class FakeCommandHandlers:
+        async def start_command(self, received_update, received_context):
+            calls.append((received_update, received_context))
+
+    telegram_bot.command_handlers = FakeCommandHandlers()
+
+    await telegram_bot.start_command(update, context)
+
+    assert calls == [(update, context)]
+
+
+@pytest.mark.asyncio
 async def test_paid_user_inline_query_returns_placeholder_with_keyboard(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
