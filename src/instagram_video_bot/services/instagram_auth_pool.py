@@ -130,6 +130,16 @@ class InstagramAuthPool:
             self._cursor = (self._cursor + limit) % len(usable)
             return list(selected)
 
+    def filter_usable_contexts(
+        self, contexts: list[InstagramAuthContext]
+    ) -> list[InstagramAuthContext]:
+        """Return configured snapshot contexts that are not currently cooling down."""
+        with self._lock:
+            usable_ids = {
+                context.context_id for context in self._usable_contexts_locked()
+            }
+        return [context for context in contexts if context.context_id in usable_ids]
+
     def mark_cooldown(self, context: InstagramAuthContext, reason: str) -> None:
         """Place one context on cooldown using only its non-secret id."""
         with self._lock:

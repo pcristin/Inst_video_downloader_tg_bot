@@ -667,12 +667,12 @@ def test_share_resolution_reuses_successful_auth_context_for_post_extraction(mon
     assert auth_post_cookies[0] == "mid=share; sessionid=secret-share"
 
 
-def test_share_resolution_preserved_context_stays_within_attempt_limit(monkeypatch, tmp_path):
+def test_share_resolution_reuses_original_context_snapshot_for_post(monkeypatch, tmp_path):
     first = InstagramAuthContext("cookie:0", "cookie", "mid=first; sessionid=secret-first")
     share_good = InstagramAuthContext("cookie:1", "cookie", "mid=share; sessionid=secret-share")
-    refreshed_other = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
+    outside_attempt = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
     pool = InstagramAuthPool(
-        [first, share_good, refreshed_other],
+        [first, share_good, outside_attempt],
         max_contexts_per_attempt=2,
     )
     extractor = InstagramFastExtractor(auth_pool=pool)
@@ -700,7 +700,7 @@ def test_share_resolution_preserved_context_stays_within_attempt_limit(monkeypat
 
     assert post_cookies == [
         "mid=share; sessionid=secret-share",
-        "mid=other; sessionid=secret-other",
+        "mid=first; sessionid=secret-first",
     ]
 
 
