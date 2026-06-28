@@ -266,7 +266,18 @@ class InstagramFastExtractor:
                 )
                 if share_auth_context:
                     success_path = "fast_auth"
-                auth_contexts = self.auth_pool.get_contexts_for_attempt()
+                refreshed_contexts = self.auth_pool.get_contexts_for_attempt()
+                if share_auth_context:
+                    auth_contexts = [
+                        share_auth_context,
+                        *[
+                            context
+                            for context in refreshed_contexts
+                            if context.context_id != share_auth_context.context_id
+                        ],
+                    ]
+                else:
+                    auth_contexts = refreshed_contexts
                 parsed = self.parse_url(resolved)
                 if parsed.route != "post" or not parsed.shortcode:
                     raise InstagramFastExtractorError("Share URL did not resolve to a post")

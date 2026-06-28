@@ -545,6 +545,64 @@ def test_share_resolution_cooldown_context_is_not_reused_for_post_extraction(mon
     assert "mid=good; sessionid=secret-good" in post_cookies
 
 
+def test_share_resolution_reuses_successful_auth_context_for_post_extraction(monkeypatch, tmp_path):
+    first = InstagramAuthContext("cookie:0", "cookie", "mid=first; sessionid=secret-first")
+    share_good = InstagramAuthContext("cookie:1", "cookie", "mid=share; sessionid=secret-share")
+    omitted_by_refresh = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
+    pool = InstagramAuthPool(
+        [first, share_good, omitted_by_refresh],
+        max_contexts_per_attempt=2,
+    )
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    post_cookies = []
+
+    def fake_request_raw(**kwargs):
+        cookie = kwargs["headers"].get("Cookie")
+        if cookie == "mid=share; sessionid=secret-share":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        post_cookies.append(cookie)
+        if cookie != "mid=share; sessionid=secret-share":
+            return {}
+        if "oembed" in url:
+            return {"media_id": "123_999"}
+        if "/media/123/info/" in url:
+            return {
+                "items": [
+                    {
+                        "caption": {"text": "auth-caption"},
+                        "video_versions": [
+                            {"url": "https://cdn.example.com/video.mp4", "width": 720, "height": 1280}
+                        ],
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    auth_post_cookies = [cookie for cookie in post_cookies if cookie]
+    assert auth_post_cookies[0] == "mid=share; sessionid=secret-share"
+
+
 def test_auth_request_status_marks_only_that_context_on_cooldown(monkeypatch):
     now = [100.0]
     cookie = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
