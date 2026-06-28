@@ -4,7 +4,7 @@
 def format_account_line(raw_line: str) -> str:
     """Convert full account format to simplified format for import."""
     # Your full format:
-    # ms.stevenbaker682510:tGeltLAc02KDNxI|Instagram 345.0.0.48.95 Android (31/12; 120dpi; 1080x2162; Samsung; SM-A510F; a5xelte; qcom; en_US; 634108168)|android-1c9f3387a1a2a978;160b1ca9-305b-485b-3ef2-cd21165ec318;487714a2-9663-4f9a-3d8b-2bf61007f950;7cc09762-2be7-446a-aead-7904d265f530|Authorization=Bearer IGT:...|...|xonoxtsm@wildbmail.com:neoszgkeA!9944
+    # example_user:example_password|Instagram 345.0.0.48.95 Android (...)|android-device-id;uuid-a|Authorization=Bearer <instagram_bearer_token>|...|<email_address>:<email_password>
     
     parts = raw_line.split('|')
     
@@ -12,7 +12,7 @@ def format_account_line(raw_line: str) -> str:
         raise ValueError(f"Expected at least 6 parts, got {len(parts)}")
     
     # Extract parts we need:
-    login = parts[0]  # ms.stevenbaker682510:tGeltLAc02KDNxI
+    login = parts[0]  # example_user:example_password
     # Skip device info (parts[1])
     # Skip device IDs (parts[2])
     
@@ -42,17 +42,17 @@ def main():
     print("=" * 50)
     
     # Read raw accounts
-    raw_file = 'raw_accounts.txt'
-    output_file = 'instmanager_accounts.txt'
+    raw_file = 'secrets/raw_accounts.txt'
+    output_file = 'secrets/instmanager_accounts.txt'
     
     try:
         with open(raw_file, 'r', encoding='utf-8') as f:
             raw_lines = f.readlines()
     except FileNotFoundError:
         print(f"❌ {raw_file} not found!")
-        print("\nCreate raw_accounts.txt with your full account data:")
+        print("\nCreate secrets/raw_accounts.txt with your full account data:")
         print("Example:")
-        print("ms.stevenbaker682510:tGeltLAc02KDNxI|Instagram 345.0.0.48.95 Android...|android-1c9f...|Authorization=Bearer IGT:...|...|xonoxtsm@wildbmail.com:neoszgkeA!9944")
+        print("example_user:example_password|Instagram 345.0.0.48.95 Android...|android-device-id...|Authorization=Bearer <instagram_bearer_token>|...|<email_address>:<email_password>")
         return
     
     formatted_lines = []
@@ -87,4 +87,4 @@ def main():
         print("❌ No accounts were formatted")
 
 if __name__ == "__main__":
-    main() 
+    main()
