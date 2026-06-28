@@ -210,7 +210,9 @@ class VideoDownloader:
                 self.last_provider_metrics.instagram_fast_endpoint_timings_json = getattr(
                     fast_result, "instagram_fast_endpoint_timings_json", None
                 )
-                self.last_provider_metrics.instagram_success_path = "fast"
+                self.last_provider_metrics.instagram_success_path = (
+                    getattr(fast_result, "instagram_success_path", None) or "fast"
+                )
                 return fast_result
             except Exception as error:
                 fast_error = error
@@ -229,7 +231,7 @@ class VideoDownloader:
                     "Fast extractor failed, falling back to legacy method",
                     extra={
                         "failure_class": "fast_path_failed",
-                        "error": str(error),
+                        "error_class": error.__class__.__name__,
                     },
                 )
 

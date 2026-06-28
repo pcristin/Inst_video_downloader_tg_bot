@@ -89,6 +89,7 @@ class InstagramProviderAdapter:
             primary_media_type=primary_item.media_type,
             instagram_fast_budget_exhausted=result.budget_exhausted,
             instagram_fast_endpoint_timings_json=json.dumps(result.endpoint_timings),
+            instagram_success_path=result.success_path,
         )
 
     def download_with_instagram_client(
