@@ -520,6 +520,31 @@ def test_share_resolution_can_retry_with_auth_context(monkeypatch, tmp_path):
     assert any(item["name"] == "share_resolve" and item.get("auth_kind") == "cookie" for item in result.endpoint_timings)
 
 
+def test_bearer_context_is_not_used_for_credentialless_share_retry(monkeypatch, tmp_path):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    seen_share_headers = []
+
+    def fake_request_raw(*args, **kwargs):
+        url = kwargs.get("url") or args[1]
+        headers = dict(kwargs["headers"])
+        if "/share/" not in url:
+            return None
+        seen_share_headers.append(headers)
+        if len(seen_share_headers) == 1:
+            return None
+        return _Response("https://www.instagram.com/reel/abc123/")
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert len(seen_share_headers) == 1
+    assert "Authorization" not in seen_share_headers[0]
+    assert "Cookie" not in seen_share_headers[0]
+
+
 def test_share_resolution_cooldown_context_is_not_reused_for_post_extraction(monkeypatch, tmp_path):
     bad = InstagramAuthContext("cookie:0", "cookie", "mid=bad; sessionid=secret-bad")
     good = InstagramAuthContext("cookie:1", "cookie", "mid=good; sessionid=secret-good")
@@ -640,6 +665,40 @@ def test_share_resolution_reuses_successful_auth_context_for_post_extraction(mon
     assert result.success_path == "fast_auth"
     auth_post_cookies = [cookie for cookie in post_cookies if cookie]
     assert auth_post_cookies[0] == "mid=share; sessionid=secret-share"
+
+
+def test_bearer_auth_retry_skips_web_fallbacks_when_mobile_misses(monkeypatch, tmp_path):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    calls = []
+
+    def fake_get_media_id(canonical_url, auth_context=None):
+        calls.append(("media_id", auth_context.context_id if auth_context else None))
+        return "123" if auth_context else None
+
+    def fake_request_mobile_media_info(media_id, auth_context=None):
+        calls.append(("mobile_info", auth_context.context_id if auth_context else None))
+        return {}
+
+    def fake_request_embed_data(shortcode, auth_context=None):
+        calls.append(("embed", auth_context.context_id if auth_context else None))
+        return {}
+
+    def fake_request_graphql_data(shortcode, auth_context=None):
+        calls.append(("graphql", auth_context.context_id if auth_context else None))
+        return {}
+
+    monkeypatch.setattr(extractor, "_get_media_id", fake_get_media_id)
+    monkeypatch.setattr(extractor, "_request_mobile_media_info", fake_request_mobile_media_info)
+    monkeypatch.setattr(extractor, "_request_embed_data", fake_request_embed_data)
+    monkeypatch.setattr(extractor, "_request_graphql_data", fake_request_graphql_data)
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert ("mobile_info", "bearer:0") in calls
+    assert ("embed", "bearer:0") not in calls
+    assert ("graphql", "bearer:0") not in calls
 
 
 def test_auth_request_status_marks_only_that_context_on_cooldown(monkeypatch):

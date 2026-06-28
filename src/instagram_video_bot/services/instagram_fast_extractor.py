@@ -341,6 +341,13 @@ class InstagramFastExtractor:
             last_error = public_error
 
         for auth_context in auth_contexts:
+            if (
+                self._sent_auth_context(
+                    self._share_headers(auth_context), auth_context
+                )
+                is None
+            ):
+                continue
             try:
                 with self._timed_endpoint("share_resolve", auth_context):
                     resolved = self.resolve_share_url(
@@ -446,6 +453,14 @@ class InstagramFastExtractor:
             if items:
                 self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
                 return caption, items
+
+        if (
+            auth_context
+            and self._sent_auth_context(self._web_headers(auth_context), auth_context) is None
+        ):
+            raise InstagramFastExtractorError(
+                "Auth context cannot be sent to web endpoints"
+            )
 
         with self._timed_endpoint("embed", auth_context):
             embed_data = (
