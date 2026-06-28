@@ -1182,6 +1182,8 @@ class InstagramFastExtractor:
         status_code = getattr(response, "status_code", None)
         if status_code in {401, 403, 429}:
             return f"http_{status_code}"
+        if isinstance(status_code, int) and 200 <= status_code < 300:
+            return None
 
         if not inspect_body:
             return None

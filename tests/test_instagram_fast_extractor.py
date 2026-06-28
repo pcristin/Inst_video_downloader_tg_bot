@@ -875,3 +875,41 @@ def test_bearer_context_is_not_cooled_down_when_web_headers_send_no_credentials(
 
     assert extractor._request_embed_data("abc123", context) == {}
     assert pool.get_contexts_for_attempt() == [context]
+
+
+def test_successful_auth_response_body_keyword_does_not_cooldown_context(monkeypatch):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    pool = InstagramAuthPool([context])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _SuccessfulResponse:
+        status_code = 200
+        text = '{"caption":{"text":"literal login_required text from post"}}'
+        headers = {}
+        url = "https://i.instagram.com/api/v1/media/123/info/"
+
+        def raise_for_status(self):
+            return None
+
+    class _Session:
+        def request(self, **kwargs):
+            return _SuccessfulResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: _Session(),
+    )
+
+    response = extractor._request_raw(
+        method="GET",
+        url="https://i.instagram.com/api/v1/media/123/info/",
+        headers=extractor._mobile_headers(context),
+        auth_context=context,
+    )
+
+    assert response is not None
+    assert response.status_code == 200
+    assert pool.get_contexts_for_attempt() == [context]
