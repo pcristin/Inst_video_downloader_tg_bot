@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 AuthContextKind = Literal["cookie", "bearer"]
 _SAFE_HTTP_REASON = re.compile(r"^http_[0-9]{3}$")
+_ConfiguredPoolCacheKey = tuple[str | None, int, float, int]
+_configured_pool_cache_lock = threading.Lock()
+_configured_pool_cache: dict[_ConfiguredPoolCacheKey, "InstagramAuthPool"] = {}
 
 
 class InstagramAuthConfigError(ValueError):
@@ -187,13 +190,29 @@ def load_configured_instagram_auth_pool(
     *,
     now_fn: Callable[[], float] = monotonic,
 ) -> InstagramAuthPool:
-    """Load the auth pool from global settings."""
-    return load_instagram_auth_pool(
-        settings.IG_AUTH_COOKIES_FILE,
-        max_contexts_per_attempt=settings.IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT,
-        cooldown_seconds=settings.IG_AUTH_CONTEXT_COOLDOWN_SECONDS,
-        now_fn=now_fn,
+    """Load the auth pool from global settings, sharing state across jobs."""
+    path = settings.IG_AUTH_COOKIES_FILE
+    max_contexts_per_attempt = int(settings.IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT)
+    cooldown_seconds = float(settings.IG_AUTH_CONTEXT_COOLDOWN_SECONDS)
+    cache_key = (
+        str(Path(path)) if path else None,
+        max_contexts_per_attempt,
+        cooldown_seconds,
+        id(now_fn),
     )
+    with _configured_pool_cache_lock:
+        cached_pool = _configured_pool_cache.get(cache_key)
+        if cached_pool is not None:
+            return cached_pool
+
+        pool = load_instagram_auth_pool(
+            path,
+            max_contexts_per_attempt=max_contexts_per_attempt,
+            cooldown_seconds=cooldown_seconds,
+            now_fn=now_fn,
+        )
+        _configured_pool_cache[cache_key] = pool
+        return pool
 
 
 def _parse_contexts(payload: dict[str, Any]) -> list[InstagramAuthContext]:

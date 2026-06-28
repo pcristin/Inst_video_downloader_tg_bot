@@ -346,6 +346,45 @@ def test_default_constructor_loads_configured_auth_pool(monkeypatch):
     assert extractor.auth_pool.get_contexts_for_attempt() == [context]
 
 
+def test_default_constructor_reuses_configured_auth_pool_across_instances(
+    monkeypatch, tmp_path
+):
+    auth_file = tmp_path / "instagram_auth.json"
+    auth_file.write_text(
+        """
+        {
+            "instagram": [
+                "mid=abc; sessionid=session-a",
+                "mid=def; sessionid=session-b",
+                "mid=ghi; sessionid=session-c"
+            ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_auth_pool.settings.IG_AUTH_COOKIES_FILE",
+        auth_file,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_auth_pool.settings.IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT",
+        2,
+    )
+
+    first = InstagramFastExtractor()
+    second = InstagramFastExtractor()
+
+    assert first.auth_pool is second.auth_pool
+    assert [context.context_id for context in first.auth_pool.get_contexts_for_attempt()] == [
+        "cookie:0",
+        "cookie:1",
+    ]
+    assert [context.context_id for context in second.auth_pool.get_contexts_for_attempt()] == [
+        "cookie:2",
+        "cookie:0",
+    ]
+
+
 def test_cookie_auth_retry_succeeds_after_public_sources_miss(monkeypatch, tmp_path):
     context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
     extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
