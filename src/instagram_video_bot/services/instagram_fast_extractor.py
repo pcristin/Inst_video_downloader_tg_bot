@@ -365,13 +365,14 @@ class InstagramFastExtractor:
         auth_context: Optional[InstagramAuthContext] = None,
     ) -> str:
         """Resolve /share URLs to canonical post/reel URLs."""
+        headers = self._share_headers(auth_context)
         response = self._request_raw(
             method="GET",
             url=share_url,
-            headers=self._share_headers(auth_context),
+            headers=headers,
             allow_redirects=True,
             timeout=self.metadata_timeout,
-            auth_context=auth_context,
+            auth_context=self._sent_auth_context(headers, auth_context),
         )
         if response is None:
             raise InstagramFastExtractorError("Failed to resolve share URL")
@@ -522,11 +523,15 @@ class InstagramFastExtractor:
     ) -> Dict[str, Any]:
         """Request embed page and parse context JSON."""
         embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-        request_kwargs: dict[str, Any] = {"auth_context": auth_context} if auth_context else {}
+        headers = self._web_headers(auth_context)
+        sent_auth_context = self._sent_auth_context(headers, auth_context)
+        request_kwargs: dict[str, Any] = (
+            {"auth_context": sent_auth_context} if sent_auth_context else {}
+        )
         response = self._request_raw(
             "GET",
             embed_url,
-            headers=self._web_headers(auth_context),
+            headers=headers,
             timeout=self.metadata_timeout,
             **request_kwargs,
         )
@@ -545,11 +550,15 @@ class InstagramFastExtractor:
     ) -> Dict[str, Any]:
         """Fallback to web GraphQL request for media extraction."""
         post_url = f"https://www.instagram.com/p/{shortcode}/"
-        request_kwargs: dict[str, Any] = {"auth_context": auth_context} if auth_context else {}
+        headers = self._web_headers(auth_context)
+        sent_auth_context = self._sent_auth_context(headers, auth_context)
+        request_kwargs: dict[str, Any] = (
+            {"auth_context": sent_auth_context} if sent_auth_context else {}
+        )
         post_response = self._request_raw(
             "GET",
             post_url,
-            headers=self._web_headers(auth_context),
+            headers=headers,
             timeout=self.metadata_timeout,
             **request_kwargs,
         )
@@ -561,7 +570,6 @@ class InstagramFastExtractor:
         lsd_token = self._extract_html_value(html, [r'"LSD",\[\],\{"token":"(.*?)"', r'"token":"(.*?)","__bbox"'])
         csrf_token = self._extract_html_value(html, [r'"csrf_token":"(.*?)"'])
 
-        headers = self._web_headers(auth_context)
         headers.update(
             {
                 "X-FB-Friendly-Name": "PolarisPostActionLoadPostQueryQuery",
@@ -1019,6 +1027,18 @@ class InstagramFastExtractor:
         ):
             headers.update(auth_context.as_headers())
         return headers
+
+    @staticmethod
+    def _sent_auth_context(
+        headers: Dict[str, str],
+        auth_context: Optional[InstagramAuthContext],
+    ) -> Optional[InstagramAuthContext]:
+        """Return auth context only when its credential is present in headers."""
+        if not auth_context:
+            return None
+        if "Cookie" in headers or "Authorization" in headers:
+            return auth_context
+        return None
 
     @staticmethod
     def _can_send_auth_to_media_url(media_url: str) -> bool:

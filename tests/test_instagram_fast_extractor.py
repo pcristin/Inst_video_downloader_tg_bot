@@ -717,3 +717,26 @@ def test_bearer_context_adds_authorization_only_to_mobile_headers():
 
     assert mobile_headers["Authorization"] == "Bearer IGT:2:token"
     assert "Authorization" not in web_headers
+
+
+def test_bearer_context_is_not_cooled_down_when_web_headers_send_no_credentials(monkeypatch):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    pool = InstagramAuthPool([context])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _Session:
+        def request(self, **kwargs):
+            assert "Authorization" not in kwargs["headers"]
+            assert "Cookie" not in kwargs["headers"]
+            return _StatusResponse(403, '{"message":"login_required"}')
+
+    extractor.session = _Session()
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("credential-free web request should use the shared session")
+        ),
+    )
+
+    assert extractor._request_embed_data("abc123", context) == {}
+    assert pool.get_contexts_for_attempt() == [context]
