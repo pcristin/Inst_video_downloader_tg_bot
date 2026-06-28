@@ -268,7 +268,7 @@ class InstagramFastExtractor:
                     success_path = "fast_auth"
                 refreshed_contexts = self.auth_pool.get_contexts_for_attempt()
                 if share_auth_context:
-                    auth_contexts = [
+                    post_auth_contexts = [
                         share_auth_context,
                         *[
                             context
@@ -276,6 +276,7 @@ class InstagramFastExtractor:
                             if context.context_id != share_auth_context.context_id
                         ],
                     ]
+                    auth_contexts = post_auth_contexts[: max(1, len(refreshed_contexts))]
                 else:
                     auth_contexts = refreshed_contexts
                 parsed = self.parse_url(resolved)

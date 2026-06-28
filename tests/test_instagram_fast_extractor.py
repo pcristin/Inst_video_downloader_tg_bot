@@ -667,6 +667,43 @@ def test_share_resolution_reuses_successful_auth_context_for_post_extraction(mon
     assert auth_post_cookies[0] == "mid=share; sessionid=secret-share"
 
 
+def test_share_resolution_preserved_context_stays_within_attempt_limit(monkeypatch, tmp_path):
+    first = InstagramAuthContext("cookie:0", "cookie", "mid=first; sessionid=secret-first")
+    share_good = InstagramAuthContext("cookie:1", "cookie", "mid=share; sessionid=secret-share")
+    refreshed_other = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
+    pool = InstagramAuthPool(
+        [first, share_good, refreshed_other],
+        max_contexts_per_attempt=2,
+    )
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    post_cookies = []
+
+    def fake_request_raw(**kwargs):
+        cookie = kwargs["headers"].get("Cookie")
+        if cookie == "mid=share; sessionid=secret-share":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        if cookie:
+            post_cookies.append(cookie)
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert post_cookies == [
+        "mid=share; sessionid=secret-share",
+        "mid=other; sessionid=secret-other",
+    ]
+
+
 def test_bearer_auth_retry_skips_web_fallbacks_when_mobile_misses(monkeypatch, tmp_path):
     context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
     extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
