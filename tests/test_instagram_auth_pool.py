@@ -97,7 +97,7 @@ def test_context_repr_does_not_include_secret_material():
     context = InstagramAuthContext(
         context_id="cookie:0",
         kind="cookie",
-        value="mid=abc; sessionid=super-secret",
+        value="mid=abc; sid=super-secret",
     )
 
     rendered = repr(context)
@@ -136,11 +136,11 @@ def test_cooldown_reason_is_redacted():
     context = InstagramAuthContext(
         context_id="cookie:0",
         kind="cookie",
-        value="mid=abc; sessionid=super-secret",
+        value="mid=abc; sid=super-secret",
     )
     pool = InstagramAuthPool([context])
 
-    pool.mark_cooldown(context, "http_403 sessionid=super-secret")
+    pool.mark_cooldown(context, "http_403 sid=super-secret")
 
     rendered = repr(pool._cooldowns)  # noqa: SLF001 - regression coverage for repr leakage.
     assert "super-secret" not in rendered

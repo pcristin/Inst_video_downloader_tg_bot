@@ -18,6 +18,8 @@ htmlcov/
 venv/
 .venv/
 env/
+.env
+.env.*
 .env.local
 .env.*.local
 
@@ -36,6 +38,18 @@ Thumbs.db
 temp/
 logs/
 instagram_cookies.txt
+cookies.txt
+cookies.json
+ig_auth*.json
+instagram_auth*.json
+extract_cookies.txt
+accounts.txt
+instmanager_accounts.txt
+raw_accounts.txt
+accounts_state.json
+sessions/
+cookies/
+secrets/
 2fa_qr.png
 test_webdriver.py
 
@@ -45,4 +59,4 @@ docker-compose.yml
 .dockerignore
 
 # Documentation
-*.md 
+*.md

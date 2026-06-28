@@ -37,14 +37,20 @@ ENV/
 # Project specific
 instagram_cookies.txt
 cookies.txt
+cookies.json
+ig_auth*.json
+instagram_auth*.json
 temp/
 logs/
 *.log
 2fa_qr.png
 account.txt
 accounts.txt
+instmanager_accounts.txt
+raw_accounts.txt
 accounts_state.json
 cookies/
+secrets/
 bot_state.sqlite3
 bot_state.sqlite3-journal
 
