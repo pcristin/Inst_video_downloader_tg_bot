@@ -12,6 +12,8 @@ from typing import Any, Callable, Iterable, Mapping
 logger = logging.getLogger(__name__)
 
 COOKIE_ORDER = ("mid", "csrftoken", "ds_user_id", "sessionid")
+CONTAINER_BOT_UID = 1000
+CONTAINER_BOT_GID = 1000
 
 
 @dataclass(frozen=True)
@@ -200,4 +202,17 @@ def _write_auth_payload(path: Path, payload: Mapping[str, Any]) -> None:
     )
     os.chmod(temporary_path, 0o600)
     temporary_path.replace(path)
+    _chown_for_container_bot_user(path)
     os.chmod(path, 0o600)
+
+
+def _chown_for_container_bot_user(path: Path) -> None:
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    try:
+        os.chown(path, CONTAINER_BOT_UID, CONTAINER_BOT_GID)
+    except OSError as exc:
+        logger.warning(
+            "Could not change auth export owner for container readability (%s)",
+            type(exc).__name__,
+        )

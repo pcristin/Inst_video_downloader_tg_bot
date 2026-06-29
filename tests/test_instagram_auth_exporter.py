@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.instagram_video_bot.utils import instagram_auth_exporter as exporter_module
 from src.instagram_video_bot.utils.instagram_auth_exporter import (
     export_instagram_auth_file,
     session_settings_to_cookie_header,
@@ -53,12 +54,21 @@ def test_session_settings_to_cookie_header_uses_authorization_data_fallback():
     assert cookie_header == "mid=mid-b; ds_user_id=84; sessionid=session-b"
 
 
-def test_export_instagram_auth_file_logs_in_accounts_and_preserves_bearers(tmp_path):
+def test_export_instagram_auth_file_logs_in_accounts_and_preserves_bearers(
+    monkeypatch, tmp_path
+):
     output_path = tmp_path / "secrets" / "instagram_auth.json"
     output_path.parent.mkdir()
     output_path.write_text(
         json.dumps({"instagram": ["old=cookie"], "instagram_bearer": ["Bearer old"]}),
         encoding="utf-8",
+    )
+    chown_calls = []
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        exporter_module.os,
+        "chown",
+        lambda path, uid, gid: chown_calls.append((path, uid, gid)),
     )
     settings_by_username = {
         "first": {
@@ -116,6 +126,7 @@ def test_export_instagram_auth_file_logs_in_accounts_and_preserves_bearers(tmp_p
     assert summary.exported == 2
     assert summary.failed == 0
     assert output_path.stat().st_mode & 0o777 == 0o600
+    assert chown_calls == [(output_path, 1000, 1000)]
 
 
 def test_export_instagram_auth_file_redacts_login_failures(tmp_path, caplog):
