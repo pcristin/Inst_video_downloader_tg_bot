@@ -16,8 +16,12 @@ services:
       - ./accounts.txt:/app/accounts.txt
       # Mount accounts state file to persist banned/usage status
       - ./accounts_state.json:/app/accounts_state.json
-      # Optional authenticated fast fallback credentials. Keep this file out of git.
-      - ./secrets/instagram_auth.json:/run/secrets/instagram_auth.json:ro
+    secrets:
+      - source: instagram_auth
+        target: instagram_auth.json
+        uid: "1000"
+        gid: "1000"
+        mode: 0400
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
@@ -32,3 +36,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s 
+
+secrets:
+  instagram_auth:
+    file: ./secrets/instagram_auth.json
