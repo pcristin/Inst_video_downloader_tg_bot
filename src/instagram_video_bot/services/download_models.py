@@ -35,6 +35,7 @@ class VideoInfo:
     instagram_metadata_reused: bool = False
     instagram_fast_budget_exhausted: bool = False
     instagram_fast_endpoint_timings_json: Optional[str] = None
+    instagram_success_path: Optional[str] = None
 
 
 @dataclass

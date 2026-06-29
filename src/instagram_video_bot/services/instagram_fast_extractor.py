@@ -22,6 +22,11 @@ from urllib.parse import quote, urlparse
 import requests
 
 from ..config.settings import settings
+from .instagram_auth_pool import (
+    InstagramAuthContext,
+    InstagramAuthPool,
+    load_configured_instagram_auth_pool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,10 @@ class InstagramFastExtractorError(Exception):
         super().__init__(message)
         self.endpoint_timings = []
         self.budget_exhausted = False
+
+
+class _InstagramAuthContextUnavailable(InstagramFastExtractorError):
+    """Raised internally when an auth context should stop being used."""
 
 
 @dataclass
@@ -71,6 +80,7 @@ class FastExtractorDownloadResult:
     media_items: List[DownloadedMedia]
     endpoint_timings: list[dict[str, Any]] = field(default_factory=list)
     budget_exhausted: bool = False
+    success_path: Literal["fast", "fast_auth"] = "fast"
 
 
 @dataclass
@@ -118,6 +128,7 @@ class InstagramFastExtractor:
         timeout_read: float = 45,
         metadata_timeout: tuple[float, float] | None = None,
         total_budget_seconds: float | None = None,
+        auth_pool: Optional[InstagramAuthPool] = None,
     ) -> None:
         self.proxy = proxy
         self.timeout = (timeout_connect, timeout_read)
@@ -131,6 +142,7 @@ class InstagramFastExtractor:
             ),
         )
         self.session = requests.Session()
+        self.auth_pool = auth_pool or load_configured_instagram_auth_pool()
         self.last_endpoint_timings: list[dict[str, Any]] = []
         self.last_budget_exhausted = False
         self._attempt_state: ContextVar[_FastAttemptState | None] = ContextVar(
@@ -168,7 +180,11 @@ class InstagramFastExtractor:
             raise InstagramFastExtractorError("fast_path_budget_exhausted")
 
     @contextmanager
-    def _timed_endpoint(self, name: str) -> Iterator[None]:
+    def _timed_endpoint(
+        self,
+        name: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Iterator[None]:
         self._ensure_budget()
         started_at = perf_counter()
         status = "failed"
@@ -179,13 +195,14 @@ class InstagramFastExtractor:
             status = "failed"
             raise
         finally:
-            self._current_attempt_state().endpoint_timings.append(
-                {
-                    "name": name,
-                    "status": status,
-                    "duration_ms": max(0, round((perf_counter() - started_at) * 1000)),
-                }
-            )
+            timing = {
+                "name": name,
+                "status": status,
+                "duration_ms": max(0, round((perf_counter() - started_at) * 1000)),
+            }
+            if auth_context:
+                timing["auth_kind"] = auth_context.kind
+            self._current_attempt_state().endpoint_timings.append(timing)
 
     def is_story_url(self, url: str) -> bool:
         """Return whether URL points to a story route."""
@@ -235,11 +252,34 @@ class InstagramFastExtractor:
         state = self._new_attempt_state()
         token = self._attempt_state.set(state)
         try:
+            auth_contexts = self.auth_pool.get_contexts_for_attempt()
+            success_path: Literal["fast", "fast_auth"] = "fast"
+            media_auth_context: Optional[InstagramAuthContext] = None
+
             if parsed.route == "story":
                 raise InstagramFastExtractorError("story_unsupported_in_fast_path")
 
             if parsed.route == "share":
-                resolved = self.resolve_share_url(parsed.canonical_url)
+                resolved, share_auth_context = self._resolve_share_url_with_fallback(
+                    parsed.canonical_url,
+                    auth_contexts,
+                )
+                if share_auth_context:
+                    success_path = "fast_auth"
+                usable_original_contexts = self.auth_pool.filter_usable_contexts(
+                    auth_contexts
+                )
+                if share_auth_context:
+                    auth_contexts = [
+                        share_auth_context,
+                        *[
+                            context
+                            for context in usable_original_contexts
+                            if context.context_id != share_auth_context.context_id
+                        ],
+                    ]
+                else:
+                    auth_contexts = usable_original_contexts
                 parsed = self.parse_url(resolved)
                 if parsed.route != "post" or not parsed.shortcode:
                     raise InstagramFastExtractorError("Share URL did not resolve to a post")
@@ -247,15 +287,30 @@ class InstagramFastExtractor:
             if not parsed.shortcode:
                 raise InstagramFastExtractorError("Missing post shortcode")
 
-            caption, media = self._extract_post(parsed.shortcode, parsed.canonical_url)
+            caption, media, extract_auth_context = self._extract_post_with_fallback(
+                parsed.shortcode,
+                parsed.canonical_url,
+                auth_contexts,
+            )
+            if extract_auth_context:
+                success_path = "fast_auth"
+                media_auth_context = extract_auth_context
             if not media:
                 raise InstagramFastExtractorError("No media items extracted")
 
-            downloaded = self._download_media_items(
-                shortcode=parsed.shortcode,
-                media_items=media,
-                output_dir=output_dir,
-            )
+            if media_auth_context:
+                downloaded = self._download_media_items(
+                    shortcode=parsed.shortcode,
+                    media_items=media,
+                    output_dir=output_dir,
+                    auth_context=media_auth_context,
+                )
+            else:
+                downloaded = self._download_media_items(
+                    shortcode=parsed.shortcode,
+                    media_items=media,
+                    output_dir=output_dir,
+                )
             if not downloaded:
                 raise InstagramFastExtractorError("No media files downloaded")
 
@@ -265,6 +320,7 @@ class InstagramFastExtractor:
                 media_items=downloaded,
                 endpoint_timings=list(state.endpoint_timings),
                 budget_exhausted=state.budget_exhausted,
+                success_path=success_path,
             )
         except InstagramFastExtractorError as error:
             raise self._attach_attempt_state(error, state)
@@ -272,14 +328,60 @@ class InstagramFastExtractor:
             self._publish_attempt_state(state)
             self._attempt_state.reset(token)
 
-    def resolve_share_url(self, share_url: str) -> str:
+    def _resolve_share_url_with_fallback(
+        self,
+        share_url: str,
+        auth_contexts: list[InstagramAuthContext],
+    ) -> tuple[str, Optional[InstagramAuthContext]]:
+        try:
+            with self._timed_endpoint("share_resolve"):
+                resolved = self.resolve_share_url(share_url)
+            self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
+            return resolved, None
+        except InstagramFastExtractorError as public_error:
+            self._ensure_budget()
+            last_error = public_error
+
+        for auth_context in auth_contexts:
+            if (
+                self._sent_auth_context(
+                    self._share_headers(auth_context), auth_context
+                )
+                is None
+            ):
+                continue
+            try:
+                with self._timed_endpoint("share_resolve", auth_context):
+                    resolved = self.resolve_share_url(
+                        share_url,
+                        auth_context=auth_context,
+                    )
+                self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
+                return resolved, auth_context
+            except _InstagramAuthContextUnavailable as error:
+                last_error = error
+                self._ensure_budget()
+                continue
+            except InstagramFastExtractorError as error:
+                last_error = error
+                self._ensure_budget()
+
+        raise last_error
+
+    def resolve_share_url(
+        self,
+        share_url: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> str:
         """Resolve /share URLs to canonical post/reel URLs."""
+        headers = self._share_headers(auth_context)
         response = self._request_raw(
             method="GET",
             url=share_url,
-            headers={"User-Agent": "curl/7.88.1"},
+            headers=headers,
             allow_redirects=True,
             timeout=self.metadata_timeout,
+            auth_context=self._sent_auth_context(headers, auth_context),
         )
         if response is None:
             raise InstagramFastExtractorError("Failed to resolve share URL")
@@ -299,31 +401,87 @@ class InstagramFastExtractor:
 
         raise InstagramFastExtractorError("Could not resolve share URL")
 
-    def _extract_post(self, shortcode: str, canonical_url: str) -> Tuple[str, List[ExtractedMedia]]:
+    def _extract_post_with_fallback(
+        self,
+        shortcode: str,
+        canonical_url: str,
+        auth_contexts: list[InstagramAuthContext],
+    ) -> tuple[str, list[ExtractedMedia], Optional[InstagramAuthContext]]:
+        try:
+            caption, media = self._extract_post(shortcode, canonical_url)
+            return caption, media, None
+        except InstagramFastExtractorError as public_error:
+            self._ensure_budget()
+            last_error = public_error
+
+        for auth_context in auth_contexts:
+            try:
+                caption, media = self._extract_post(
+                    shortcode,
+                    canonical_url,
+                    auth_context=auth_context,
+                )
+                return caption, media, auth_context
+            except InstagramFastExtractorError as error:
+                last_error = error
+                self._ensure_budget()
+
+        raise last_error
+
+    def _extract_post(
+        self,
+        shortcode: str,
+        canonical_url: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Tuple[str, List[ExtractedMedia]]:
         """Extract media for a post/reel/tv using endpoint fallback graph."""
-        with self._timed_endpoint("media_id"):
-            media_id = self._get_media_id(canonical_url)
+        with self._timed_endpoint("media_id", auth_context):
+            media_id = (
+                self._get_media_id(canonical_url, auth_context)
+                if auth_context
+                else self._get_media_id(canonical_url)
+            )
         self._ensure_budget()
 
         if media_id:
-            with self._timed_endpoint("mobile_info"):
-                mobile_item = self._request_mobile_media_info(media_id)
+            with self._timed_endpoint("mobile_info", auth_context):
+                mobile_item = (
+                    self._request_mobile_media_info(media_id, auth_context)
+                    if auth_context
+                    else self._request_mobile_media_info(media_id)
+                )
             self._ensure_budget()
             caption, items = self._parse_mobile_item(mobile_item)
             if items:
                 self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
                 return caption, items
 
-        with self._timed_endpoint("embed"):
-            embed_data = self._request_embed_data(shortcode)
+        if (
+            auth_context
+            and self._sent_auth_context(self._web_headers(auth_context), auth_context) is None
+        ):
+            raise InstagramFastExtractorError(
+                "Auth context cannot be sent to web endpoints"
+            )
+
+        with self._timed_endpoint("embed", auth_context):
+            embed_data = (
+                self._request_embed_data(shortcode, auth_context)
+                if auth_context
+                else self._request_embed_data(shortcode)
+            )
         self._ensure_budget()
         caption, items = self._parse_embed_or_graphql_data(embed_data)
         if items:
             self._current_attempt_state().endpoint_timings[-1]["status"] = "hit"
             return caption, items
 
-        with self._timed_endpoint("graphql"):
-            gql_data = self._request_graphql_data(shortcode)
+        with self._timed_endpoint("graphql", auth_context):
+            gql_data = (
+                self._request_graphql_data(shortcode, auth_context)
+                if auth_context
+                else self._request_graphql_data(shortcode)
+            )
         self._ensure_budget()
         caption, items = self._parse_embed_or_graphql_data(gql_data)
         if items:
@@ -332,19 +490,41 @@ class InstagramFastExtractor:
 
         raise InstagramFastExtractorError("Failed to extract media from all fast endpoints")
 
-    def _get_media_id(self, canonical_url: str) -> Optional[str]:
+    def _get_media_id(
+        self,
+        canonical_url: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Optional[str]:
         """Resolve media id with mobile oEmbed endpoint."""
         oembed_url = "https://i.instagram.com/api/v1/oembed/?url=" + quote(canonical_url, safe=":/")
-        data = self._request_json("GET", oembed_url, headers=self._mobile_headers(), timeout=self.metadata_timeout)
+        request_kwargs: dict[str, Any] = {"auth_context": auth_context} if auth_context else {}
+        data = self._request_json(
+            "GET",
+            oembed_url,
+            headers=self._mobile_headers(auth_context),
+            timeout=self.metadata_timeout,
+            **request_kwargs,
+        )
         media_id = data.get("media_id") if isinstance(data, dict) else None
         if isinstance(media_id, str) and media_id:
             return media_id.split("_")[0]
         return None
 
-    def _request_mobile_media_info(self, media_id: str) -> Dict[str, Any]:
+    def _request_mobile_media_info(
+        self,
+        media_id: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, Any]:
         """Request mobile API media info payload."""
         url = f"https://i.instagram.com/api/v1/media/{media_id}/info/"
-        data = self._request_json("GET", url, headers=self._mobile_headers(), timeout=self.metadata_timeout)
+        request_kwargs: dict[str, Any] = {"auth_context": auth_context} if auth_context else {}
+        data = self._request_json(
+            "GET",
+            url,
+            headers=self._mobile_headers(auth_context),
+            timeout=self.metadata_timeout,
+            **request_kwargs,
+        )
         if isinstance(data, dict):
             items = data.get("items")
             if isinstance(items, list) and items:
@@ -353,10 +533,25 @@ class InstagramFastExtractor:
                     return item
         return {}
 
-    def _request_embed_data(self, shortcode: str) -> Dict[str, Any]:
+    def _request_embed_data(
+        self,
+        shortcode: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, Any]:
         """Request embed page and parse context JSON."""
         embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-        response = self._request_raw("GET", embed_url, headers=self._web_headers(), timeout=self.metadata_timeout)
+        headers = self._web_headers(auth_context)
+        sent_auth_context = self._sent_auth_context(headers, auth_context)
+        request_kwargs: dict[str, Any] = (
+            {"auth_context": sent_auth_context} if sent_auth_context else {}
+        )
+        response = self._request_raw(
+            "GET",
+            embed_url,
+            headers=headers,
+            timeout=self.metadata_timeout,
+            **request_kwargs,
+        )
         if response is None or not response.text:
             return {}
 
@@ -365,10 +560,25 @@ class InstagramFastExtractor:
             return payload
         return {}
 
-    def _request_graphql_data(self, shortcode: str) -> Dict[str, Any]:
+    def _request_graphql_data(
+        self,
+        shortcode: str,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, Any]:
         """Fallback to web GraphQL request for media extraction."""
         post_url = f"https://www.instagram.com/p/{shortcode}/"
-        post_response = self._request_raw("GET", post_url, headers=self._web_headers(), timeout=self.metadata_timeout)
+        headers = self._web_headers(auth_context)
+        sent_auth_context = self._sent_auth_context(headers, auth_context)
+        request_kwargs: dict[str, Any] = (
+            {"auth_context": sent_auth_context} if sent_auth_context else {}
+        )
+        post_response = self._request_raw(
+            "GET",
+            post_url,
+            headers=headers,
+            timeout=self.metadata_timeout,
+            **request_kwargs,
+        )
         if post_response is None or not post_response.text:
             return {}
 
@@ -377,7 +587,6 @@ class InstagramFastExtractor:
         lsd_token = self._extract_html_value(html, [r'"LSD",\[\],\{"token":"(.*?)"', r'"token":"(.*?)","__bbox"'])
         csrf_token = self._extract_html_value(html, [r'"csrf_token":"(.*?)"'])
 
-        headers = self._web_headers()
         headers.update(
             {
                 "X-FB-Friendly-Name": "PolarisPostActionLoadPostQueryQuery",
@@ -411,6 +620,7 @@ class InstagramFastExtractor:
             headers=headers,
             data=payload,
             timeout=self.metadata_timeout,
+            **request_kwargs,
         )
         if isinstance(data, dict) and isinstance(data.get("data"), dict):
             return data["data"]
@@ -560,6 +770,7 @@ class InstagramFastExtractor:
         shortcode: str,
         media_items: List[ExtractedMedia],
         output_dir: Path,
+        auth_context: Optional[InstagramAuthContext] = None,
     ) -> List[DownloadedMedia]:
         """Download extracted media URLs to local files."""
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -569,14 +780,27 @@ class InstagramFastExtractor:
         max_workers = max(1, min(settings.IG_FAST_MAX_MEDIA_DOWNLOAD_WORKERS, len(media_items)))
         if max_workers == 1:
             return [
-                self._download_one_media_item(shortcode, index, item, output_dir)
+                self._download_one_media_item(
+                    shortcode,
+                    index,
+                    item,
+                    output_dir,
+                    auth_context=auth_context,
+                )
                 for index, item in enumerate(media_items, start=1)
             ]
 
         results: list[DownloadedMedia | None] = [None] * len(media_items)
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ig-fast-media") as executor:
             futures = {
-                executor.submit(self._download_one_media_item, shortcode, index, item, output_dir): index - 1
+                executor.submit(
+                    self._download_one_media_item,
+                    shortcode,
+                    index,
+                    item,
+                    output_dir,
+                    auth_context,
+                ): index - 1
                 for index, item in enumerate(media_items, start=1)
             }
             for future, result_index in futures.items():
@@ -590,6 +814,7 @@ class InstagramFastExtractor:
         index: int,
         item: ExtractedMedia,
         output_dir: Path,
+        auth_context: Optional[InstagramAuthContext] = None,
     ) -> DownloadedMedia:
         extension = self._guess_extension(item)
         out_path = output_dir / f"instagram_{shortcode}_{index}.{extension}"
@@ -597,8 +822,16 @@ class InstagramFastExtractor:
         response = self._request_raw(
             method="GET",
             url=item.url,
-            headers=self._download_headers(),
+            headers=self._download_headers(item.url, auth_context),
             stream=True,
+            auth_context=(
+                auth_context
+                if self._can_send_auth_to_media_url(item.url)
+                and auth_context
+                and auth_context.kind == "cookie"
+                else None
+            ),
+            classify_auth_failure=False,
         )
         if response is None:
             raise InstagramFastExtractorError(f"Failed to download media item {index}")
@@ -744,9 +977,12 @@ class InstagramFastExtractor:
             return "webp"
         return "jpg"
 
-    def _mobile_headers(self) -> Dict[str, str]:
+    def _mobile_headers(
+        self,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, str]:
         """Headers for mobile endpoint calls."""
-        return {
+        headers = {
             "User-Agent": self.MOBILE_USER_AGENT,
             "Accept-Language": "en-US",
             "X-IG-App-ID": "936619743392459",
@@ -755,25 +991,85 @@ class InstagramFastExtractor:
             "X-FB-Server-Cluster": "True",
             "Content-Length": "0",
         }
+        if auth_context:
+            if auth_context.kind == "cookie":
+                headers["Cookie"] = auth_context.value
+            if auth_context.kind == "bearer":
+                headers["Authorization"] = f"Bearer {auth_context.value}"
+        return headers
 
-    def _web_headers(self) -> Dict[str, str]:
+    def _web_headers(
+        self,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, str]:
         """Headers for web endpoint calls."""
-        return {
+        headers = {
             "User-Agent": self.WEB_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "DNT": "1",
             "Sec-GPC": "1",
         }
+        if auth_context and auth_context.kind == "cookie":
+            headers["Cookie"] = auth_context.value
+        return headers
 
-    def _download_headers(self) -> Dict[str, str]:
+    def _share_headers(
+        self,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, str]:
+        """Headers for share URL resolution."""
+        headers = {"User-Agent": "curl/7.88.1"}
+        if auth_context and auth_context.kind == "cookie":
+            headers["Cookie"] = auth_context.value
+        return headers
+
+    def _download_headers(
+        self,
+        media_url: str | None = None,
+        auth_context: Optional[InstagramAuthContext] = None,
+    ) -> Dict[str, str]:
         """Headers for media binary downloads."""
-        return {
+        headers = {
             "User-Agent": self.WEB_USER_AGENT,
             "Accept": "*/*",
             "Referer": "https://www.instagram.com/",
             "Origin": "https://www.instagram.com",
         }
+        if (
+            auth_context
+            and auth_context.kind == "cookie"
+            and media_url
+            and self._can_send_auth_to_media_url(media_url)
+        ):
+            headers.update(auth_context.as_headers())
+        return headers
+
+    @staticmethod
+    def _sent_auth_context(
+        headers: Dict[str, str],
+        auth_context: Optional[InstagramAuthContext],
+    ) -> Optional[InstagramAuthContext]:
+        """Return auth context only when its credential is present in headers."""
+        if not auth_context:
+            return None
+        if "Cookie" in headers or "Authorization" in headers:
+            return auth_context
+        return None
+
+    @staticmethod
+    def _can_send_auth_to_media_url(media_url: str) -> bool:
+        """Return whether Instagram auth headers may be sent to a media URL."""
+        parsed = urlparse(media_url)
+        if parsed.scheme != "https":
+            return False
+        host = (parsed.hostname or "").lower()
+        return (
+            host == "instagram.com"
+            or host.endswith(".instagram.com")
+            or host == "cdninstagram.com"
+            or host.endswith(".cdninstagram.com")
+        )
 
     def _request_json(
         self,
@@ -782,6 +1078,7 @@ class InstagramFastExtractor:
         headers: Dict[str, str],
         data: Optional[Dict[str, Any]] = None,
         timeout: tuple[float, float] | None = None,
+        auth_context: Optional[InstagramAuthContext] = None,
     ) -> Dict[str, Any]:
         """Run HTTP request and parse JSON with tolerant failure behavior."""
         response = self._request_raw(
@@ -790,6 +1087,7 @@ class InstagramFastExtractor:
             headers=headers,
             data=data,
             timeout=timeout,
+            auth_context=auth_context,
         )
         if response is None:
             return {}
@@ -811,14 +1109,17 @@ class InstagramFastExtractor:
         stream: bool = False,
         allow_redirects: bool = True,
         timeout: tuple[float, float] | None = None,
+        auth_context: Optional[InstagramAuthContext] = None,
+        classify_auth_failure: bool = True,
     ) -> Optional[requests.Response]:
         """Run HTTP request through shared session and proxy settings."""
         proxies = None
         if self.proxy:
             proxies = {"http": self.proxy, "https": self.proxy}
+        session = requests.Session() if auth_context else self.session
 
         try:
-            response = self.session.request(
+            response = session.request(
                 method=method,
                 url=url,
                 headers=headers,
@@ -828,11 +1129,74 @@ class InstagramFastExtractor:
                 allow_redirects=allow_redirects,
                 proxies=proxies,
             )
+            if classify_auth_failure:
+                auth_failure_reason = self._mark_auth_cooldown_from_response(
+                    response,
+                    auth_context,
+                    inspect_body=not stream,
+                )
+                if auth_failure_reason:
+                    raise _InstagramAuthContextUnavailable("auth_context_unusable")
             response.raise_for_status()
             return response
+        except _InstagramAuthContextUnavailable:
+            raise
         except Exception as exc:
-            logger.debug("Fast extractor request failed (%s %s): %s", method, url, exc)
+            parsed_url = urlparse(url)
+            safe_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+            logger.debug(
+                "Fast extractor request failed (%s %s): %s",
+                method,
+                safe_url,
+                exc.__class__.__name__,
+            )
             return None
+        finally:
+            if auth_context:
+                close = getattr(session, "close", None)
+                if callable(close):
+                    close()
+
+    def _mark_auth_cooldown_from_response(
+        self,
+        response: requests.Response,
+        auth_context: Optional[InstagramAuthContext],
+        *,
+        inspect_body: bool = True,
+    ) -> Optional[str]:
+        if not auth_context:
+            return None
+        reason = self._classify_auth_failure_response(
+            response,
+            inspect_body=inspect_body,
+        )
+        if reason:
+            self.auth_pool.mark_cooldown(auth_context, reason)
+        return reason
+
+    @staticmethod
+    def _classify_auth_failure_response(
+        response: requests.Response,
+        *,
+        inspect_body: bool = True,
+    ) -> Optional[str]:
+        status_code = getattr(response, "status_code", None)
+        if status_code in {401, 403, 429}:
+            return f"http_{status_code}"
+        if isinstance(status_code, int) and 200 <= status_code < 300:
+            return None
+
+        if not inspect_body:
+            return None
+
+        text = (getattr(response, "text", None) or "")[:4096].lower()
+        if "login_required" in text:
+            return "login_required"
+        if "challenge_required" in text or "checkpoint" in text:
+            return "challenge_required"
+        if "rate_limited" in text or "please wait a few minutes" in text:
+            return "rate_limited"
+        return None
 
     @staticmethod
     def random_token(length: int = 16) -> str:

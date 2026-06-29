@@ -5,8 +5,13 @@ import pytest
 
 from src.instagram_video_bot.services.instagram_fast_extractor import (
     DownloadedMedia,
+    ExtractedMedia,
     InstagramFastExtractor,
     InstagramFastExtractorError,
+)
+from src.instagram_video_bot.services.instagram_auth_pool import (
+    InstagramAuthContext,
+    InstagramAuthPool,
 )
 
 
@@ -14,6 +19,50 @@ class _Response:
     def __init__(self, url: str, text: str = ""):
         self.url = url
         self.text = text
+        self.status_code = 200
+        self.headers = {}
+
+    def raise_for_status(self):
+        return None
+
+
+class _StreamResponse:
+    def __init__(self, *, content_type: str = "video/mp4"):
+        self.url = "https://scontent.cdninstagram.com/video.mp4"
+        self.text = ""
+        self.status_code = 200
+        self.headers = {"content-type": content_type}
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        yield b"video"
+
+
+class _StatusResponse:
+    def __init__(self, status_code: int, text: str = ""):
+        self.url = "https://i.instagram.com/api/v1/media/123/info/"
+        self.text = text
+        self.status_code = status_code
+        self.headers = {}
+
+    def raise_for_status(self):
+        raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _StreamingStatusResponse:
+    def __init__(self, status_code: int):
+        self.url = "https://scontent.cdninstagram.com/video.mp4"
+        self.status_code = status_code
+        self.headers = {"content-type": "video/mp4"}
+
+    @property
+    def text(self):
+        raise AssertionError("streamed media response body should not be buffered")
+
+    def raise_for_status(self):
+        raise RuntimeError(f"HTTP {self.status_code}")
 
 
 def test_extract_post_via_oembed_and_mobile_info(monkeypatch, tmp_path):
@@ -244,3 +293,623 @@ def test_fast_extractor_attempt_metrics_are_isolated_across_threads(monkeypatch,
     for timings in errors.values():
         assert [item["name"] for item in timings] == ["media_id", "embed", "graphql"]
         assert len(timings) == 3
+
+
+def test_public_fast_success_does_not_use_auth_context(monkeypatch, tmp_path):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    seen_headers = []
+
+    def fake_request_json(method, url, headers, data=None, timeout=None):
+        seen_headers.append(dict(headers))
+        if "oembed" in url:
+            return {"media_id": "123_999"}
+        if "/media/123/info/" in url:
+            return {
+                "items": [
+                    {
+                        "caption": {"text": "public-caption"},
+                        "video_versions": [
+                            {"url": "https://cdn.example.com/v1.mp4", "width": 720, "height": 1280}
+                        ],
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert result.success_path == "fast"
+    assert all("Cookie" not in headers and "Authorization" not in headers for headers in seen_headers)
+
+
+def test_default_constructor_loads_configured_auth_pool(monkeypatch):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.load_configured_instagram_auth_pool",
+        lambda: InstagramAuthPool([context]),
+    )
+
+    extractor = InstagramFastExtractor()
+
+    assert extractor.auth_pool.get_contexts_for_attempt() == [context]
+
+
+def test_default_constructor_reuses_configured_auth_pool_across_instances(
+    monkeypatch, tmp_path
+):
+    auth_file = tmp_path / "instagram_auth.json"
+    auth_file.write_text(
+        """
+        {
+            "instagram": [
+                "mid=abc; sessionid=session-a",
+                "mid=def; sessionid=session-b",
+                "mid=ghi; sessionid=session-c"
+            ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_auth_pool.settings.IG_AUTH_COOKIES_FILE",
+        auth_file,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_auth_pool.settings.IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT",
+        2,
+    )
+
+    first = InstagramFastExtractor()
+    second = InstagramFastExtractor()
+
+    assert first.auth_pool is second.auth_pool
+    assert [context.context_id for context in first.auth_pool.get_contexts_for_attempt()] == [
+        "cookie:0",
+        "cookie:1",
+    ]
+    assert [context.context_id for context in second.auth_pool.get_contexts_for_attempt()] == [
+        "cookie:2",
+        "cookie:0",
+    ]
+
+
+def test_cookie_auth_retry_succeeds_after_public_sources_miss(monkeypatch, tmp_path):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    seen_headers = []
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        seen_headers.append(dict(headers))
+        if headers.get("Cookie") != "mid=abc; sessionid=secret":
+            return {}
+        if "oembed" in url:
+            return {"media_id": "123_999"}
+        if "/media/123/info/" in url:
+            return {
+                "items": [
+                    {
+                        "caption": {"text": "auth-caption"},
+                        "video_versions": [
+                            {"url": "https://cdninstagram.example/video.mp4", "width": 720, "height": 1280}
+                        ],
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    assert any(headers.get("Cookie") == "mid=abc; sessionid=secret" for headers in seen_headers)
+    assert any(item.get("auth_kind") == "cookie" for item in result.endpoint_timings)
+    assert "secret" not in str(result.endpoint_timings)
+
+
+def test_auth_failure_moves_to_next_context_in_same_attempt(monkeypatch, tmp_path):
+    bad = InstagramAuthContext("cookie:0", "cookie", "mid=bad; sessionid=secret-bad")
+    good = InstagramAuthContext("cookie:1", "cookie", "mid=good; sessionid=secret-good")
+    pool = InstagramAuthPool([bad, good], max_contexts_per_attempt=2)
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    seen_cookies = []
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        seen_cookies.append(cookie)
+        if cookie == "mid=bad; sessionid=secret-bad":
+            extractor._mark_auth_cooldown_from_response(
+                _StatusResponse(403, '{"message":"challenge_required"}'),
+                auth_context,
+            )
+            raise InstagramFastExtractorError("auth_context_unusable")
+        if cookie == "mid=good; sessionid=secret-good":
+            if "oembed" in url:
+                return {"media_id": "123_999"}
+            if "/media/123/info/" in url:
+                return {
+                    "items": [
+                        {
+                            "caption": {"text": "auth-caption"},
+                            "video_versions": [
+                                {"url": "https://cdn.example.com/video.mp4", "width": 720, "height": 1280}
+                            ],
+                        }
+                    ]
+                }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    assert seen_cookies.count("mid=bad; sessionid=secret-bad") == 1
+    assert "mid=good; sessionid=secret-good" in seen_cookies
+
+
+def test_share_resolution_can_retry_with_auth_context(monkeypatch, tmp_path):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    seen_headers = []
+
+    def fake_request_raw(**kwargs):
+        headers = dict(kwargs["headers"])
+        seen_headers.append(headers)
+        if headers.get("Cookie") == "mid=abc; sessionid=secret":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(
+        extractor,
+        "_extract_post",
+        lambda shortcode, canonical_url: (
+            "caption",
+            [ExtractedMedia(url="https://cdn.example.com/video.mp4", media_type="video")],
+        ),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    assert any(headers.get("Cookie") == "mid=abc; sessionid=secret" for headers in seen_headers)
+    assert any(item["name"] == "share_resolve" and item.get("auth_kind") == "cookie" for item in result.endpoint_timings)
+
+
+def test_bearer_context_is_not_used_for_credentialless_share_retry(monkeypatch, tmp_path):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    seen_share_headers = []
+
+    def fake_request_raw(*args, **kwargs):
+        url = kwargs.get("url") or args[1]
+        headers = dict(kwargs["headers"])
+        if "/share/" not in url:
+            return None
+        seen_share_headers.append(headers)
+        if len(seen_share_headers) == 1:
+            return None
+        return _Response("https://www.instagram.com/reel/abc123/")
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert len(seen_share_headers) == 1
+    assert "Authorization" not in seen_share_headers[0]
+    assert "Cookie" not in seen_share_headers[0]
+
+
+def test_share_resolution_cooldown_context_is_not_reused_for_post_extraction(monkeypatch, tmp_path):
+    bad = InstagramAuthContext("cookie:0", "cookie", "mid=bad; sessionid=secret-bad")
+    good = InstagramAuthContext("cookie:1", "cookie", "mid=good; sessionid=secret-good")
+    pool = InstagramAuthPool([bad, good], max_contexts_per_attempt=2)
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    share_cookies = []
+    post_cookies = []
+
+    def fake_request_raw(**kwargs):
+        cookie = kwargs["headers"].get("Cookie")
+        share_cookies.append(cookie)
+        if cookie == "mid=bad; sessionid=secret-bad":
+            extractor._mark_auth_cooldown_from_response(
+                _StatusResponse(403, '{"message":"challenge_required"}'),
+                kwargs.get("auth_context"),
+            )
+            raise InstagramFastExtractorError("auth_context_unusable")
+        if cookie == "mid=good; sessionid=secret-good":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        post_cookies.append(cookie)
+        if cookie == "mid=bad; sessionid=secret-bad":
+            raise AssertionError("cooled share context reused for post extraction")
+        if cookie == "mid=good; sessionid=secret-good":
+            if "oembed" in url:
+                return {"media_id": "123_999"}
+            if "/media/123/info/" in url:
+                return {
+                    "items": [
+                        {
+                            "caption": {"text": "auth-caption"},
+                            "video_versions": [
+                                {"url": "https://cdn.example.com/video.mp4", "width": 720, "height": 1280}
+                            ],
+                        }
+                    ]
+                }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    assert "mid=bad; sessionid=secret-bad" in share_cookies
+    assert "mid=bad; sessionid=secret-bad" not in post_cookies
+    assert "mid=good; sessionid=secret-good" in post_cookies
+
+
+def test_share_resolution_reuses_successful_auth_context_for_post_extraction(monkeypatch, tmp_path):
+    first = InstagramAuthContext("cookie:0", "cookie", "mid=first; sessionid=secret-first")
+    share_good = InstagramAuthContext("cookie:1", "cookie", "mid=share; sessionid=secret-share")
+    omitted_by_refresh = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
+    pool = InstagramAuthPool(
+        [first, share_good, omitted_by_refresh],
+        max_contexts_per_attempt=2,
+    )
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    out_file = tmp_path / "video.mp4"
+    out_file.write_bytes(b"video")
+    post_cookies = []
+
+    def fake_request_raw(**kwargs):
+        cookie = kwargs["headers"].get("Cookie")
+        if cookie == "mid=share; sessionid=secret-share":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        post_cookies.append(cookie)
+        if cookie != "mid=share; sessionid=secret-share":
+            return {}
+        if "oembed" in url:
+            return {"media_id": "123_999"}
+        if "/media/123/info/" in url:
+            return {
+                "items": [
+                    {
+                        "caption": {"text": "auth-caption"},
+                        "video_versions": [
+                            {"url": "https://cdn.example.com/video.mp4", "width": 720, "height": 1280}
+                        ],
+                    }
+                ]
+            }
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        extractor,
+        "_download_media_items",
+        lambda shortcode, media_items, output_dir, auth_context=None: [
+            DownloadedMedia(file_path=out_file, media_type="video")
+        ],
+    )
+
+    result = extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert result.success_path == "fast_auth"
+    auth_post_cookies = [cookie for cookie in post_cookies if cookie]
+    assert auth_post_cookies[0] == "mid=share; sessionid=secret-share"
+
+
+def test_share_resolution_reuses_original_context_snapshot_for_post(monkeypatch, tmp_path):
+    first = InstagramAuthContext("cookie:0", "cookie", "mid=first; sessionid=secret-first")
+    share_good = InstagramAuthContext("cookie:1", "cookie", "mid=share; sessionid=secret-share")
+    outside_attempt = InstagramAuthContext("cookie:2", "cookie", "mid=other; sessionid=secret-other")
+    pool = InstagramAuthPool(
+        [first, share_good, outside_attempt],
+        max_contexts_per_attempt=2,
+    )
+    extractor = InstagramFastExtractor(auth_pool=pool)
+    post_cookies = []
+
+    def fake_request_raw(**kwargs):
+        cookie = kwargs["headers"].get("Cookie")
+        if cookie == "mid=share; sessionid=secret-share":
+            return _Response("https://www.instagram.com/reel/abc123/")
+        return None
+
+    def fake_request_json(method, url, headers, data=None, timeout=None, auth_context=None):
+        cookie = headers.get("Cookie")
+        if cookie:
+            post_cookies.append(cookie)
+        return {}
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+    monkeypatch.setattr(extractor, "_request_json", fake_request_json)
+    monkeypatch.setattr(extractor, "_request_embed_data", lambda *args, **kwargs: {})
+    monkeypatch.setattr(extractor, "_request_graphql_data", lambda *args, **kwargs: {})
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/share/reel/share123/", tmp_path)
+
+    assert post_cookies == [
+        "mid=share; sessionid=secret-share",
+        "mid=first; sessionid=secret-first",
+    ]
+
+
+def test_bearer_auth_retry_skips_web_fallbacks_when_mobile_misses(monkeypatch, tmp_path):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor(auth_pool=InstagramAuthPool([context]))
+    calls = []
+
+    def fake_get_media_id(canonical_url, auth_context=None):
+        calls.append(("media_id", auth_context.context_id if auth_context else None))
+        return "123" if auth_context else None
+
+    def fake_request_mobile_media_info(media_id, auth_context=None):
+        calls.append(("mobile_info", auth_context.context_id if auth_context else None))
+        return {}
+
+    def fake_request_embed_data(shortcode, auth_context=None):
+        calls.append(("embed", auth_context.context_id if auth_context else None))
+        return {}
+
+    def fake_request_graphql_data(shortcode, auth_context=None):
+        calls.append(("graphql", auth_context.context_id if auth_context else None))
+        return {}
+
+    monkeypatch.setattr(extractor, "_get_media_id", fake_get_media_id)
+    monkeypatch.setattr(extractor, "_request_mobile_media_info", fake_request_mobile_media_info)
+    monkeypatch.setattr(extractor, "_request_embed_data", fake_request_embed_data)
+    monkeypatch.setattr(extractor, "_request_graphql_data", fake_request_graphql_data)
+
+    with pytest.raises(InstagramFastExtractorError):
+        extractor.extract_and_download("https://www.instagram.com/reel/abc123/", tmp_path)
+
+    assert ("mobile_info", "bearer:0") in calls
+    assert ("embed", "bearer:0") not in calls
+    assert ("graphql", "bearer:0") not in calls
+
+
+def test_auth_request_status_marks_only_that_context_on_cooldown(monkeypatch):
+    now = [100.0]
+    cookie = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    bearer = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    pool = InstagramAuthPool([cookie, bearer], cooldown_seconds=30, now_fn=lambda: now[0])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _Session:
+        def request(self, **kwargs):
+            return _StatusResponse(403, '{"message":"challenge_required"}')
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: _Session(),
+    )
+
+    with pytest.raises(InstagramFastExtractorError, match="auth_context_unusable"):
+        extractor._request_raw(
+            method="GET",
+            url="https://i.instagram.com/api/v1/media/123/info/",
+            headers=extractor._mobile_headers(cookie),
+            auth_context=cookie,
+        )
+
+    assert pool.get_contexts_for_attempt() == [bearer]
+
+
+def test_media_download_auth_headers_are_limited_to_allowlisted_https_hosts(monkeypatch, tmp_path):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    extractor = InstagramFastExtractor()
+    captured = []
+
+    def fake_request_raw(**kwargs):
+        captured.append((kwargs["url"], dict(kwargs["headers"])))
+        return _StreamResponse()
+
+    monkeypatch.setattr(extractor, "_request_raw", fake_request_raw)
+
+    extractor._download_one_media_item(
+        "abc123",
+        1,
+        ExtractedMedia(
+            url="https://scontent.cdninstagram.com/video.mp4",
+            media_type="video",
+        ),
+        tmp_path,
+        auth_context=context,
+    )
+    extractor._download_one_media_item(
+        "abc123",
+        2,
+        ExtractedMedia(
+            url="https://evil.example.com/video.mp4",
+            media_type="video",
+        ),
+        tmp_path,
+        auth_context=context,
+    )
+
+    assert captured[0][1].get("Cookie") == "mid=abc; sessionid=secret"
+    assert "Cookie" not in captured[1][1]
+
+
+def test_bearer_context_is_not_sent_to_media_downloads():
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor()
+
+    headers = extractor._download_headers(
+        "https://scontent.cdninstagram.com/video.mp4",
+        context,
+    )
+
+    assert "Authorization" not in headers
+
+
+def test_media_stream_failures_do_not_buffer_body_or_cooldown_context(monkeypatch):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    pool = InstagramAuthPool([context])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _Session:
+        def request(self, **kwargs):
+            return _StreamingStatusResponse(403)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: _Session(),
+    )
+
+    response = extractor._request_raw(
+        method="GET",
+        url="https://scontent.cdninstagram.com/video.mp4",
+        headers=extractor._download_headers(
+            "https://scontent.cdninstagram.com/video.mp4",
+            context,
+        ),
+        stream=True,
+        auth_context=context,
+        classify_auth_failure=False,
+    )
+
+    assert response is None
+    assert pool.get_contexts_for_attempt() == [context]
+
+
+def test_bearer_context_adds_authorization_only_to_mobile_headers():
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    extractor = InstagramFastExtractor()
+
+    mobile_headers = extractor._mobile_headers(context)
+    web_headers = extractor._web_headers(context)
+
+    assert mobile_headers["Authorization"] == "Bearer IGT:2:token"
+    assert "Authorization" not in web_headers
+
+
+def test_bearer_context_is_not_cooled_down_when_web_headers_send_no_credentials(monkeypatch):
+    context = InstagramAuthContext("bearer:0", "bearer", "IGT:2:token")
+    pool = InstagramAuthPool([context])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _Session:
+        def request(self, **kwargs):
+            assert "Authorization" not in kwargs["headers"]
+            assert "Cookie" not in kwargs["headers"]
+            return _StatusResponse(403, '{"message":"login_required"}')
+
+    extractor.session = _Session()
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("credential-free web request should use the shared session")
+        ),
+    )
+
+    assert extractor._request_embed_data("abc123", context) == {}
+    assert pool.get_contexts_for_attempt() == [context]
+
+
+def test_successful_auth_response_body_keyword_does_not_cooldown_context(monkeypatch):
+    context = InstagramAuthContext("cookie:0", "cookie", "mid=abc; sessionid=secret")
+    pool = InstagramAuthPool([context])
+    extractor = InstagramFastExtractor(auth_pool=pool)
+
+    class _SuccessfulResponse:
+        status_code = 200
+        text = '{"caption":{"text":"literal login_required text from post"}}'
+        headers = {}
+        url = "https://i.instagram.com/api/v1/media/123/info/"
+
+        def raise_for_status(self):
+            return None
+
+    class _Session:
+        def request(self, **kwargs):
+            return _SuccessfulResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_fast_extractor.requests.Session",
+        lambda: _Session(),
+    )
+
+    response = extractor._request_raw(
+        method="GET",
+        url="https://i.instagram.com/api/v1/media/123/info/",
+        headers=extractor._mobile_headers(context),
+        auth_context=context,
+    )
+
+    assert response is not None
+    assert response.status_code == 200
+    assert pool.get_contexts_for_attempt() == [context]

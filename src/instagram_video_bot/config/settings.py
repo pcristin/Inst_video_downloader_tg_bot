@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     IG_FAST_RANDOM_DELAY_MIN_SECONDS: float = 0.0
     IG_FAST_RANDOM_DELAY_MAX_SECONDS: float = 0.0
     IG_FAST_MAX_MEDIA_DOWNLOAD_WORKERS: int = 4
+    IG_AUTH_COOKIES_FILE: Optional[Path] = None
+    IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT: int = 2
+    IG_AUTH_CONTEXT_COOLDOWN_SECONDS: float = 900.0
     
     # Proxy settings (single proxy for backward compatibility)
     PROXY_HOST: Optional[str] = None
