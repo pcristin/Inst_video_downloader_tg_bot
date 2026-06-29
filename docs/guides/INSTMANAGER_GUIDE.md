@@ -13,30 +13,31 @@ This guide shows how to import these accounts and use them with the bot.
 
 Your account format:
 ```
-ms.stevenbaker682510:tGeltLAc02KDNxI|Instagram 345.0.0.48.95 Android (31/12; 120dpi; 1080x2162; Samsung; SM-A510F; a5xelte; qcom; en_US; 634108168)|android-1c9f3387a1a2a978;160b1ca9-305b-485b-3ef2-cd21165ec318;487714a2-9663-4f9a-3d8b-2bf61007f950;7cc09762-2be7-446a-aead-7904d265f530|Authorization=Bearer IGT:2:eyJkc191c2VyX2lkIjoiNzE2NzYzMTYwMDAiLCJzZXNzaW9uaWQiOiI3MTY3NjMxNjAwMCUzQVUxTG1hUm53RElZYlB2JTNBMTAlM0FBWWM1eUtKRldpejlyUVp4T2QxNEJlQUxiTmZTMHprdFA5bm1VemZoVXcifQ==;IG-U-DS-USER-ID=71676316000;IG-INTENDED-USER-ID=71676316000;IG-U-RUR=RVA,71676316000,1781795419:01fe0e0bb24e5687f0db3f88fe5eca64bc63eb94d828e820487cceda0574e2b85ce3c258;X-MID=aCS6IAABAAFjvtUwad4WoZAEUUhl;X-IG-WWW-Claim=hmac.AR3gO2TnlQGiln15xgihbMcch3sOvuNYuIFo-ur_1ssQ8Ub1;||xonoxtsm@wildbmail.com:neoszgkeA!9944
+example_user:example_password|Instagram 345.0.0.48.95 Android (...)|android-device-id;uuid-a;uuid-b|Authorization=Bearer <instagram_bearer_token>;IG-U-DS-USER-ID=<id>;X-MID=<mid>;||<email_address>:<email_password>
 ```
 
 Parts:
-1. **Login**: `ms.stevenbaker682510:tGeltLAc02KDNxI`
+1. **Login**: `example_user:example_password`
 2. **Device Info**: `Instagram 345.0.0.48.95 Android...` (we'll ignore this)
-3. **Device IDs**: `android-1c9f3387a1a2a978;160b1ca9...` (we'll ignore this)
+3. **Device IDs**: `android-device-id;uuid-a...` (we'll ignore this)
 4. **Cookies**: `Authorization=Bearer IGT:...|IG-U-DS-USER-ID=...|...`
-5. **Email**: `xonoxtsm@wildbmail.com:neoszgkeA!9944`
+5. **Email**: `<email_address>:<email_password>`
 
 ## Step-by-Step Setup
 
 ### 1. Create Accounts File
 
-Create `instmanager_accounts.txt` with your 10 accounts:
+Create `secrets/instmanager_accounts.txt` with your 10 accounts:
 
 ```bash
-# Create the file
-touch instmanager_accounts.txt
+# Create the file under the ignored secrets directory
+mkdir -p secrets
+touch secrets/instmanager_accounts.txt
 ```
 
 Add your accounts (one per line):
 ```
-ms.stevenbaker682510:tGeltLAc02KDNxI||Authorization=Bearer IGT:2:eyJkc191c2VyX2lkIjoiNzE2NzYzMTYwMDAiLCJzZXNzaW9uaWQiOiI3MTY3NjMxNjAwMCUzQVUxTG1hUm53RElZYlB2JTNBMTAlM0FBWWM1eUtKRldpejlyUVp4T2QxNEJlQUxiTmZTMHprdFA5bm1VemZoVXcifQ==;IG-U-DS-USER-ID=71676316000;IG-INTENDED-USER-ID=71676316000;IG-U-RUR=RVA,71676316000,1781795419:01fe0e0bb24e5687f0db3f88fe5eca64bc63eb94d828e820487cceda0574e2b85ce3c258;X-MID=aCS6IAABAAFjvtUwad4WoZAEUUhl;X-IG-WWW-Claim=hmac.AR3gO2TnlQGiln15xgihbMcch3sOvuNYuIFo-ur_1ssQ8Ub1||xonoxtsm@wildbmail.com:neoszgkeA!9944
+example_user:example_password||Authorization=Bearer <instagram_bearer_token>;IG-U-DS-USER-ID=<id>;X-MID=<mid>||<email_address>:<email_password>
 # Add your other 9 accounts here...
 ```
 
@@ -51,7 +52,7 @@ The repo's active workflow is session-based. Instead of importing cookie files, 
 
 Create `accounts.txt` with one account per line:
 ```
-ms.stevenbaker682510|tGeltLAc02KDNxI|your_totp_secret
+example_user|example_password|your_totp_secret
 username2|password2|your_totp_secret
 username3|password3|your_totp_secret
 ```
@@ -106,12 +107,12 @@ Expected status output:
 Total accounts: 10
 Available: 10
 Banned: 0
-Current: ms.stevenbaker682510
+Current: example_user
 
 +---------------------+--------+----------------------+-------------+
 | Username            | Status | Last Used            | Has Cookies |
 +=====================+========+======================+=============+
-| ms.stevenbaker682510| ✅     | Never                | Yes         |
+| example_user        | ✅     | Never                | Yes         |
 | username2           | ✅     | Never                | Yes         |
 +---------------------+--------+----------------------+-------------+
 ```
@@ -124,7 +125,7 @@ If you get authentication errors during setup or rotation:
 
 1. **Check source account format**:
    ```bash
-   sed -n '1,5p' instmanager_accounts.txt
+   sed -n '1,5p' secrets/instmanager_accounts.txt
    ```
 
 2. **Validate the active account state**:
@@ -140,7 +141,7 @@ If you get authentication errors during setup or rotation:
 
 ### Import Errors
 
-1. **Format issues**: Make sure your `instmanager_accounts.txt` uses exactly:
+1. **Format issues**: Make sure your `secrets/instmanager_accounts.txt` uses exactly:
    ```
    login:password||cookies||email:emailpassword
    ```
@@ -151,7 +152,7 @@ If you get authentication errors during setup or rotation:
    - `X-MID=...`
 
 3. **Retry after fixing one source line**:
-   - Update the affected entry in `instmanager_accounts.txt`.
+   - Update the affected entry in `secrets/instmanager_accounts.txt`.
    - Regenerate `accounts.txt` from that corrected source entry.
    - Re-run `uv run python manage_accounts.py setup`.
 
@@ -177,7 +178,7 @@ make accounts-status
 1. **Daily limits**: 50-100 downloads per account
 2. **Rotation**: Let the bot auto-rotate every 50 downloads
 3. **Monitoring**: Check `make accounts-status` daily
-4. **Backup**: Keep your original `instmanager_accounts.txt` file
+4. **Backup**: Keep your original `secrets/instmanager_accounts.txt` file outside git
 
 ## Source Format Details
 

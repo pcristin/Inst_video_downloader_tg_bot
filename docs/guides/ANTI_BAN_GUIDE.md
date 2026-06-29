@@ -41,6 +41,19 @@ uv run python manage_accounts.py status
 
 Every managed account needs a password and a non-empty `totp_secret`. Empty third fields stay unavailable and will not be used for rotation.
 
+### Authenticated Fast Fallback
+
+The bot can optionally try a lightweight Instagram cookie/token context after public fast extraction misses and before full account fallback. Use a read-only JSON file mounted outside the repo:
+
+```json
+{
+  "instagram": ["mid=<mid>; csrftoken=<csrf>; sessionid=<session>"],
+  "instagram_bearer": ["token=<instagram_bearer_token>"]
+}
+```
+
+Set `IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json` and mount the file read-only, for example to `/run/secrets/instagram_auth.json:ro`. The file is loaded at startup, so rotate it by replacing the host file and restarting the container. Do not commit cookie or token files.
+
 ### 3. Initialize Accounts Properly
 
 ```bash

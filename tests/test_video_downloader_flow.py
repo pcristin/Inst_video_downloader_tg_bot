@@ -142,15 +142,17 @@ class _AuthChallengeResultClient:
 
 
 class _FastExtractorSuccess:
-    def __init__(self, path: Path, media_type: str = "video"):
+    def __init__(self, path: Path, media_type: str = "video", success_path: str = "fast"):
         self._path = path
         self._media_type = media_type
+        self._success_path = success_path
 
     def extract_and_download(self, _url: str, _output_dir: Path) -> FastExtractorDownloadResult:
         return FastExtractorDownloadResult(
             shortcode="abc",
             caption="fast-caption",
             media_items=[DownloadedMedia(file_path=self._path, media_type=self._media_type)],
+            success_path=self._success_path,
         )
 
 
@@ -1459,6 +1461,28 @@ async def test_instagram_fast_success_records_provider_metrics(monkeypatch, tmp_
     assert metrics.instagram_success_path == "fast"
     assert metrics.instagram_fallback_attempted is False
     assert metrics.instagram_fast_duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_instagram_fast_auth_success_records_provider_metrics(monkeypatch, tmp_path):
+    downloader = VideoDownloader()
+    downloader.min_delay_between_downloads = 0
+    downloader.random_delay_range = (0, 0)
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", True)
+    manager = _LeaseManager([])
+    monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: manager)
+    expected_path = tmp_path / "fast-auth-metrics.mp4"
+    expected_path.write_bytes(b"video")
+    downloader.fast_extractor = _FastExtractorSuccess(expected_path, success_path="fast_auth")
+
+    await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path)
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_fast_status == "succeeded"
+    assert metrics.instagram_success_path == "fast_auth"
+    assert metrics.instagram_fallback_attempted is False
+    assert metrics.instagram_account_attempts == 0
+    assert manager.released == []
 
 
 @pytest.mark.asyncio

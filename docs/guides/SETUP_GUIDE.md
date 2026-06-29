@@ -17,11 +17,11 @@ Create a `.env` file with these settings:
 BOT_TOKEN=your_telegram_bot_token_here
 
 # Instagram Credentials (from your purchased account)
-IG_USERNAME=denise.toledo1166
-IG_PASSWORD=a558hqpf2ytcz3938
+IG_USERNAME=your_instagram_username
+IG_PASSWORD=your_instagram_password
 
 # Two-Factor Authentication
-TOTP_SECRET=6C4O BC44 5WVU FE64 CN4K U3VG QTDT B3JY
+TOTP_SECRET=your_totp_secret
 
 # CRITICAL: USA Proxy Settings
 PROXY_HOST=your.usa.proxy.com
@@ -32,6 +32,16 @@ PROXY_PASSWORD=proxypass
 # Optional Settings
 LOG_LEVEL=INFO
 ```
+
+Optional authenticated fast fallback can use a read-only Instagram cookie/token JSON file before the full account fallback:
+
+```bash
+IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
+IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT=2
+IG_AUTH_CONTEXT_COOLDOWN_SECONDS=900
+```
+
+Mount that file read-only into the container and restart the bot after rotating or removing it. Do not commit the file.
 
 ### 2. Install Dependencies and Configure Accounts
 
@@ -121,7 +131,7 @@ Check this list:
 
 Test proxy:
 ```bash
-curl -x http://user:pass@proxy:port https://api.ipify.org
+curl -x "http://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_HOST}:${PROXY_PORT}" https://api.ipify.org
 ```
 
 Should return USA IP address.
