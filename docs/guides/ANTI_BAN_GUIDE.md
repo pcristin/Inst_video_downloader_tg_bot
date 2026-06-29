@@ -52,7 +52,7 @@ The bot can optionally try a lightweight Instagram cookie/token context after pu
 }
 ```
 
-Set `IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json` and mount the file read-only, for example to `/run/secrets/instagram_auth.json:ro`. The file is loaded at startup, so rotate it by replacing the host file and restarting the container. Do not commit cookie or token files.
+Set `IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json` and project the host file as a read-only Compose secret owned by the container bot user. The file is loaded at startup, so rotate it by replacing the host file and restarting the container. Do not commit cookie or token files.
 
 To gather cookie contexts from the configured `accounts.txt` workflow without copying browser cookies by hand, run:
 
