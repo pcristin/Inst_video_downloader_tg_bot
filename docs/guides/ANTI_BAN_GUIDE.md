@@ -54,6 +54,15 @@ The bot can optionally try a lightweight Instagram cookie/token context after pu
 
 Set `IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json` and mount the file read-only, for example to `/run/secrets/instagram_auth.json:ro`. The file is loaded at startup, so rotate it by replacing the host file and restarting the container. Do not commit cookie or token files.
 
+To gather cookie contexts from the configured `accounts.txt` workflow without copying browser cookies by hand, run:
+
+```bash
+make accounts-export-auth
+docker compose up -d instagram-video-bot
+```
+
+The export command logs in or reuses instagrapi sessions for configured accounts, writes only the Cobalt-compatible `instagram` cookie array to `secrets/instagram_auth.json`, preserves any existing `instagram_bearer` entries, and avoids printing cookie values.
+
 ### 3. Initialize Accounts Properly
 
 ```bash

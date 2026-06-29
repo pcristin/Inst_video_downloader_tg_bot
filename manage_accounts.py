@@ -9,10 +9,14 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+from instagram_video_bot.utils.instagram_auth_exporter import export_instagram_auth_file
 from instagram_video_bot.utils.account_manager import get_account_manager
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
 
 def status_command():
     """Show account status."""
@@ -20,8 +24,9 @@ def status_command():
     if not manager:
         logger.error("No accounts found. Make sure accounts.txt exists.")
         return
-    
+
     print(manager.get_detailed_status())
+
 
 def setup_command():
     """Setup all accounts (login and create sessions)."""
@@ -29,10 +34,10 @@ def setup_command():
     if not manager:
         logger.error("No accounts found. Make sure accounts.txt exists.")
         return
-    
+
     available = manager.get_available_accounts()
     logger.info(f"Attempting to setup {len(available)} available accounts...")
-    
+
     success_count = 0
     for account in available:
         logger.info(f"Setting up account: {account.username}")
@@ -41,10 +46,11 @@ def setup_command():
             logger.info(f"✅ Successfully setup: {account.username}")
         else:
             logger.error(f"❌ Failed to setup: {account.username}")
-    
+
     logger.info(f"Setup complete: {success_count}/{len(available)} accounts successful")
     print("\nFinal status:")
     print(manager.get_detailed_status())
+
 
 def rotate_command():
     """Rotate to next account."""
@@ -52,7 +58,7 @@ def rotate_command():
     if not manager:
         logger.error("No accounts found. Make sure accounts.txt exists.")
         return
-    
+
     logger.info("Rotating to next available account...")
     if manager.rotate_account():
         if manager.current_account:
@@ -61,9 +67,10 @@ def rotate_command():
             logger.warning("⚠️ Rotation successful but no current account set")
     else:
         logger.error("❌ Failed to rotate to any account")
-    
+
     print("\nCurrent status:")
     print(manager.get_detailed_status())
+
 
 def reset_command():
     """Reset banned accounts."""
@@ -71,24 +78,39 @@ def reset_command():
     if not manager:
         logger.error("No accounts found. Make sure accounts.txt exists.")
         return
-    
+
     logger.info("Resetting all banned accounts...")
     manager.reset_banned_accounts()
     logger.info("✅ All banned accounts have been reset")
-    
+
     print("\nStatus after reset:")
     print(manager.get_detailed_status())
+
 
 def reset_old_command():
     """Reset accounts banned for more than specified hours."""
     parser = argparse.ArgumentParser(description="Reset old banned accounts")
-    parser.add_argument("--hours", type=int, default=24, help="Reset accounts banned for more than this many hours (default: 24)")
-    
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        help="Reset accounts banned for more than this many hours (default: 24)",
+    )
+
     # Parse just the --hours argument from remaining argv
-    remaining_args = [arg for arg in sys.argv[2:] if arg.startswith('--hours') or (sys.argv[sys.argv.index(arg)-1] == '--hours' if '--hours' in sys.argv else False)]
-    if '--hours' in sys.argv:
+    remaining_args = [
+        arg
+        for arg in sys.argv[2:]
+        if arg.startswith("--hours")
+        or (
+            sys.argv[sys.argv.index(arg) - 1] == "--hours"
+            if "--hours" in sys.argv
+            else False
+        )
+    ]
+    if "--hours" in sys.argv:
         try:
-            hours_index = sys.argv.index('--hours')
+            hours_index = sys.argv.index("--hours")
             if hours_index + 1 < len(sys.argv):
                 hours = int(sys.argv[hours_index + 1])
             else:
@@ -97,30 +119,73 @@ def reset_old_command():
             hours = 24
     else:
         hours = 24
-    
+
     manager = get_account_manager()
     if not manager:
         logger.error("No accounts found. Make sure accounts.txt exists.")
         return
-    
+
     logger.info(f"Resetting accounts banned for more than {hours} hours...")
     manager.reset_old_banned_accounts(hours=hours)
-    
+
     print("\nStatus after reset:")
     print(manager.get_detailed_status())
+
+
+def export_auth_command(
+    *,
+    output_path: Path = Path("secrets/instagram_auth.json"),
+    available_only: bool = False,
+):
+    """Export logged-in account sessions as fast auth fallback cookies."""
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
+
+    accounts = manager.get_available_accounts() if available_only else manager.accounts
+    summary = export_instagram_auth_file(accounts, output_path)
+    logger.info(
+        "Auth export complete: %s/%s exported, %s failed, %s skipped",
+        summary.exported,
+        summary.attempted,
+        summary.failed,
+        summary.skipped,
+    )
+    logger.info(
+        "Auth fallback file written to: %s",
+        getattr(summary, "output_path", output_path),
+    )
+
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Manage Instagram bot accounts")
     parser.add_argument(
         "command",
-        choices=["status", "setup", "rotate", "reset", "reset-old"],
-        help="Command to execute"
+        choices=["status", "setup", "rotate", "reset", "reset-old", "export-auth"],
+        help="Command to execute",
     )
-    parser.add_argument("--hours", type=int, default=24, help="Hours for reset-old command (default: 24)")
-    
+    parser.add_argument(
+        "--hours",
+        type=int,
+        default=24,
+        help="Hours for reset-old command (default: 24)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("secrets/instagram_auth.json"),
+        help="Output path for export-auth (default: secrets/instagram_auth.json)",
+    )
+    parser.add_argument(
+        "--available-only",
+        action="store_true",
+        help="Only export accounts currently available in account state",
+    )
+
     args = parser.parse_args()
-    
+
     try:
         if args.command == "status":
             status_command()
@@ -132,11 +197,17 @@ def main():
             reset_command()
         elif args.command == "reset-old":
             reset_old_command()
+        elif args.command == "export-auth":
+            export_auth_command(
+                output_path=args.output,
+                available_only=args.available_only,
+            )
     except KeyboardInterrupt:
         logger.info("Operation cancelled by user")
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)
 
+
 if __name__ == "__main__":
-    main() 
+    main()

@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old sessions-clean sessions-backup sessions-restore
+.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
 
 help: ## Show this help message
 	@echo 'Instagram Video Downloader Bot - uv-native workflow'
@@ -25,6 +25,7 @@ help: ## Show this help message
 	@echo '  accounts-rotate  Rotate to next account'
 	@echo '  accounts-reset   Reset banned accounts'
 	@echo '  accounts-reset-old Reset accounts banned longer than HOURS (default 24)'
+	@echo '  accounts-export-auth Export fast fallback cookies to secrets/instagram_auth.json'
 	@echo ''
 	@echo '📁 Session Management:'
 	@echo '  sessions-clean   Delete all session files'
@@ -101,6 +102,9 @@ accounts-reset: ## Reset banned status for all accounts
 
 accounts-reset-old: ## Reset accounts banned longer than HOURS hours (default 24)
 	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
+
+accounts-export-auth: ## Export fast fallback cookies from configured Instagram accounts
+	uv run --frozen python manage_accounts.py export-auth
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)
