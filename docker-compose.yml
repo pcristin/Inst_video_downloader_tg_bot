@@ -17,12 +17,12 @@ services:
       # Mount accounts state file to persist banned/usage status
       - ./accounts_state.json:/app/accounts_state.json
       # Optional authenticated fast fallback credentials. Keep this file out of git.
-      # - ./secrets/instagram_auth.json:/run/secrets/instagram_auth.json:ro
+      - ./secrets/instagram_auth.json:/run/secrets/instagram_auth.json:ro
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
       # Optional, when the read-only mount above is enabled:
-      # - IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
+      - IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
       # Additional environment variables for container
       - TZ=UTC
     # Health check
