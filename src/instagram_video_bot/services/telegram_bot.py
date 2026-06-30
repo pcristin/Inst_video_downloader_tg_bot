@@ -35,6 +35,7 @@ from .telegram_inline_sessions import (inline_session_is_expired,
                                        record_successful_inline_access,
                                        subscription_expires_at)
 from .telegram_media_sender import TelegramMediaSender
+from .telegram_media_retry import classify_telegram_delivery_error
 from .telegram_performance import (build_admin_performance_summary,
                                    format_performance_summary)
 from .telegram_provider_metrics import record_provider_metrics
@@ -1017,13 +1018,19 @@ class TelegramBot:
         """Download, cache, and edit the chosen inline placeholder into media."""
 
         inline_message_id = None
+        failure_stage = "preflight"
         try:
             session = self.state_store.get_inline_session(session_token)
             if session is None or not session.get("inline_message_id"):
                 return
             inline_message_id = session["inline_message_id"]
             if settings.INLINE_STORAGE_CHAT_ID is None:
-                self.state_store.mark_inline_session_status(session_token, "failed")
+                self.state_store.mark_inline_session_failed(
+                    session_token,
+                    failure_class="inline_storage_missing",
+                    failure_stage="preflight",
+                    error_class=None,
+                )
                 if one_time_payment_id:
                     await self._refund_one_time_payment(
                         context,
@@ -1058,9 +1065,11 @@ class TelegramBot:
                         provider_label=parsed_link.provider_label,
                     ):
                         output_dir.mkdir(parents=True, exist_ok=True)
+                        failure_stage = "download"
                         video_info = await VideoDownloader().download_video(
                             parsed_link.original_url, output_dir
                         )
+                        failure_stage = "storage_upload"
                         inline_item = await upload_first_media_to_storage(
                             context.bot,
                             storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
@@ -1083,6 +1092,7 @@ class TelegramBot:
                     media_items=[media_item],
                 )
 
+            failure_stage = "inline_edit"
             input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
             await context.bot.edit_message_media(
                 inline_message_id=inline_message_id, media=input_media
@@ -1094,9 +1104,17 @@ class TelegramBot:
                     one_time_payment_id,
                     request_id=f"inline:{session_token}",
                 )
-        except Exception:
+        except Exception as exc:
             logger.exception("Inline delivery failed for session %s", session_token)
-            self.state_store.mark_inline_session_status(session_token, "failed")
+            self.state_store.mark_inline_session_failed(
+                session_token,
+                failure_class=self._classify_inline_delivery_failure(
+                    exc,
+                    failure_stage=failure_stage,
+                ),
+                failure_stage=failure_stage,
+                error_class=exc.__class__.__name__,
+            )
             if session := self.state_store.get_inline_session(session_token):
                 self._record_failed_inline_access(session)
             if one_time_payment_id:
@@ -1116,6 +1134,20 @@ class TelegramBot:
                 )
         finally:
             self._inline_delivery_session_tokens.discard(session_token)
+
+    @staticmethod
+    def _classify_inline_delivery_failure(
+        error: Exception, *, failure_stage: str
+    ) -> str:
+        if failure_stage == "download":
+            return "download_failed"
+        if failure_stage == "preflight":
+            return "inline_delivery_failed"
+        if failure_stage in {"storage_upload", "inline_edit"} and isinstance(
+            error, TelegramError
+        ):
+            return classify_telegram_delivery_error(error)
+        return "inline_delivery_failed"
 
     def _record_successful_inline_access(self, session: dict[str, Any]) -> None:
         record_successful_inline_access(self.state_store, session)

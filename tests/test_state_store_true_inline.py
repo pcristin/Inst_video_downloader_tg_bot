@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from src.instagram_video_bot.config.settings import settings as app_settings
@@ -22,6 +23,98 @@ def test_inline_session_lifecycle(tmp_path):
     session = store.get_inline_session("s1", user_id=1001)
     assert session["inline_message_id"] == "inline-msg"
     assert session["status"] == "chosen"
+
+
+def test_inline_session_migration_exposes_null_failure_metadata(tmp_path):
+    db_path = tmp_path / "state.db"
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE inline_sessions (
+                session_token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                original_url TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                provider_label TEXT NOT NULL,
+                access_kind TEXT NOT NULL DEFAULT 'free',
+                inline_message_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO inline_sessions (
+                session_token, user_id, original_url, normalized_url, provider,
+                provider_label, access_kind, inline_message_id, status, created_at,
+                expires_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "old-session",
+                1001,
+                "https://www.instagram.com/reel/abc/",
+                "https://www.instagram.com/reel/abc/",
+                "instagram",
+                "Instagram",
+                "free",
+                "inline-msg",
+                "chosen",
+                now,
+                now,
+                now,
+            ),
+        )
+
+    store = StateStore(db_path)
+    old_session = store.get_inline_session("old-session")
+    store.create_inline_session(
+        session_token="new-session",
+        user_id=1002,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    new_session = store.get_inline_session("new-session")
+
+    for session in (old_session, new_session):
+        assert session["failure_class"] is None
+        assert session["failure_stage"] is None
+        assert session["error_class"] is None
+
+
+def test_mark_inline_session_failed_records_failure_metadata(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+
+    store.mark_inline_session_failed(
+        "s1",
+        failure_class="telegram_network",
+        failure_stage="storage_upload",
+        error_class="NetworkError",
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "failed"
+    assert session["failure_class"] == "telegram_network"
+    assert session["failure_stage"] == "storage_upload"
+    assert session["error_class"] == "NetworkError"
 
 
 def test_whitelist_grants_inline_access(tmp_path):
