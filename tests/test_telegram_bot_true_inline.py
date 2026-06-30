@@ -101,7 +101,7 @@ class _FakeMessage:
         self.successful_payment = successful_payment
         self.replies = []
 
-    async def reply_text(self, text: str):
+    async def reply_text(self, text: str, **_kwargs):
         self.replies.append(text)
         return SimpleNamespace(edit_text=lambda _text: None, delete=lambda: None)
 
