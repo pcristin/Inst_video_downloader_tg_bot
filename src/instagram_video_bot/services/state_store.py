@@ -733,6 +733,9 @@ class StateStore:
                     provider_label = excluded.provider_label,
                     access_kind = excluded.access_kind,
                     status = excluded.status,
+                    failure_class = NULL,
+                    failure_stage = NULL,
+                    error_class = NULL,
                     expires_at = excluded.expires_at,
                     updated_at = excluded.updated_at
                 """,
@@ -801,6 +804,35 @@ class StateStore:
                 WHERE session_token = ?
                 """,
                 (status, now, session_token),
+            )
+
+    def mark_inline_session_failed(
+        self,
+        session_token: str,
+        *,
+        failure_class: str,
+        failure_stage: str,
+        error_class: str | None,
+    ) -> None:
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET status = 'failed',
+                    failure_class = ?,
+                    failure_stage = ?,
+                    error_class = ?,
+                    updated_at = ?
+                WHERE session_token = ?
+                """,
+                (
+                    failure_class,
+                    failure_stage,
+                    error_class,
+                    now,
+                    session_token,
+                ),
             )
 
     def add_inline_whitelist_user(
