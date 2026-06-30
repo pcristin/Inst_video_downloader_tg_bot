@@ -1025,15 +1025,12 @@ class TelegramBot:
                 return
             inline_message_id = session["inline_message_id"]
             if settings.INLINE_STORAGE_CHAT_ID is None:
-                self.state_store.mark_inline_session_failed(
+                self._mark_inline_session_failed_and_record_access(
                     session_token,
                     failure_class="inline_storage_missing",
                     failure_stage="preflight",
                     error_class=None,
                 )
-                failed_session = self.state_store.get_inline_session(session_token)
-                if failed_session is not None:
-                    self._record_failed_inline_access(failed_session)
                 if one_time_payment_id:
                     await self._refund_one_time_payment(
                         context,
@@ -1109,7 +1106,7 @@ class TelegramBot:
                 )
         except Exception as exc:
             logger.exception("Inline delivery failed for session %s", session_token)
-            self.state_store.mark_inline_session_failed(
+            failed_session = self._mark_inline_session_failed_and_record_access(
                 session_token,
                 failure_class=self._classify_inline_delivery_failure(
                     exc,
@@ -1118,11 +1115,8 @@ class TelegramBot:
                 failure_stage=failure_stage,
                 error_class=exc.__class__.__name__,
             )
-            if session := self.state_store.get_inline_session(session_token):
-                self._record_failed_inline_access(session)
             if one_time_payment_id:
-                session = self.state_store.get_inline_session(session_token)
-                user_id = int(session["user_id"]) if session else 0
+                user_id = int(failed_session["user_id"]) if failed_session else 0
                 await self._refund_one_time_payment(
                     context,
                     payment_id=one_time_payment_id,
@@ -1137,6 +1131,25 @@ class TelegramBot:
                 )
         finally:
             self._inline_delivery_session_tokens.discard(session_token)
+
+    def _mark_inline_session_failed_and_record_access(
+        self,
+        session_token: str,
+        *,
+        failure_class: str,
+        failure_stage: str,
+        error_class: str | None,
+    ) -> dict[str, Any] | None:
+        self.state_store.mark_inline_session_failed(
+            session_token,
+            failure_class=failure_class,
+            failure_stage=failure_stage,
+            error_class=error_class,
+        )
+        failed_session = self.state_store.get_inline_session(session_token)
+        if failed_session is not None:
+            self._record_failed_inline_access(failed_session)
+        return failed_session
 
     @staticmethod
     def _classify_inline_delivery_failure(
