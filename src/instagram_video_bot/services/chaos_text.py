@@ -468,10 +468,6 @@ class ChaosText:
         return f"Inline whitelist: removed user {user_id}."
 
     @staticmethod
-    def inline_whitelist_forward_added(user_id: int) -> str:
-        return f"Inline whitelist: added forwarded user {user_id}."
-
-    @staticmethod
     def inline_whitelist_list(users: list[dict[str, Any]]) -> str:
         if not users:
             return "Inline whitelist is empty."
