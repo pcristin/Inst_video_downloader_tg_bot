@@ -202,25 +202,41 @@ def _write_auth_payload(path: Path, payload: Mapping[str, Any]) -> None:
     )
     os.chmod(temporary_path, 0o600)
     temporary_path.replace(path)
-    if _chown_for_container_bot_user(path):
-        os.chmod(path, 0o600)
-    else:
-        # Docker Compose local secrets ignore configured uid/gid/mode and project
-        # the source file permissions. Keep the file readable by the bot user
-        # when ownership cannot be adjusted on the host filesystem.
-        os.chmod(path, 0o644)
+    os.chmod(path, _container_bot_read_mode(path))
 
 
-def _chown_for_container_bot_user(path: Path) -> bool:
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
-        return False
+def _container_bot_read_mode(path: Path) -> int:
+    if path.stat().st_uid == CONTAINER_BOT_UID:
+        return 0o600
+    if path.stat().st_gid == CONTAINER_BOT_GID:
+        return 0o640
+    if not hasattr(os, "geteuid"):
+        return 0o600
+    effective_uid = os.geteuid()
+    if effective_uid == CONTAINER_BOT_UID:
+        return 0o600
+    if effective_uid != 0:
+        raise RuntimeError(
+            "Instagram auth export is owned by UID "
+            f"{effective_uid}, but the bot container reads secrets as UID "
+            f"{CONTAINER_BOT_UID}. Run export as root or UID "
+            f"{CONTAINER_BOT_UID}, or adjust the file owner/group manually."
+        )
     try:
         os.chown(path, CONTAINER_BOT_UID, CONTAINER_BOT_GID)
-        return True
+        return 0o600
     except OSError as exc:
         logger.warning(
-            "Could not change auth export owner for container readability; "
-            "falling back to owner-independent read mode (%s)",
+            "Could not change auth export owner for container readability (%s)",
             type(exc).__name__,
         )
-        return False
+    try:
+        os.chown(path, -1, CONTAINER_BOT_GID)
+        return 0o640
+    except OSError as exc:
+        logger.warning(
+            "Could not change auth export group for container readability; "
+            "leaving owner-only permissions (%s)",
+            type(exc).__name__,
+        )
+        return 0o600
