@@ -8,10 +8,13 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal, Sequence
+
+from src.instagram_video_bot.config.settings import settings
 
 
 class TwitterDownloadError(Exception):
@@ -53,6 +56,9 @@ class TwitterDownloader:
         r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/(?P<status_id>\d+)(?:[/?#][^\s]*)?",
         re.IGNORECASE,
     )
+    PROXY_URL_PATTERN = re.compile(r"\b(?:https?|socks[45]?)://[^\s]+", re.IGNORECASE)
+    _proxy_rotation_index = 0
+    _proxy_rotation_lock = threading.Lock()
 
     def __init__(self, timeout_seconds: int = 90, proxy: str | None = None, ytdlp_binary: str = "yt-dlp"):
         self.timeout_seconds = timeout_seconds
@@ -76,6 +82,50 @@ class TwitterDownloader:
         prefix = f"twitter_{status_id}_{int(time.time() * 1000)}"
         output_template = str(output_dir / f"{prefix}_%(autonumber)02d.%(ext)s")
 
+        errors: List[str] = []
+
+        if self.proxy:
+            file_paths = self._run_download_attempt(url, output_template, output_dir, prefix, self.proxy)
+            return self._build_download_result(url, file_paths, self.proxy)
+
+        try:
+            file_paths = self._run_download_attempt(url, output_template, output_dir, prefix)
+            return self._build_download_result(url, file_paths)
+        except TwitterDownloadError as exc:
+            errors.append(str(exc))
+
+        configured_proxies = settings.get_proxy_list()
+        proxy_attempts = self._rotated_configured_proxies(configured_proxies)
+        for proxy in proxy_attempts:
+            try:
+                file_paths = self._run_download_attempt(
+                    url,
+                    output_template,
+                    output_dir,
+                    prefix,
+                    proxy,
+                )
+            except TwitterDownloadError as exc:
+                errors.append(str(exc))
+                continue
+
+            self._advance_proxy_rotation(proxy, configured_proxies)
+            return self._build_download_result(url, file_paths, proxy)
+
+        attempt_count = 1 + len(proxy_attempts)
+        last_error = errors[-1] if errors else "Unknown yt-dlp error"
+        raise TwitterDownloadError(
+            f"Twitter/X download failed after {attempt_count} attempts; last error: {last_error}"
+        )
+
+    def _run_download_attempt(
+        self,
+        url: str,
+        output_template: str,
+        output_dir: Path,
+        prefix: str,
+        proxy: str | None = None,
+    ) -> Sequence[Path]:
         cmd = self._build_base_command()
         cmd.extend(
             [
@@ -88,8 +138,8 @@ class TwitterDownloader:
                 url,
             ]
         )
-        if self.proxy:
-            cmd.extend(["--proxy", self.proxy])
+        if proxy:
+            cmd.extend(["--proxy", proxy])
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
@@ -98,18 +148,28 @@ class TwitterDownloader:
                 f"Twitter/X download timed out after {self.timeout_seconds} seconds"
             ) from exc
         if result.returncode != 0:
-            error_text = (result.stderr or result.stdout or "Unknown yt-dlp error").strip()
-            raise TwitterDownloadError(f"Twitter/X download failed: {error_text}")
+            error_text = self._sanitize_error_text(
+                (result.stderr or result.stdout or "Unknown yt-dlp error").strip()
+            )
+            raise TwitterDownloadError(f"yt-dlp exited with {result.returncode}: {error_text}")
 
         file_paths = self._collect_files(output_dir, prefix)
         if not file_paths:
             raise TwitterDownloadError("Twitter/X download produced no media files")
 
+        return file_paths
+
+    def _build_download_result(
+        self,
+        url: str,
+        file_paths: Sequence[Path],
+        proxy: str | None = None,
+    ) -> TwitterDownloadResult:
         media_items = [
             TwitterMediaItem(file_path=path, media_type=self._infer_media_type(path))
             for path in file_paths
         ]
-        return TwitterDownloadResult(title=self._fetch_title(url), media_items=media_items)
+        return TwitterDownloadResult(title=self._fetch_title(url, proxy), media_items=media_items)
 
     def _build_base_command(self) -> List[str]:
         """Resolve yt-dlp CLI invocation."""
@@ -119,18 +179,42 @@ class TwitterDownloader:
             return [sys.executable, "-m", "yt_dlp"]
         raise TwitterDownloadError("yt-dlp is not installed in this environment")
 
-    def _fetch_title(self, url: str) -> str:
+    def _fetch_title(self, url: str, proxy: str | None = None) -> str:
         """Best-effort tweet title extraction for Telegram caption."""
         cmd = self._build_base_command()
         cmd.extend(["--no-warnings", "--skip-download", "--print", "%(title)s", url])
-        if self.proxy:
-            cmd.extend(["--proxy", self.proxy])
+        title_proxy = proxy if proxy is not None else self.proxy
+        if title_proxy:
+            cmd.extend(["--proxy", title_proxy])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
         if result.returncode != 0:
             return ""
         title = (result.stdout or "").strip().splitlines()
         return title[0].strip() if title else ""
+
+    @classmethod
+    def _rotated_configured_proxies(cls, proxies: Sequence[str]) -> List[str]:
+        if not proxies:
+            return []
+
+        with cls._proxy_rotation_lock:
+            start_index = cls._proxy_rotation_index % len(proxies)
+        return list(proxies[start_index:]) + list(proxies[:start_index])
+
+    @classmethod
+    def _advance_proxy_rotation(cls, proxy: str, proxies: Sequence[str]) -> None:
+        try:
+            proxy_index = list(proxies).index(proxy)
+        except ValueError:
+            return
+
+        with cls._proxy_rotation_lock:
+            cls._proxy_rotation_index = (proxy_index + 1) % len(proxies)
+
+    @classmethod
+    def _sanitize_error_text(cls, error_text: str) -> str:
+        return cls.PROXY_URL_PATTERN.sub("[redacted proxy]", error_text)
 
     @classmethod
     def _extract_status_id(cls, url: str) -> str:
