@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import InputInvoiceMessageContent
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
@@ -101,7 +101,7 @@ class _FakeMessage:
         self.successful_payment = successful_payment
         self.replies = []
 
-    async def reply_text(self, text: str):
+    async def reply_text(self, text: str, **_kwargs):
         self.replies.append(text)
         return SimpleNamespace(edit_text=lambda _text: None, delete=lambda: None)
 
@@ -497,7 +497,8 @@ async def test_expired_inline_callback_answers_expired_without_attach_or_schedul
 async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
     store = StateStore(tmp_path / "state.db")
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    started_at = datetime.now(timezone.utc)
+    expires_at = started_at + timedelta(minutes=15)
     store.create_inline_session(
         session_token="s1",
         user_id=1001,
@@ -506,6 +507,7 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
         provider="instagram",
         provider_label="Instagram",
         expires_at=expires_at,
+        access_kind="subscription",
     )
     store.attach_inline_message("s1", inline_message_id="inline-msg")
     bot = TelegramBot(state_store=store)
@@ -534,6 +536,11 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
         "inline_message_id": "inline-msg",
         "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.",
     }
+    assert store.get_subscription_delivery_stats(
+        user_id=1001,
+        started_at=started_at - timedelta(seconds=1),
+        expires_at=expires_at,
+    ) == {"success": 0, "failed": 1, "attempts": 1, "failure_rate": 1.0}
 
 
 @pytest.mark.asyncio
@@ -659,6 +666,213 @@ async def test_inline_delivery_caches_and_edits_video_portrait_metadata(monkeypa
     assert media.width == 720
     assert media.height == 1280
     assert media._duration == timedelta(seconds=12)
+
+
+@pytest.mark.asyncio
+async def test_inline_delivery_records_storage_upload_failure_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    async def failing_upload(*args, **kwargs):
+        raise NetworkError("httpx.ReadError: ")
+
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", failing_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_text=edit_message_text)),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "failed"
+    assert session["failure_stage"] == "storage_upload"
+    assert session["error_class"] == "NetworkError"
+    assert session["failure_class"] == "telegram_network"
+    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+
+
+@pytest.mark.asyncio
+async def test_inline_delivery_records_inline_edit_failure_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    store.save_inline_cached_media(
+        cache_key="instagram:https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        media_items=[
+            {"media_type": "video", "file_id": "video-file-id", "caption": "Caption"}
+        ],
+    )
+    bot = TelegramBot(state_store=store)
+
+    async def edit_message_media(**kwargs):
+        raise NetworkError("httpx.WriteError: ")
+
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(
+            bot=SimpleNamespace(
+                edit_message_media=edit_message_media,
+                edit_message_text=edit_message_text,
+            )
+        ),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "failed"
+    assert session["failure_stage"] == "inline_edit"
+    assert session["error_class"] == "NetworkError"
+    assert session["failure_class"] == "telegram_network"
+    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+
+
+@pytest.mark.asyncio
+async def test_inline_edit_failure_after_storage_upload_preserves_cache_for_later_session(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    for session_token in ("s1", "s2"):
+        store.create_inline_session(
+            session_token=session_token,
+            user_id=1001,
+            original_url="https://www.instagram.com/reel/abc/",
+            normalized_url="https://www.instagram.com/reel/abc/",
+            provider="instagram",
+            provider_label="Instagram",
+            expires_at=expires_at,
+        )
+        store.attach_inline_message(session_token, inline_message_id=f"inline-msg-{session_token}")
+    bot = TelegramBot(state_store=store)
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video", caption="Caption")],
+                primary_media_type="video",
+            )
+
+    upload_calls = []
+
+    async def fake_upload(*args, **kwargs):
+        upload_calls.append(kwargs)
+        return InlineCachedMediaItem(
+            media_type="video",
+            file_id="stored-video-file-id",
+            caption="Caption",
+            duration=11.6,
+            width=720,
+            height=1280,
+        )
+
+    media_edits = []
+
+    async def edit_message_media(**kwargs):
+        media_edits.append(kwargs)
+        if kwargs["inline_message_id"] == "inline-msg-s1":
+            raise NetworkError("httpx.WriteError: ")
+
+    text_edits = []
+
+    async def edit_message_text(**kwargs):
+        text_edits.append(kwargs)
+
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
+    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(
+            bot=SimpleNamespace(
+                edit_message_media=edit_message_media,
+                edit_message_text=edit_message_text,
+            )
+        ),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    cache_key = "instagram:https://www.instagram.com/reel/abc/"
+    cached = store.get_inline_cached_media(cache_key)
+    failed_session = store.get_inline_session("s1")
+    assert cached["media_items"][0]["file_id"] == "stored-video-file-id"
+    assert failed_session["status"] == "failed"
+    assert failed_session["failure_stage"] == "inline_edit"
+    assert failed_session["error_class"] == "NetworkError"
+    assert failed_session["failure_class"] == "telegram_network"
+    assert len(upload_calls) == 1
+    assert text_edits[0]["inline_message_id"] == "inline-msg-s1"
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(
+            bot=SimpleNamespace(
+                edit_message_media=edit_message_media,
+                edit_message_text=edit_message_text,
+            )
+        ),
+        session_token="s2",
+        one_time_payment_id=None,
+    )
+
+    delivered_session = store.get_inline_session("s2")
+    assert delivered_session["status"] == "delivered"
+    assert len(upload_calls) == 1
+    assert [edit["inline_message_id"] for edit in media_edits] == [
+        "inline-msg-s1",
+        "inline-msg-s2",
+    ]
+    assert media_edits[1]["media"].media == "stored-video-file-id"
 
 
 @pytest.mark.asyncio
