@@ -56,7 +56,10 @@ class TwitterDownloader:
         r"https?://(?:www\.)?(?:twitter\.com|x\.com)/[^/\s]+/status/(?P<status_id>\d+)(?:[/?#][^\s]*)?",
         re.IGNORECASE,
     )
-    PROXY_URL_PATTERN = re.compile(r"\b(?:https?|socks[45]?)://[^\s]+", re.IGNORECASE)
+    PROXY_URL_PATTERN = re.compile(
+        r"\b(?:https?|socks(?:4a?|5h?))://[^\s]+",
+        re.IGNORECASE,
+    )
     _proxy_rotation_index = 0
     _proxy_rotation_lock = threading.Lock()
 
