@@ -8,7 +8,12 @@ from typing import Literal
 
 from telegram import InputMediaPhoto, InputMediaVideo
 
+from ..config.settings import settings
 from .download_models import VideoInfo
+from .telegram_media_retry import (
+    build_telegram_timeout_kwargs,
+    call_telegram_with_retries,
+)
 
 MAX_INLINE_MEDIA_CAPTION_LENGTH = 1024
 
@@ -23,28 +28,66 @@ class InlineCachedMediaItem:
     height: int | None = None
 
 
-async def upload_first_media_to_storage(bot, *, storage_chat_id: int, video_info: VideoInfo) -> InlineCachedMediaItem:
+async def upload_first_media_to_storage(
+    bot, *, storage_chat_id: int, video_info: VideoInfo
+) -> InlineCachedMediaItem:
     """Upload the first downloaded media item to storage and return its bot-local file_id."""
 
     first = video_info.media_items[0]
     caption = _truncate_inline_caption(first.caption or video_info.title)
+    timeout_kwargs = build_telegram_timeout_kwargs(
+        read_timeout=settings.TELEGRAM_MEDIA_READ_TIMEOUT_SECONDS,
+        write_timeout=settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS,
+        connect_timeout=settings.TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS,
+        pool_timeout=settings.TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS,
+    )
     if first.media_type == "photo":
-        with first.file_path.open("rb") as media_file:
-            message = await bot.send_photo(chat_id=storage_chat_id, photo=media_file, caption=caption)
-        file_id = message.photo[-1].file_id
-        return InlineCachedMediaItem(media_type="photo", file_id=file_id, caption=caption)
 
-    with first.file_path.open("rb") as media_file:
-        message = await bot.send_video(
-            chat_id=storage_chat_id,
-            video=media_file,
-            caption=caption,
-            **_inline_video_kwargs(
-                duration=first.duration,
-                width=first.width,
-                height=first.height,
-            ),
+        async def send_photo_with_fresh_file(**telegram_timeout_kwargs):
+            with first.file_path.open("rb") as media_file:
+                return await bot.send_photo(
+                    chat_id=storage_chat_id,
+                    photo=media_file,
+                    caption=caption,
+                    **telegram_timeout_kwargs,
+                )
+
+        message = await call_telegram_with_retries(
+            send_photo_with_fresh_file,
+            attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
+            backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
+            timeout_kwargs=timeout_kwargs,
+            context={
+                "telegram_method": "send_photo",
+                "storage_chat_id": storage_chat_id,
+            },
         )
+        file_id = message.photo[-1].file_id
+        return InlineCachedMediaItem(
+            media_type="photo", file_id=file_id, caption=caption
+        )
+
+    async def send_video_with_fresh_file(**telegram_timeout_kwargs):
+        with first.file_path.open("rb") as media_file:
+            return await bot.send_video(
+                chat_id=storage_chat_id,
+                video=media_file,
+                caption=caption,
+                **_inline_video_kwargs(
+                    duration=first.duration,
+                    width=first.width,
+                    height=first.height,
+                ),
+                **telegram_timeout_kwargs,
+            )
+
+    message = await call_telegram_with_retries(
+        send_video_with_fresh_file,
+        attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
+        backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
+        timeout_kwargs=timeout_kwargs,
+        context={"telegram_method": "send_video", "storage_chat_id": storage_chat_id},
+    )
     return InlineCachedMediaItem(
         media_type="video",
         file_id=message.video.file_id,
@@ -66,7 +109,9 @@ def _truncate_inline_caption(caption: str | None) -> str | None:
     return caption[: MAX_INLINE_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
 
 
-def build_inline_input_media(item: InlineCachedMediaItem) -> InputMediaPhoto | InputMediaVideo:
+def build_inline_input_media(
+    item: InlineCachedMediaItem,
+) -> InputMediaPhoto | InputMediaVideo:
     """Build an InputMedia object usable with editMessageMedia for inline messages."""
 
     if item.media_type == "photo":
