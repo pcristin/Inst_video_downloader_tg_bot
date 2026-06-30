@@ -2,12 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram import MessageEntity
+from telegram.error import NetworkError
 
+from src.instagram_video_bot.services import telegram_media_retry
 from src.instagram_video_bot.services.download_models import (
-    MediaItem,
-    VideoDownloadError,
-    VideoInfo,
-)
+    MediaItem, VideoDownloadError, VideoInfo)
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_media_sender import \
     TelegramMediaSender
@@ -16,6 +16,7 @@ from src.instagram_video_bot.services.telegram_media_sender import \
 class _FakeBot:
     def __init__(self):
         self.video_calls = []
+        self.photo_calls = []
         self.media_group_calls = []
 
     async def send_video(self, **kwargs):
@@ -23,6 +24,13 @@ class _FakeBot:
         return SimpleNamespace(
             video=SimpleNamespace(file_id="standalone-video-file-id"),
             photo=None,
+        )
+
+    async def send_photo(self, **kwargs):
+        self.photo_calls.append(kwargs)
+        return SimpleNamespace(
+            video=None,
+            photo=[SimpleNamespace(file_id="standalone-photo-file-id")],
         )
 
     async def send_media_group(self, **kwargs):
@@ -36,6 +44,60 @@ class _FakeBot:
 class _FakeContext:
     def __init__(self, bot):
         self.bot = bot
+
+
+class _FlakyLocalVideoBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if len(self.video_calls) == 1:
+            raise NetworkError("httpx.ReadError: ")
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="retried-video-file-id"),
+            photo=None,
+        )
+
+
+class _ReadingFlakyVideoBot(_FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.payloads = []
+        self.stream_ids = []
+
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        media_file = kwargs["video"]
+        self.stream_ids.append(id(media_file))
+        self.payloads.append(media_file.read())
+        if len(self.video_calls) == 1:
+            raise NetworkError("httpx.ReadError: ")
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="fresh-stream-video-file-id"),
+            photo=None,
+        )
+
+
+class _ReadingFlakyMediaGroupBot(_FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.media_object_ids = []
+        self.input_file_ids = []
+        self.payloads = []
+
+    async def send_media_group(self, **kwargs):
+        self.media_group_calls.append(kwargs)
+        media_items = kwargs["media"]
+        self.media_object_ids.append([id(item) for item in media_items])
+        self.input_file_ids.append([id(item.media) for item in media_items])
+        self.payloads.append([item.media.input_file_content for item in media_items])
+        if len(self.media_group_calls) == 1:
+            raise NetworkError("httpx.ReadError: ")
+        return [
+            SimpleNamespace(
+                video=SimpleNamespace(file_id=f"retried-group-file-id-{index}"),
+                photo=None,
+            )
+            for index, _ in enumerate(media_items)
+        ]
 
 
 def _request_context() -> SimpleNamespace:
@@ -90,6 +152,212 @@ async def test_media_sender_sends_video_and_persists_telegram_file_id(tmp_path):
     )
     assert cached is not None
     assert cached.media_items[0]["telegram_file_id"] == "standalone-video-file-id"
+
+
+@pytest.mark.asyncio
+async def test_media_sender_adds_caption_entities_to_single_video(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    media_file = tmp_path / "video.mp4"
+    media_file.write_bytes(b"video")
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=media_file,
+            title="Captioned video",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        ),
+    )
+
+    call = fake_bot.video_calls[0]
+    assert call["caption"] == "Медиа: Captioned video"
+    assert [
+        (entity.type, entity.offset, entity.length)
+        for entity in call["caption_entities"]
+    ] == [
+        (MessageEntity.BOLD, 0, len("Медиа:")),
+    ]
+    assert "parse_mode" not in call
+
+
+@pytest.mark.asyncio
+async def test_media_sender_adds_caption_entities_to_single_photo(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    media_file = tmp_path / "photo.jpg"
+    media_file.write_bytes(b"photo")
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=media_file,
+            title="Captioned photo",
+            media_items=[MediaItem(file_path=media_file, media_type="photo")],
+            primary_media_type="photo",
+        ),
+    )
+
+    call = fake_bot.photo_calls[0]
+    assert call["caption"] == "Медиа: Captioned photo"
+    assert [
+        (entity.type, entity.offset, entity.length)
+        for entity in call["caption_entities"]
+    ] == [
+        (MessageEntity.BOLD, 0, len("Медиа:")),
+    ]
+    assert "parse_mode" not in call
+
+
+@pytest.mark.asyncio
+async def test_media_sender_adds_caption_entities_to_media_group_first_item(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    first = tmp_path / "first.jpg"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"photo")
+    second.write_bytes(b"video")
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=first,
+            title="Captioned album",
+            media_items=[
+                MediaItem(file_path=first, media_type="photo"),
+                MediaItem(file_path=second, media_type="video"),
+            ],
+            primary_media_type="photo",
+        ),
+    )
+
+    sent_media = fake_bot.media_group_calls[0]["media"]
+    assert sent_media[0].caption == "Медиа: Captioned album"
+    assert [
+        (entity.type, entity.offset, entity.length)
+        for entity in sent_media[0].caption_entities
+    ] == [
+        (MessageEntity.BOLD, 0, len("Медиа:")),
+    ]
+    assert sent_media[1].caption is None
+    assert sent_media[1].caption_entities == ()
+
+
+@pytest.mark.asyncio
+async def test_media_sender_does_not_retry_ambiguous_local_video_network_error(
+    monkeypatch, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FlakyLocalVideoBot()
+    request_context = _request_context()
+    media_file = tmp_path / "video.mp4"
+    media_file.write_bytes(b"video")
+
+    async def no_sleep(_duration):
+        return None
+
+    monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=media_file,
+                title="Flaky local sender",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            ),
+        )
+
+    assert len(fake_bot.video_calls) == 1
+    call = fake_bot.video_calls[0]
+    assert call["write_timeout"] == 60.0
+    assert call["read_timeout"] == 120.0
+    assert call["connect_timeout"] == 20.0
+    assert call["pool_timeout"] == 30.0
+
+
+@pytest.mark.asyncio
+async def test_media_sender_passes_readable_local_video_stream_on_network_error(
+    monkeypatch, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _ReadingFlakyVideoBot()
+    request_context = _request_context()
+    media_file = tmp_path / "video.mp4"
+    media_file.write_bytes(b"video")
+
+    async def no_sleep(_duration):
+        return None
+
+    monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=media_file,
+                title="Fresh stream sender",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            ),
+        )
+
+    assert fake_bot.payloads == [b"video"]
+    assert len(fake_bot.stream_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_media_sender_does_not_retry_ambiguous_local_media_group_network_error(
+    monkeypatch, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _ReadingFlakyMediaGroupBot()
+    request_context = _request_context()
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"first-video")
+    second.write_bytes(b"second-video")
+
+    async def no_sleep(_duration):
+        return None
+
+    monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=first,
+                title="Flaky album",
+                media_items=[
+                    MediaItem(file_path=first, media_type="video"),
+                    MediaItem(file_path=second, media_type="video"),
+                ],
+                primary_media_type="video",
+            ),
+        )
+
+    assert len(fake_bot.media_group_calls) == 1
+    assert fake_bot.payloads == [[b"first-video", b"second-video"]]
+    assert len(fake_bot.media_object_ids) == 1
+    assert len(fake_bot.input_file_ids) == 1
 
 
 @pytest.mark.asyncio

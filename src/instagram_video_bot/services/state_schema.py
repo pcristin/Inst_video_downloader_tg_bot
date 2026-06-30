@@ -94,6 +94,9 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             access_kind TEXT NOT NULL DEFAULT 'free',
             inline_message_id TEXT,
             status TEXT NOT NULL,
+            failure_class TEXT,
+            failure_stage TEXT,
+            error_class TEXT,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -257,6 +260,9 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "access_kind",
         "access_kind TEXT NOT NULL DEFAULT 'free'",
     )
+    add_column_if_missing(conn, "inline_sessions", "failure_class", "failure_class TEXT")
+    add_column_if_missing(conn, "inline_sessions", "failure_stage", "failure_stage TEXT")
+    add_column_if_missing(conn, "inline_sessions", "error_class", "error_class TEXT")
 
     had_subscription_started_at = "started_at" in _column_names(
         conn, "inline_subscriptions"

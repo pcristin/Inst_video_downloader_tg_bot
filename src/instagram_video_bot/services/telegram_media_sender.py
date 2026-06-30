@@ -12,9 +12,12 @@ from telegram import InputMediaPhoto, InputMediaVideo, Message
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
-from .chaos_text import ChaosText
+from ..config.settings import settings
 from .download_models import MediaItem, VideoDownloadError, VideoInfo
+from .rich_text import RichText, media_caption_rich_text
 from .state_store import StateStore
+from .telegram_media_retry import (build_telegram_timeout_kwargs,
+                                   call_telegram_with_retries)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +47,7 @@ class TelegramMediaSender:
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
-        caption_text = self.build_caption_text(video_info.title)
+        caption = self.build_caption(video_info.title)
 
         telegram_file_ids: list[str | None] = []
 
@@ -55,7 +58,7 @@ class TelegramMediaSender:
                     context,
                     request_context,
                     media_item,
-                    caption_text,
+                    caption,
                 )
             )
             self._persist_telegram_file_ids(request_context, telegram_file_ids)
@@ -68,7 +71,7 @@ class TelegramMediaSender:
                 if not media_item.telegram_file_id
             ]
         )
-        caption_available = caption_text
+        caption_available = caption
         for offset in range(0, len(media_items), self.TELEGRAM_MEDIA_GROUP_LIMIT):
             chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
             chunk_caption = caption_available if offset == 0 else None
@@ -106,7 +109,7 @@ class TelegramMediaSender:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: MediaRequestContext,
         media_item: MediaItem,
-        caption_text: str | None,
+        caption: RichText | None,
     ) -> str | None:
         if media_item.telegram_file_id:
             try:
@@ -114,7 +117,7 @@ class TelegramMediaSender:
                     context,
                     request_context,
                     media_item,
-                    caption_text,
+                    caption,
                     media_item.telegram_file_id,
                 )
                 return self.extract_telegram_file_id(message, media_item.media_type)
@@ -131,14 +134,29 @@ class TelegramMediaSender:
                 )
 
         self.validate_media_files([media_item.file_path])
-        with open(media_item.file_path, "rb") as media_file:
-            message = await self._send_single_media_value(
-                context,
-                request_context,
-                media_item,
-                caption_text,
-                media_file,
-            )
+
+        async def upload_local_media(**timeout_kwargs: float) -> Message:
+            with open(media_item.file_path, "rb") as media_file:
+                return await self._send_single_media_value(
+                    context,
+                    request_context,
+                    media_item,
+                    caption,
+                    media_file,
+                    timeout_kwargs=timeout_kwargs,
+                )
+
+        message = await call_telegram_with_retries(
+            upload_local_media,
+            attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
+            backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
+            timeout_kwargs=self._telegram_media_timeout_kwargs(),
+            retry_network_errors=False,
+            context={
+                "chat_id": request_context.chat_id,
+                "media_type": media_item.media_type,
+            },
+        )
         return self.extract_telegram_file_id(message, media_item.media_type)
 
     async def _send_single_media_value(
@@ -146,22 +164,40 @@ class TelegramMediaSender:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: MediaRequestContext,
         media_item: MediaItem,
-        caption_text: str | None,
+        caption: RichText | None,
         media_value: Any,
+        *,
+        timeout_kwargs: dict[str, float] | None = None,
     ) -> Message:
+        timeout_kwargs = timeout_kwargs or {}
+        caption_entities = caption.entities if caption and caption.entities else None
+        caption_text = caption.text if caption is not None else None
         if media_item.media_type == "video":
             return await context.bot.send_video(
                 chat_id=request_context.chat_id,
                 video=media_value,
                 caption=caption_text,
+                caption_entities=caption_entities,
                 reply_to_message_id=request_context.original_message_id,
                 **self.telegram_video_kwargs(media_item),
+                **timeout_kwargs,
             )
         return await context.bot.send_photo(
             chat_id=request_context.chat_id,
             photo=media_value,
             caption=caption_text,
+            caption_entities=caption_entities,
             reply_to_message_id=request_context.original_message_id,
+            **timeout_kwargs,
+        )
+
+    @staticmethod
+    def _telegram_media_timeout_kwargs() -> dict[str, float]:
+        return build_telegram_timeout_kwargs(
+            read_timeout=settings.TELEGRAM_MEDIA_READ_TIMEOUT_SECONDS,
+            write_timeout=settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS,
+            connect_timeout=settings.TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS,
+            pool_timeout=settings.TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS,
         )
 
     async def _send_media_group_chunk(
@@ -169,14 +205,14 @@ class TelegramMediaSender:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: MediaRequestContext,
         media_items: list[MediaItem],
-        caption_text: str | None,
+        caption: RichText | None,
     ) -> list[str | None]:
         try:
             messages = await self._send_media_group_values(
                 context,
                 request_context,
                 media_items,
-                caption_text,
+                caption,
             )
         except BadRequest as exc:
             if not any(
@@ -195,7 +231,7 @@ class TelegramMediaSender:
                 context,
                 request_context,
                 media_items,
-                caption_text,
+                caption,
                 force_local_upload=True,
             )
         return [
@@ -208,10 +244,50 @@ class TelegramMediaSender:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: MediaRequestContext,
         media_items: list[MediaItem],
-        caption_text: str | None,
+        caption: RichText | None,
         *,
         force_local_upload: bool = False,
     ) -> list[Message]:
+        uses_local_upload = force_local_upload or any(
+            not media_item.telegram_file_id for media_item in media_items
+        )
+
+        async def send_group(**timeout_kwargs: float) -> list[Message]:
+            return await self._send_media_group_values_once(
+                context,
+                request_context,
+                media_items,
+                caption,
+                force_local_upload=force_local_upload,
+                timeout_kwargs=timeout_kwargs,
+            )
+
+        if not uses_local_upload:
+            return await send_group()
+
+        return await call_telegram_with_retries(
+            send_group,
+            attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
+            backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
+            timeout_kwargs=self._telegram_media_timeout_kwargs(),
+            retry_network_errors=False,
+            context={
+                "chat_id": request_context.chat_id,
+                "media_count": len(media_items),
+            },
+        )
+
+    async def _send_media_group_values_once(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: MediaRequestContext,
+        media_items: list[MediaItem],
+        caption: RichText | None,
+        *,
+        force_local_upload: bool = False,
+        timeout_kwargs: dict[str, float] | None = None,
+    ) -> list[Message]:
+        timeout_kwargs = timeout_kwargs or {}
         with ExitStack() as stack:
             media_group = []
             for index, media_item in enumerate(media_items):
@@ -221,23 +297,37 @@ class TelegramMediaSender:
                 if not media_value:
                     self.validate_media_files([media_item.file_path])
                     media_value = stack.enter_context(open(media_item.file_path, "rb"))
-                item_caption = caption_text if index == 0 else None
+                item_caption = caption if index == 0 else None
+                item_caption_text = (
+                    item_caption.text if item_caption is not None else None
+                )
+                item_caption_entities = (
+                    item_caption.entities
+                    if item_caption and item_caption.entities
+                    else None
+                )
                 if media_item.media_type == "video":
                     media_group.append(
                         InputMediaVideo(
                             media=media_value,
-                            caption=item_caption,
+                            caption=item_caption_text,
+                            caption_entities=item_caption_entities,
                             **self.telegram_video_kwargs(media_item),
                         )
                     )
                 else:
                     media_group.append(
-                        InputMediaPhoto(media=media_value, caption=item_caption)
+                        InputMediaPhoto(
+                            media=media_value,
+                            caption=item_caption_text,
+                            caption_entities=item_caption_entities,
+                        )
                     )
             return await context.bot.send_media_group(
                 chat_id=request_context.chat_id,
                 media=media_group,
                 reply_to_message_id=request_context.original_message_id,
+                **timeout_kwargs,
             )
 
     @staticmethod
@@ -287,13 +377,27 @@ class TelegramMediaSender:
     @classmethod
     def build_caption_text(cls, title: str) -> str:
         """Build a Telegram-safe media caption."""
+        return cls.build_caption(title).text
+
+    @classmethod
+    def build_caption(cls, title: str) -> RichText:
+        """Build a Telegram-safe media caption with optional entities."""
         caption = title.strip()
         if not caption:
-            return ""
-        full_caption = ChaosText.media_caption(caption)
-        if len(full_caption) <= cls.MAX_MEDIA_CAPTION_LENGTH:
-            return full_caption
-        return full_caption[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
+            return RichText("")
+        rich_caption = media_caption_rich_text(caption)
+        if len(rich_caption.text) <= cls.MAX_MEDIA_CAPTION_LENGTH:
+            return rich_caption
+        truncated_text = (
+            rich_caption.text[: cls.MAX_MEDIA_CAPTION_LENGTH - 3].rstrip() + "..."
+        )
+        truncated_utf16_length = len(truncated_text.encode("utf-16-le")) // 2
+        entities = [
+            entity
+            for entity in rich_caption.entities
+            if entity.offset + entity.length <= truncated_utf16_length
+        ]
+        return RichText(truncated_text, entities)
 
     @staticmethod
     def telegram_video_kwargs(media_item: MediaItem) -> dict[str, object]:
