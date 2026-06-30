@@ -91,12 +91,7 @@ class TelegramCommandHandlers:
         bot = self._bot
         if not update.message:
             return
-        await self._reply_rich_text(
-            update.message,
-            command_reply_rich_text(
-                ChaosText.formats(bot._language_for_update(update))
-            ),
-        )
+        await update.message.reply_text(ChaosText.formats(bot._language_for_update(update)))
 
     async def status_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
