@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import NetworkError, TimedOut
+from telegram.error import NetworkError, RetryAfter, TimedOut
 
+from src.instagram_video_bot.services import telegram_media_retry
 from src.instagram_video_bot.services.telegram_media_retry import (
     build_telegram_timeout_kwargs,
     call_telegram_with_retries,
@@ -20,6 +21,17 @@ class _FlakyCall:
         self.kwargs_seen.append(kwargs)
         if self.calls == 1:
             raise NetworkError("httpx.ReadError: ")
+        return SimpleNamespace(ok=True)
+
+
+class _RetryAfterCall:
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RetryAfter(3)
         return SimpleNamespace(ok=True)
 
 
@@ -66,3 +78,41 @@ async def test_call_telegram_with_retries_retries_transient_network_errors():
         {"write_timeout": 180.0},
         {"write_timeout": 180.0},
     ]
+
+
+@pytest.mark.asyncio
+async def test_call_telegram_with_retries_honors_retry_after_sleep(monkeypatch):
+    retry_after = _RetryAfterCall()
+    sleep_durations = []
+
+    async def capture_sleep(duration):
+        sleep_durations.append(duration)
+
+    monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", capture_sleep)
+
+    result = await call_telegram_with_retries(
+        retry_after,
+        attempts=2,
+        backoff_seconds=1.0,
+        timeout_kwargs={},
+    )
+
+    assert result.ok is True
+    assert retry_after.calls == 2
+    assert sleep_durations == [3]
+
+
+@pytest.mark.asyncio
+async def test_call_telegram_with_retries_ignores_reserved_logging_context_keys():
+    flaky = _FlakyCall()
+
+    result = await call_telegram_with_retries(
+        flaky,
+        attempts=2,
+        backoff_seconds=0.0,
+        timeout_kwargs={},
+        context={"message": "bad", "name": "bad", "chat_id": 123},
+    )
+
+    assert result.ok is True
+    assert flaky.calls == 2
