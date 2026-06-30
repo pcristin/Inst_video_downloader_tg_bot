@@ -58,19 +58,6 @@ def language_from_profile(language_code: str | None) -> str:
     return "en"
 
 
-def forwarded_visible_user_id(message: Any) -> int | None:
-    """Return a visible forwarded user ID from old or new Telegram message shapes."""
-
-    forward_from = getattr(message, "forward_from", None)
-    if getattr(forward_from, "id", None) is not None:
-        return int(forward_from.id)
-    forward_origin = getattr(message, "forward_origin", None)
-    sender_user = getattr(forward_origin, "sender_user", None)
-    if getattr(sender_user, "id", None) is not None:
-        return int(sender_user.id)
-    return None
-
-
 def parse_toggle_arg(value: str) -> bool | None:
     """Parse the on/off command tokens supported by group-setting commands."""
 

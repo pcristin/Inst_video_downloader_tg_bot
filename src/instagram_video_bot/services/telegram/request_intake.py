@@ -49,10 +49,6 @@ class TelegramRequestIntake:
             limit=settings.MAX_LINKS_PER_MESSAGE,
         )
         if not extracted_links:
-            if bot._message_is_from_owner(
-                update
-            ) and await bot._whitelist_forwarded_visible_user(update):
-                return
             return
 
         group_settings = bot.state_store.ensure_group_settings(update.effective_chat.id)
@@ -115,4 +111,3 @@ class TelegramRequestIntake:
             task.add_done_callback(
                 lambda _task, rid=submission.request_id: bot._cleanup_request_task(rid)
             )
-

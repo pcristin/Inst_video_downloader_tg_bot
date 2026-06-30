@@ -3,6 +3,8 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.instagram_video_bot.utils import instagram_auth_exporter as exporter_module
 from src.instagram_video_bot.utils.instagram_auth_exporter import (
     export_instagram_auth_file,
@@ -129,8 +131,151 @@ def test_export_instagram_auth_file_logs_in_accounts_and_preserves_bearers(
     assert chown_calls == [(output_path, 1000, 1000)]
 
 
-def test_export_instagram_auth_file_redacts_login_failures(tmp_path, caplog):
+def test_export_instagram_auth_file_falls_back_to_group_readable_mode_when_owner_chown_fails(
+    monkeypatch, tmp_path
+):
     output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 0)
+    chown_calls = []
+
+    def chown_group_only(path, uid, gid):
+        chown_calls.append((path, uid, gid))
+        if uid == 1000:
+            raise OSError("unsupported ownership")
+
+    monkeypatch.setattr(exporter_module.os, "chown", chown_group_only)
+
+    class FakeInnerClient:
+        def get_settings(self):
+            return {"cookies": {"sessionid": "session-first"}}
+
+    class FakeInstagramClient:
+        def __init__(self, **_kwargs):
+            self.client = FakeInnerClient()
+
+        def login(self):
+            return True
+
+    summary = export_instagram_auth_file(
+        [_account("first", tmp_path)],
+        output_path,
+        client_factory=FakeInstagramClient,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "instagram": ["sessionid=session-first"],
+        "instagram_bearer": [],
+    }
+    assert summary.exported == 1
+    assert output_path.stat().st_mode & 0o777 == 0o640
+    assert chown_calls == [(output_path, 1000, 1000), (output_path, -1, 1000)]
+
+
+def test_export_instagram_auth_file_keeps_private_mode_for_bot_uid(
+    monkeypatch, tmp_path
+):
+    output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 1000)
+
+    def fail_if_chown_called(_path, _uid, _gid):
+        raise AssertionError("non-root bot uid export should not chown")
+
+    monkeypatch.setattr(exporter_module.os, "chown", fail_if_chown_called)
+
+    class FakeInnerClient:
+        def get_settings(self):
+            return {"cookies": {"sessionid": "session-first"}}
+
+    class FakeInstagramClient:
+        def __init__(self, **_kwargs):
+            self.client = FakeInnerClient()
+
+        def login(self):
+            return True
+
+    summary = export_instagram_auth_file(
+        [_account("first", tmp_path)],
+        output_path,
+        client_factory=FakeInstagramClient,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "instagram": ["sessionid=session-first"],
+        "instagram_bearer": [],
+    }
+    assert summary.exported == 1
+    assert output_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_export_instagram_auth_file_keeps_private_mode_when_chown_fallbacks_fail(
+    monkeypatch, tmp_path
+):
+    output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 0)
+
+    def fail_chown(_path, _uid, _gid):
+        raise OSError("unsupported ownership")
+
+    monkeypatch.setattr(exporter_module.os, "chown", fail_chown)
+
+    class FakeInnerClient:
+        def get_settings(self):
+            return {"cookies": {"sessionid": "session-first"}}
+
+    class FakeInstagramClient:
+        def __init__(self, **_kwargs):
+            self.client = FakeInnerClient()
+
+        def login(self):
+            return True
+
+    summary = export_instagram_auth_file(
+        [_account("first", tmp_path)],
+        output_path,
+        client_factory=FakeInstagramClient,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "instagram": ["sessionid=session-first"],
+        "instagram_bearer": [],
+    }
+    assert summary.exported == 1
+    assert output_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_export_instagram_auth_file_fails_for_non_bot_non_root_uid(
+    monkeypatch, tmp_path
+):
+    output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 501)
+
+    class FakeInnerClient:
+        def get_settings(self):
+            return {"cookies": {"sessionid": "session-first"}}
+
+    class FakeInstagramClient:
+        def __init__(self, **_kwargs):
+            self.client = FakeInnerClient()
+
+        def login(self):
+            return True
+
+    with pytest.raises(RuntimeError, match="bot container reads secrets as UID 1000"):
+        export_instagram_auth_file(
+            [_account("first", tmp_path)],
+            output_path,
+            client_factory=FakeInstagramClient,
+        )
+
+    assert output_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_export_instagram_auth_file_redacts_login_failures(monkeypatch, tmp_path, caplog):
+    output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 1000)
 
     class FailingInstagramClient:
         def __init__(self, **_kwargs):
