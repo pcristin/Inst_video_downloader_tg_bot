@@ -1,0 +1,68 @@
+from types import SimpleNamespace
+
+import pytest
+from telegram.error import NetworkError, TimedOut
+
+from src.instagram_video_bot.services.telegram_media_retry import (
+    build_telegram_timeout_kwargs,
+    call_telegram_with_retries,
+    classify_telegram_delivery_error,
+)
+
+
+class _FlakyCall:
+    def __init__(self):
+        self.calls = 0
+        self.kwargs_seen = []
+
+    async def __call__(self, **kwargs):
+        self.calls += 1
+        self.kwargs_seen.append(kwargs)
+        if self.calls == 1:
+            raise NetworkError("httpx.ReadError: ")
+        return SimpleNamespace(ok=True)
+
+
+def test_classify_telegram_delivery_error_marks_network_read_error_transient():
+    error = NetworkError("httpx.ReadError: ")
+
+    assert classify_telegram_delivery_error(error) == "telegram_network"
+
+
+def test_classify_telegram_delivery_error_marks_timeout_transient():
+    assert classify_telegram_delivery_error(TimedOut("timed out")) == "telegram_timeout"
+
+
+def test_build_telegram_timeout_kwargs_uses_configured_values():
+    kwargs = build_telegram_timeout_kwargs(
+        read_timeout=120.0,
+        write_timeout=180.0,
+        connect_timeout=20.0,
+        pool_timeout=30.0,
+    )
+
+    assert kwargs == {
+        "read_timeout": 120.0,
+        "write_timeout": 180.0,
+        "connect_timeout": 20.0,
+        "pool_timeout": 30.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_telegram_with_retries_retries_transient_network_errors():
+    flaky = _FlakyCall()
+
+    result = await call_telegram_with_retries(
+        flaky,
+        attempts=2,
+        backoff_seconds=0.0,
+        timeout_kwargs={"write_timeout": 180.0},
+    )
+
+    assert result.ok is True
+    assert flaky.calls == 2
+    assert flaky.kwargs_seen == [
+        {"write_timeout": 180.0},
+        {"write_timeout": 180.0},
+    ]
