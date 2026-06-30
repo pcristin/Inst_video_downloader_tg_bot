@@ -285,6 +285,41 @@ def test_download_media_all_attempts_fail_without_exposing_proxy_credentials(
     assert proxy not in message
 
 
+def test_download_media_redacts_socks5h_proxy_credentials(tmp_path, monkeypatch):
+    downloader = TwitterDownloader(timeout_seconds=5)
+    proxy = "socks5h://user:secret@proxy-a.example:1080"
+
+    monkeypatch.setattr(TwitterDownloader, "_proxy_rotation_index", 0, raising=False)
+    monkeypatch.setattr(downloader, "_build_base_command", lambda: ["yt-dlp"])
+    monkeypatch.setattr(
+        twitter_downloader,
+        "settings",
+        type("SettingsStub", (), {"get_proxy_list": staticmethod(lambda: [proxy])})(),
+        raising=False,
+    )
+
+    def _run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr=f"auth failed for {proxy}",
+        )
+
+    monkeypatch.setattr(twitter_downloader.subprocess, "run", _run)
+
+    with pytest.raises(TwitterDownloadError) as exc_info:
+        downloader._download_media_sync(
+            "https://twitter.com/user/status/1901234567890123456",
+            tmp_path,
+        )
+
+    message = str(exc_info.value)
+    assert "secret" not in message
+    assert proxy not in message
+    assert "[redacted proxy]" in message
+
+
 def test_download_media_explicit_proxy_preserves_single_proxy_path(tmp_path, monkeypatch):
     explicit_proxy = "http://user:secret@explicit.example:8000"
     downloader = TwitterDownloader(timeout_seconds=5, proxy=explicit_proxy)
