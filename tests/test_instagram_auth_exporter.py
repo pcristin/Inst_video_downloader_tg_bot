@@ -129,6 +129,43 @@ def test_export_instagram_auth_file_logs_in_accounts_and_preserves_bearers(
     assert chown_calls == [(output_path, 1000, 1000)]
 
 
+def test_export_instagram_auth_file_falls_back_to_readable_mode_when_chown_fails(
+    monkeypatch, tmp_path
+):
+    output_path = tmp_path / "secrets" / "instagram_auth.json"
+    monkeypatch.setattr(exporter_module.os, "geteuid", lambda: 0)
+
+    def fail_chown(_path, _uid, _gid):
+        raise OSError("unsupported ownership")
+
+    monkeypatch.setattr(exporter_module.os, "chown", fail_chown)
+
+    class FakeInnerClient:
+        def get_settings(self):
+            return {"cookies": {"sessionid": "session-first"}}
+
+    class FakeInstagramClient:
+        def __init__(self, **_kwargs):
+            self.client = FakeInnerClient()
+
+        def login(self):
+            return True
+
+    summary = export_instagram_auth_file(
+        [_account("first", tmp_path)],
+        output_path,
+        client_factory=FakeInstagramClient,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "instagram": ["sessionid=session-first"],
+        "instagram_bearer": [],
+    }
+    assert summary.exported == 1
+    assert output_path.stat().st_mode & 0o777 == 0o644
+
+
 def test_export_instagram_auth_file_redacts_login_failures(tmp_path, caplog):
     output_path = tmp_path / "secrets" / "instagram_auth.json"
 

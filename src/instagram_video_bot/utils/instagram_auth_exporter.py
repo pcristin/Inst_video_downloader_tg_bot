@@ -202,17 +202,25 @@ def _write_auth_payload(path: Path, payload: Mapping[str, Any]) -> None:
     )
     os.chmod(temporary_path, 0o600)
     temporary_path.replace(path)
-    _chown_for_container_bot_user(path)
-    os.chmod(path, 0o600)
+    if _chown_for_container_bot_user(path):
+        os.chmod(path, 0o600)
+    else:
+        # Docker Compose local secrets ignore configured uid/gid/mode and project
+        # the source file permissions. Keep the file readable by the bot user
+        # when ownership cannot be adjusted on the host filesystem.
+        os.chmod(path, 0o644)
 
 
-def _chown_for_container_bot_user(path: Path) -> None:
+def _chown_for_container_bot_user(path: Path) -> bool:
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
-        return
+        return False
     try:
         os.chown(path, CONTAINER_BOT_UID, CONTAINER_BOT_GID)
+        return True
     except OSError as exc:
         logger.warning(
-            "Could not change auth export owner for container readability (%s)",
+            "Could not change auth export owner for container readability; "
+            "falling back to owner-independent read mode (%s)",
             type(exc).__name__,
         )
+        return False
