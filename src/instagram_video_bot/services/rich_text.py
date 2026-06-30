@@ -69,7 +69,7 @@ def code(text: str) -> RichText:
 
 def command_reply_rich_text(text: str) -> RichText:
     entities: list[MessageEntity] = []
-    for match in re.finditer(r"(?m)^([^:\n]{1,48}:)", text):
+    for match in re.finditer(r"(?m)^([^\s\-:\n][^:\n]{0,47}:)", text):
         entities.append(
             MessageEntity(
                 type=MessageEntity.BOLD,
@@ -78,15 +78,25 @@ def command_reply_rich_text(text: str) -> RichText:
             )
         )
     for match in re.finditer(r"(?<![A-Za-z0-9_])/[A-Za-z][A-Za-z0-9_]*", text):
+        offset = _utf16_offset(text, match.start())
+        length = _utf16_len(match.group(0))
+        if any(_entity_ranges_overlap(offset, length, entity) for entity in entities):
+            continue
         entities.append(
             MessageEntity(
                 type=MessageEntity.CODE,
-                offset=_utf16_offset(text, match.start()),
-                length=_utf16_len(match.group(0)),
+                offset=offset,
+                length=length,
             )
         )
     entities.sort(key=lambda entity: entity.offset)
     return RichText(text, entities)
+
+
+def _entity_ranges_overlap(offset: int, length: int, entity: MessageEntity) -> bool:
+    end = offset + length
+    entity_end = entity.offset + entity.length
+    return offset < entity_end and entity.offset < end
 
 
 def media_caption_rich_text(title: str) -> RichText:

@@ -46,15 +46,23 @@ def test_command_reply_rich_text_does_not_treat_slash_separated_words_as_command
     ] == [
         (MessageEntity.BOLD, 0, len("Supported links:")),
         (
-            MessageEntity.BOLD,
-            len("Supported links:\n"),
-            len("- Twitter/X:"),
-        ),
-        (
             MessageEntity.CODE,
             len("Supported links:\n- Twitter/X: "),
             len("/status"),
         ),
+    ]
+
+
+def test_command_reply_rich_text_does_not_overlap_commands_with_bold_rows():
+    text = "Commands:\n- /chaos status - chaos mode status: off\n"
+
+    rich_text = command_reply_rich_text(text)
+
+    assert [
+        (entity.type, entity.offset, entity.length) for entity in rich_text.entities
+    ] == [
+        (MessageEntity.BOLD, 0, len("Commands:")),
+        (MessageEntity.CODE, len("Commands:\n- "), len("/chaos")),
     ]
 
 
