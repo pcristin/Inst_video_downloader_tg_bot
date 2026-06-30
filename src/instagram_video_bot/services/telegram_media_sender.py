@@ -151,6 +151,7 @@ class TelegramMediaSender:
             attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
             backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
             timeout_kwargs=self._telegram_media_timeout_kwargs(),
+            retry_network_errors=False,
             context={
                 "chat_id": request_context.chat_id,
                 "media_type": media_item.media_type,
@@ -269,6 +270,7 @@ class TelegramMediaSender:
             attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
             backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
             timeout_kwargs=self._telegram_media_timeout_kwargs(),
+            retry_network_errors=False,
             context={
                 "chat_id": request_context.chat_id,
                 "media_count": len(media_items),

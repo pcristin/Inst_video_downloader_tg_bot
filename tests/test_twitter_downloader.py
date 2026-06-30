@@ -145,6 +145,53 @@ def test_download_media_falls_back_to_first_configured_proxy_after_direct_failur
     assert commands[-1][-2:] == ["--proxy", proxy]
 
 
+def test_download_media_fallback_ignores_artifacts_from_failed_attempt(
+    tmp_path, monkeypatch
+):
+    downloader = TwitterDownloader(timeout_seconds=5)
+    proxy = "http://proxy-a.example:8000"
+
+    monkeypatch.setattr(TwitterDownloader, "_proxy_rotation_index", 0, raising=False)
+    monkeypatch.setattr(downloader, "_build_base_command", lambda: ["yt-dlp"])
+    monkeypatch.setattr(
+        twitter_downloader,
+        "settings",
+        type("SettingsStub", (), {"get_proxy_list": staticmethod(lambda: [proxy])})(),
+        raising=False,
+    )
+
+    def _write_output_file(cmd, payload: bytes) -> None:
+        output_template = cmd[cmd.index("-o") + 1]
+        output_path = output_template.replace("%(autonumber)02d", "01").replace(
+            "%(ext)s", "mp4"
+        )
+        with open(output_path, "wb") as file_handle:
+            file_handle.write(payload)
+
+    def _run(cmd, **kwargs):
+        if "--skip-download" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
+        if "--proxy" in cmd:
+            _write_output_file(cmd, b"proxy-video")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        _write_output_file(cmd, b"stale-direct-video")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="direct failed")
+
+    monkeypatch.setattr(twitter_downloader.subprocess, "run", _run)
+
+    result = downloader._download_media_sync(
+        "https://twitter.com/user/status/1901234567890123456",
+        tmp_path,
+    )
+
+    assert len(result.media_items) == 1
+    assert result.media_items[0].file_path.read_bytes() == b"proxy-video"
+    stale_files = [
+        path for path in tmp_path.glob("*direct*") if path.read_bytes() == b"stale-direct-video"
+    ]
+    assert stale_files
+
+
 def test_download_media_rotates_next_fallback_start_after_proxy_success(tmp_path, monkeypatch):
     downloader = TwitterDownloader(timeout_seconds=5)
     commands = []

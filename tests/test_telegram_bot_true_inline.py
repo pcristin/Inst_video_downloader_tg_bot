@@ -497,7 +497,8 @@ async def test_expired_inline_callback_answers_expired_without_attach_or_schedul
 async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
     store = StateStore(tmp_path / "state.db")
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    started_at = datetime.now(timezone.utc)
+    expires_at = started_at + timedelta(minutes=15)
     store.create_inline_session(
         session_token="s1",
         user_id=1001,
@@ -506,6 +507,7 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
         provider="instagram",
         provider_label="Instagram",
         expires_at=expires_at,
+        access_kind="subscription",
     )
     store.attach_inline_message("s1", inline_message_id="inline-msg")
     bot = TelegramBot(state_store=store)
@@ -534,6 +536,11 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
         "inline_message_id": "inline-msg",
         "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.",
     }
+    assert store.get_subscription_delivery_stats(
+        user_id=1001,
+        started_at=started_at - timedelta(seconds=1),
+        expires_at=expires_at,
+    ) == {"success": 0, "failed": 1, "attempts": 1, "failure_rate": 1.0}
 
 
 @pytest.mark.asyncio

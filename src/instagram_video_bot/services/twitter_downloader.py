@@ -79,30 +79,37 @@ class TwitterDownloader:
     def _download_media_sync(self, url: str, output_dir: Path) -> TwitterDownloadResult:
         output_dir.mkdir(parents=True, exist_ok=True)
         status_id = self._extract_status_id(url)
-        prefix = f"twitter_{status_id}_{int(time.time() * 1000)}"
-        output_template = str(output_dir / f"{prefix}_%(autonumber)02d.%(ext)s")
+        base_prefix = f"twitter_{status_id}_{time.time_ns()}"
 
         errors: List[str] = []
 
         if self.proxy:
-            file_paths = self._run_download_attempt(url, output_template, output_dir, prefix, self.proxy)
+            file_paths = self._run_download_attempt(
+                url,
+                output_dir,
+                f"{base_prefix}_explicit",
+                self.proxy,
+            )
             return self._build_download_result(url, file_paths, self.proxy)
 
         try:
-            file_paths = self._run_download_attempt(url, output_template, output_dir, prefix)
+            file_paths = self._run_download_attempt(
+                url,
+                output_dir,
+                f"{base_prefix}_direct",
+            )
             return self._build_download_result(url, file_paths)
         except TwitterDownloadError as exc:
             errors.append(str(exc))
 
         configured_proxies = settings.get_proxy_list()
         proxy_attempts = self._rotated_configured_proxies(configured_proxies)
-        for proxy in proxy_attempts:
+        for attempt_index, proxy in enumerate(proxy_attempts, start=1):
             try:
                 file_paths = self._run_download_attempt(
                     url,
-                    output_template,
                     output_dir,
-                    prefix,
+                    f"{base_prefix}_proxy{attempt_index}",
                     proxy,
                 )
             except TwitterDownloadError as exc:
@@ -121,11 +128,11 @@ class TwitterDownloader:
     def _run_download_attempt(
         self,
         url: str,
-        output_template: str,
         output_dir: Path,
         prefix: str,
         proxy: str | None = None,
     ) -> Sequence[Path]:
+        output_template = str(output_dir / f"{prefix}_%(autonumber)02d.%(ext)s")
         cmd = self._build_base_command()
         cmd.extend(
             [

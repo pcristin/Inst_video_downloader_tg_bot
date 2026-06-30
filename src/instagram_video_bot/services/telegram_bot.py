@@ -1031,6 +1031,9 @@ class TelegramBot:
                     failure_stage="preflight",
                     error_class=None,
                 )
+                failed_session = self.state_store.get_inline_session(session_token)
+                if failed_session is not None:
+                    self._record_failed_inline_access(failed_session)
                 if one_time_payment_id:
                     await self._refund_one_time_payment(
                         context,

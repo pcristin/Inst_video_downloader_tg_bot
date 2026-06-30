@@ -54,8 +54,14 @@ def classify_telegram_delivery_error(error: Exception) -> str:
     return error.__class__.__name__
 
 
-def is_retriable_telegram_delivery_error(error: Exception) -> bool:
-    return isinstance(error, (NetworkError, TimedOut, RetryAfter))
+def is_retriable_telegram_delivery_error(
+    error: Exception, *, retry_network_errors: bool = True
+) -> bool:
+    if isinstance(error, RetryAfter):
+        return True
+    if retry_network_errors and isinstance(error, (NetworkError, TimedOut)):
+        return True
+    return False
 
 
 def _safe_log_context(context: dict[str, Any] | None) -> dict[str, Any]:
@@ -82,6 +88,7 @@ async def call_telegram_with_retries(
     backoff_seconds: float,
     timeout_kwargs: dict[str, float],
     context: dict[str, Any] | None = None,
+    retry_network_errors: bool = True,
 ) -> T:
     max_attempts = max(1, attempts)
     last_error: Exception | None = None
@@ -90,7 +97,12 @@ async def call_telegram_with_retries(
             return await operation(**timeout_kwargs)
         except Exception as error:
             last_error = error
-            if not is_retriable_telegram_delivery_error(error) or attempt == max_attempts - 1:
+            if (
+                not is_retriable_telegram_delivery_error(
+                    error, retry_network_errors=retry_network_errors
+                )
+                or attempt == max_attempts - 1
+            ):
                 raise
             logger.warning(
                 "Retrying Telegram media operation after transient error",

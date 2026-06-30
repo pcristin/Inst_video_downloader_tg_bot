@@ -67,20 +67,6 @@ def code(text: str) -> RichText:
     )
 
 
-def link(text: str, url: str) -> RichText:
-    return RichText(
-        text,
-        [
-            MessageEntity(
-                type=MessageEntity.TEXT_LINK,
-                offset=0,
-                length=_utf16_len(text),
-                url=url,
-            )
-        ],
-    )
-
-
 def command_reply_rich_text(text: str) -> RichText:
     entities: list[MessageEntity] = []
     for match in re.finditer(r"(?m)^([^:\n]{1,48}:)", text):
@@ -91,7 +77,7 @@ def command_reply_rich_text(text: str) -> RichText:
                 length=_utf16_len(match.group(1)),
             )
         )
-    for match in re.finditer(r"/[A-Za-z][A-Za-z0-9_]*", text):
+    for match in re.finditer(r"(?<![A-Za-z0-9_])/[A-Za-z][A-Za-z0-9_]*", text):
         entities.append(
             MessageEntity(
                 type=MessageEntity.CODE,

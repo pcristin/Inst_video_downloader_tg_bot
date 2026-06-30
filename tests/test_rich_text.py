@@ -36,6 +36,28 @@ def test_command_reply_rich_text_preserves_text_and_marks_commands():
     ]
 
 
+def test_command_reply_rich_text_does_not_treat_slash_separated_words_as_commands():
+    text = "Supported links:\n- Twitter/X: /status/... links\n"
+
+    rich_text = command_reply_rich_text(text)
+
+    assert [
+        (entity.type, entity.offset, entity.length) for entity in rich_text.entities
+    ] == [
+        (MessageEntity.BOLD, 0, len("Supported links:")),
+        (
+            MessageEntity.BOLD,
+            len("Supported links:\n"),
+            len("- Twitter/X:"),
+        ),
+        (
+            MessageEntity.CODE,
+            len("Supported links:\n- Twitter/X: "),
+            len("/status"),
+        ),
+    ]
+
+
 def test_media_caption_rich_text_preserves_caption_and_formats_static_prefix():
     rich_text = media_caption_rich_text("🙂 title")
 
