@@ -7,6 +7,17 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+_RESERVED_LOG_RECORD_KEYS = set(
+    logging.LogRecord(
+        name="",
+        level=0,
+        pathname="",
+        lineno=0,
+        msg="",
+        args=(),
+        exc_info=None,
+    ).__dict__,
+) | {"message", "asctime"}
 
 
 def build_telegram_timeout_kwargs(
@@ -47,6 +58,23 @@ def is_retriable_telegram_delivery_error(error: Exception) -> bool:
     return isinstance(error, (NetworkError, TimedOut, RetryAfter))
 
 
+def _safe_log_context(context: dict[str, Any] | None) -> dict[str, Any]:
+    if context is None:
+        return {}
+    return {key: value for key, value in context.items() if key not in _RESERVED_LOG_RECORD_KEYS}
+
+
+def _retry_sleep_seconds(error: Exception, *, backoff_seconds: float, attempt: int) -> float:
+    generic_backoff = max(0.0, backoff_seconds) * (attempt + 1)
+    if not isinstance(error, RetryAfter):
+        return generic_backoff
+
+    retry_after = error.retry_after
+    if hasattr(retry_after, "total_seconds"):
+        retry_after = retry_after.total_seconds()
+    return max(generic_backoff, float(retry_after))
+
+
 async def call_telegram_with_retries(
     operation: Callable[..., Awaitable[T]],
     *,
@@ -70,9 +98,11 @@ async def call_telegram_with_retries(
                     "attempt": attempt + 1,
                     "attempts": max_attempts,
                     "failure_class": classify_telegram_delivery_error(error),
-                    **(context or {}),
+                    **_safe_log_context(context),
                 },
             )
-            await asyncio.sleep(max(0.0, backoff_seconds) * (attempt + 1))
+            await asyncio.sleep(
+                _retry_sleep_seconds(error, backoff_seconds=backoff_seconds, attempt=attempt),
+            )
     assert last_error is not None
     raise last_error
