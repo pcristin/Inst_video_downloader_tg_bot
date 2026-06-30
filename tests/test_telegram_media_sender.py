@@ -254,7 +254,7 @@ async def test_media_sender_adds_caption_entities_to_media_group_first_item(tmp_
 
 
 @pytest.mark.asyncio
-async def test_media_sender_retries_flaky_local_video_upload_with_timeout_kwargs(
+async def test_media_sender_does_not_retry_ambiguous_local_video_network_error(
     monkeypatch, tmp_path
 ):
     store = StateStore(tmp_path / "state.db")
@@ -269,27 +269,28 @@ async def test_media_sender_retries_flaky_local_video_upload_with_timeout_kwargs
 
     monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
 
-    await sender.send_media(
-        _FakeContext(fake_bot),
-        request_context,
-        VideoInfo(
-            file_path=media_file,
-            title="Flaky local sender",
-            media_items=[MediaItem(file_path=media_file, media_type="video")],
-            primary_media_type="video",
-        ),
-    )
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=media_file,
+                title="Flaky local sender",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            ),
+        )
 
-    assert len(fake_bot.video_calls) == 2
-    for call in fake_bot.video_calls:
-        assert call["write_timeout"] == 60.0
-        assert call["read_timeout"] == 120.0
-        assert call["connect_timeout"] == 20.0
-        assert call["pool_timeout"] == 30.0
+    assert len(fake_bot.video_calls) == 1
+    call = fake_bot.video_calls[0]
+    assert call["write_timeout"] == 60.0
+    assert call["read_timeout"] == 120.0
+    assert call["connect_timeout"] == 20.0
+    assert call["pool_timeout"] == 30.0
 
 
 @pytest.mark.asyncio
-async def test_media_sender_reopens_local_video_stream_for_each_retry(
+async def test_media_sender_passes_readable_local_video_stream_on_network_error(
     monkeypatch, tmp_path
 ):
     store = StateStore(tmp_path / "state.db")
@@ -304,23 +305,24 @@ async def test_media_sender_reopens_local_video_stream_for_each_retry(
 
     monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
 
-    await sender.send_media(
-        _FakeContext(fake_bot),
-        request_context,
-        VideoInfo(
-            file_path=media_file,
-            title="Fresh stream sender",
-            media_items=[MediaItem(file_path=media_file, media_type="video")],
-            primary_media_type="video",
-        ),
-    )
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=media_file,
+                title="Fresh stream sender",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            ),
+        )
 
-    assert fake_bot.payloads == [b"video", b"video"]
-    assert fake_bot.stream_ids[0] != fake_bot.stream_ids[1]
+    assert fake_bot.payloads == [b"video"]
+    assert len(fake_bot.stream_ids) == 1
 
 
 @pytest.mark.asyncio
-async def test_media_sender_retries_flaky_local_media_group_with_fresh_media(
+async def test_media_sender_does_not_retry_ambiguous_local_media_group_network_error(
     monkeypatch, tmp_path
 ):
     store = StateStore(tmp_path / "state.db")
@@ -337,27 +339,25 @@ async def test_media_sender_retries_flaky_local_media_group_with_fresh_media(
 
     monkeypatch.setattr(telegram_media_retry.asyncio, "sleep", no_sleep)
 
-    await sender.send_media(
-        _FakeContext(fake_bot),
-        request_context,
-        VideoInfo(
-            file_path=first,
-            title="Flaky album",
-            media_items=[
-                MediaItem(file_path=first, media_type="video"),
-                MediaItem(file_path=second, media_type="video"),
-            ],
-            primary_media_type="video",
-        ),
-    )
+    with pytest.raises(NetworkError):
+        await sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            VideoInfo(
+                file_path=first,
+                title="Flaky album",
+                media_items=[
+                    MediaItem(file_path=first, media_type="video"),
+                    MediaItem(file_path=second, media_type="video"),
+                ],
+                primary_media_type="video",
+            ),
+        )
 
-    assert len(fake_bot.media_group_calls) == 2
-    assert fake_bot.payloads == [
-        [b"first-video", b"second-video"],
-        [b"first-video", b"second-video"],
-    ]
-    assert fake_bot.media_object_ids[0] != fake_bot.media_object_ids[1]
-    assert fake_bot.input_file_ids[0] != fake_bot.input_file_ids[1]
+    assert len(fake_bot.media_group_calls) == 1
+    assert fake_bot.payloads == [[b"first-video", b"second-video"]]
+    assert len(fake_bot.media_object_ids) == 1
+    assert len(fake_bot.input_file_ids) == 1
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,23 @@ async def test_call_telegram_with_retries_retries_transient_network_errors():
 
 
 @pytest.mark.asyncio
+async def test_call_telegram_with_retries_can_disable_network_error_retries():
+    flaky = _FlakyCall()
+
+    with pytest.raises(NetworkError):
+        await call_telegram_with_retries(
+            flaky,
+            attempts=2,
+            backoff_seconds=0.0,
+            timeout_kwargs={"write_timeout": 180.0},
+            retry_network_errors=False,
+        )
+
+    assert flaky.calls == 1
+    assert flaky.kwargs_seen == [{"write_timeout": 180.0}]
+
+
+@pytest.mark.asyncio
 async def test_call_telegram_with_retries_honors_retry_after_sleep(monkeypatch):
     retry_after = _RetryAfterCall()
     sleep_durations = []
@@ -104,8 +122,9 @@ async def test_call_telegram_with_retries_honors_retry_after_sleep(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_call_telegram_with_retries_ignores_reserved_logging_context_keys():
+async def test_call_telegram_with_retries_ignores_reserved_logging_context_keys(caplog):
     flaky = _FlakyCall()
+    caplog.set_level(logging.WARNING, logger=telegram_media_retry.__name__)
 
     result = await call_telegram_with_retries(
         flaky,
@@ -117,6 +136,14 @@ async def test_call_telegram_with_retries_ignores_reserved_logging_context_keys(
 
     assert result.ok is True
     assert flaky.calls == 2
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert record.getMessage() == "Retrying Telegram media operation after transient error"
+    assert record.__dict__["chat_id"] == 123
+    assert record.__dict__["failure_class"] == "telegram_network"
+    assert record.__dict__["attempt"] == 1
+    assert record.__dict__["attempts"] == 2
+    assert record.__dict__["name"] == telegram_media_retry.__name__
 
 
 def test_telegram_media_retry_settings_have_safe_defaults():
@@ -125,6 +152,7 @@ def test_telegram_media_retry_settings_have_safe_defaults():
         Settings.model_fields["TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS"].default
         == 1.0
     )
+    assert Settings.model_fields["TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS"].default == 60.0
     assert Settings.model_fields["TELEGRAM_MEDIA_READ_TIMEOUT_SECONDS"].default == 120.0
     assert (
         Settings.model_fields["TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS"].default
