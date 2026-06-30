@@ -1266,7 +1266,7 @@ async def test_help_formats_status_and_stats_are_russian(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_help_and_formats_send_rich_text_entities(tmp_path):
+async def test_help_sends_rich_text_and_formats_stays_plain(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/help")
     context = _FakeContext(_FakeBot())
@@ -1275,11 +1275,10 @@ async def test_help_and_formats_send_rich_text_entities(tmp_path):
     await telegram_bot.formats_command(update, context)
 
     help_entities = update.message.reply_kwargs[0]["entities"]
-    formats_entities = update.message.reply_kwargs[1]["entities"]
     assert any(entity.type == MessageEntity.BOLD for entity in help_entities)
     assert any(entity.type == MessageEntity.CODE for entity in help_entities)
-    assert any(entity.type == MessageEntity.BOLD for entity in formats_entities)
     assert "parse_mode" not in update.message.reply_kwargs[0]
+    assert "entities" not in update.message.reply_kwargs[1]
     assert "parse_mode" not in update.message.reply_kwargs[1]
 
 
