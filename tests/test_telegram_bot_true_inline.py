@@ -1011,7 +1011,7 @@ async def test_owner_can_whitelist_user_by_id(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_owner_can_whitelist_forwarded_visible_user(monkeypatch, tmp_path):
+async def test_owner_forwarded_visible_user_message_does_not_whitelist(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
     store = StateStore(tmp_path / "state.db")
     bot = TelegramBot(state_store=store)
@@ -1023,11 +1023,12 @@ async def test_owner_can_whitelist_forwarded_visible_user(monkeypatch, tmp_path)
         SimpleNamespace(bot=SimpleNamespace()),
     )
 
-    assert bot.state_store.is_inline_whitelisted(1001) is True
+    assert bot.state_store.is_inline_whitelisted(1001) is False
+    assert message.replies == []
 
 
 @pytest.mark.asyncio
-async def test_owner_can_whitelist_forwarded_non_text_visible_user(monkeypatch, tmp_path):
+async def test_owner_forwarded_visible_user_media_does_not_whitelist(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 42)
     store = StateStore(tmp_path / "state.db")
     bot = TelegramBot(state_store=store)
@@ -1039,7 +1040,8 @@ async def test_owner_can_whitelist_forwarded_non_text_visible_user(monkeypatch, 
         SimpleNamespace(bot=SimpleNamespace()),
     )
 
-    assert bot.state_store.is_inline_whitelisted(1001) is True
+    assert bot.state_store.is_inline_whitelisted(1001) is False
+    assert message.replies == []
 
 
 @pytest.mark.asyncio

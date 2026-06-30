@@ -41,8 +41,7 @@ from .telegram_provider_metrics import record_provider_metrics
 from .telegram_status import (build_error_message, build_submission_message,
                               delete_status_message, edit_status_message,
                               safe_edit_text)
-from .telegram_update_helpers import (forwarded_visible_user_id,
-                                      language_from_profile,
+from .telegram_update_helpers import (language_from_profile,
                                       parse_positive_int_arg, parse_toggle_arg,
                                       request_user_id, request_user_label,
                                       user_label)
@@ -1592,33 +1591,6 @@ class TelegramBot:
     @staticmethod
     def _language_from_profile(language_code: str | None) -> str:
         return language_from_profile(language_code)
-
-    def _message_is_from_owner(self, update: Update) -> bool:
-        return (
-            settings.BOT_OWNER_USER_ID is not None
-            and update.effective_user is not None
-            and update.effective_user.id == settings.BOT_OWNER_USER_ID
-        )
-
-    async def _whitelist_forwarded_visible_user(self, update: Update) -> bool:
-        if not update.message or not update.effective_user:
-            return False
-        forwarded_user_id = self._forwarded_visible_user_id(update.message)
-        if forwarded_user_id is None:
-            return False
-        self.state_store.add_inline_whitelist_user(
-            forwarded_user_id,
-            added_by_user_id=update.effective_user.id,
-            note="owner_forward",
-        )
-        await update.message.reply_text(
-            ChaosText.inline_whitelist_forward_added(forwarded_user_id)
-        )
-        return True
-
-    @staticmethod
-    def _forwarded_visible_user_id(message: Message) -> int | None:
-        return forwarded_visible_user_id(message)
 
     async def _toggle_group_setting(
         self,

@@ -104,7 +104,9 @@ accounts-reset-old: ## Reset accounts banned longer than HOURS hours (default 24
 	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
 
 accounts-export-auth: ## Export fast fallback cookies from configured Instagram accounts
-	uv run --frozen python manage_accounts.py export-auth
+	@mkdir -p secrets
+	@test -f secrets/instagram_auth.json || printf '%s\n' '{"instagram":[],"instagram_bearer":[]}' > secrets/instagram_auth.json
+	docker compose run --rm --user root --entrypoint sh -v ./secrets:/app/secrets instagram-video-bot -c 'uv run --no-sync python /app/manage_accounts.py export-auth; status=$$?; chown -R 1000:1000 /app/sessions /app/secrets/instagram_auth.json 2>/dev/null || true; exit $$status'
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)
