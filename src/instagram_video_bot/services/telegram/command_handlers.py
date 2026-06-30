@@ -8,6 +8,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from ..chaos_text import ChaosText
+from ..rich_text import RichText, command_reply_rich_text
 
 
 class TelegramCommandHandlers:
@@ -24,7 +25,10 @@ class TelegramCommandHandlers:
         if not update.message:
             return
         language_code = bot._language_for_update(update)
-        await update.message.reply_text(ChaosText.start(language_code))
+        await self._reply_rich_text(
+            update.message,
+            command_reply_rich_text(ChaosText.start(language_code)),
+        )
 
     async def language_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -49,12 +53,22 @@ class TelegramCommandHandlers:
         if not update.message or not update.effective_chat:
             return
         group_settings = bot.state_store.ensure_group_settings(update.effective_chat.id)
-        await update.message.reply_text(
-            ChaosText.help(
-                group_settings["chaos_mode_enabled"],
-                bot._language_for_update(update),
-            )
+        await self._reply_rich_text(
+            update.message,
+            command_reply_rich_text(
+                ChaosText.help(
+                    group_settings["chaos_mode_enabled"],
+                    bot._language_for_update(update),
+                )
+            ),
         )
+
+    @staticmethod
+    async def _reply_rich_text(message: Any, rich_text: RichText) -> None:
+        if rich_text.entities:
+            await message.reply_text(rich_text.text, entities=rich_text.entities)
+            return
+        await message.reply_text(rich_text.text)
 
     async def admin_help_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -65,7 +79,10 @@ class TelegramCommandHandlers:
             return
         if not await bot._require_owner(update):
             return
-        await update.message.reply_text(ChaosText.admin_help())
+        await self._reply_rich_text(
+            update.message,
+            command_reply_rich_text(ChaosText.admin_help()),
+        )
 
     async def formats_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -74,8 +91,11 @@ class TelegramCommandHandlers:
         bot = self._bot
         if not update.message:
             return
-        await update.message.reply_text(
-            ChaosText.formats(bot._language_for_update(update))
+        await self._reply_rich_text(
+            update.message,
+            command_reply_rich_text(
+                ChaosText.formats(bot._language_for_update(update))
+            ),
         )
 
     async def status_command(

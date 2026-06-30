@@ -4,18 +4,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram import MessageEntity
 from telegram.error import BadRequest
 
 from src.instagram_video_bot.config.settings import settings
+from src.instagram_video_bot.services.download_models import \
+    ProviderExecutionMetrics
+from src.instagram_video_bot.services.job_manager import (RequestRecord,
+                                                          SharedJob)
 from src.instagram_video_bot.services.state_store import StateStore
-from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
-from src.instagram_video_bot.services.job_manager import SharedJob, RequestRecord
-from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
-from src.instagram_video_bot.services.video_downloader import (
-    DownloadError,
-    MediaItem,
-    VideoInfo,
-)
+from src.instagram_video_bot.services.telegram_bot import (RequestContext,
+                                                           TelegramBot)
+from src.instagram_video_bot.services.video_downloader import (DownloadError,
+                                                               MediaItem,
+                                                               VideoInfo)
 from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
@@ -94,13 +96,15 @@ class _RejectStaleGroupFileIdBot(_FakeBot):
 class _FakeStatusMessage:
     def __init__(self):
         self.texts = []
+        self.reply_kwargs = []
         self.deleted = False
 
     async def edit_text(self, text: str):
         self.texts.append(text)
 
-    async def reply_text(self, text: str):
+    async def reply_text(self, text: str, **kwargs):
         self.texts.append(text)
+        self.reply_kwargs.append(kwargs)
         return self
 
     async def delete(self):
@@ -113,10 +117,12 @@ class _FakeMessage:
         self.message_id = message_id
         self.sender_chat = sender_chat
         self.replies = []
+        self.reply_kwargs = []
         self.status_messages = []
 
-    async def reply_text(self, text: str):
+    async def reply_text(self, text: str, **kwargs):
         self.replies.append(text)
+        self.reply_kwargs.append(kwargs)
         status_message = _FakeStatusMessage()
         self.status_messages.append(status_message)
         return status_message
@@ -868,7 +874,8 @@ async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
     update = _FakeUpdate("https://www.instagram.com/reel/fail/")
 
     async def fail_download_video(self, url: str, output_dir: Path):
-        from src.instagram_video_bot.services.video_downloader import DownloadError
+        from src.instagram_video_bot.services.video_downloader import \
+            DownloadError
 
         raise DownloadError("rate limit")
 
@@ -1256,6 +1263,24 @@ async def test_help_formats_status_and_stats_are_russian(tmp_path):
     assert "Поддерживаемые ссылки" in update.message.replies[1]
     assert "Статус очереди" in update.message.replies[2]
     assert "Статистика чата" in update.message.replies[3]
+
+
+@pytest.mark.asyncio
+async def test_help_and_formats_send_rich_text_entities(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("/help")
+    context = _FakeContext(_FakeBot())
+
+    await telegram_bot.help_command(update, context)
+    await telegram_bot.formats_command(update, context)
+
+    help_entities = update.message.reply_kwargs[0]["entities"]
+    formats_entities = update.message.reply_kwargs[1]["entities"]
+    assert any(entity.type == MessageEntity.BOLD for entity in help_entities)
+    assert any(entity.type == MessageEntity.CODE for entity in help_entities)
+    assert any(entity.type == MessageEntity.BOLD for entity in formats_entities)
+    assert "parse_mode" not in update.message.reply_kwargs[0]
+    assert "parse_mode" not in update.message.reply_kwargs[1]
 
 
 @pytest.mark.asyncio
