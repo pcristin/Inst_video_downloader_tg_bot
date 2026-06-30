@@ -119,11 +119,15 @@ async def test_call_telegram_with_retries_ignores_reserved_logging_context_keys(
     assert flaky.calls == 2
 
 
-def test_telegram_media_retry_settings_have_safe_defaults(tmp_path):
-    settings = Settings(TEMP_DIR=tmp_path / "temp")
-
-    assert settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS == 2
-    assert settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS == 1.0
-    assert settings.TELEGRAM_MEDIA_READ_TIMEOUT_SECONDS == 120.0
-    assert settings.TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS == 20.0
-    assert settings.TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS == 30.0
+def test_telegram_media_retry_settings_have_safe_defaults():
+    assert Settings.model_fields["TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS"].default == 2
+    assert (
+        Settings.model_fields["TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS"].default
+        == 1.0
+    )
+    assert Settings.model_fields["TELEGRAM_MEDIA_READ_TIMEOUT_SECONDS"].default == 120.0
+    assert (
+        Settings.model_fields["TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS"].default
+        == 20.0
+    )
+    assert Settings.model_fields["TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS"].default == 30.0
