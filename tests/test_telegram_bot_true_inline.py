@@ -684,6 +684,37 @@ async def test_inline_delivery_retries_provider_download_failure(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_inline_download_wrapper_does_not_retry_permanent_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr(settings, "PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    attempts = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            attempts.append((original_url, target_dir))
+            raise DownloadError("No Instagram accounts available")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+
+    with pytest.raises(DownloadError, match="No Instagram accounts available"):
+        await bot._download_inline_video_with_retries(
+            SimpleNamespace(
+                provider="instagram",
+                original_url="https://www.instagram.com/reel/abc/",
+                normalized_url="https://www.instagram.com/reel/abc/",
+            ),
+            tmp_path / "inline",
+        )
+
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
 async def test_inline_download_wrapper_does_not_retry_non_instagram_provider(
     monkeypatch, tmp_path
 ):

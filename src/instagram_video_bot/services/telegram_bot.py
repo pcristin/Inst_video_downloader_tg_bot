@@ -1175,15 +1175,15 @@ class TelegramBot:
     @staticmethod
     def _should_retry_inline_download(error: DownloadError) -> bool:
         text = str(error).lower()
-        permanent_tokens = (
-            "content_restricted",
-            "content isn't available to everyone",
-            "certain audiences",
-            "age-restricted",
-            "age restricted",
-            "unsupported",
+        transient_tokens = (
+            "timeout",
+            "timed out",
+            "temporary",
+            "temporarily",
+            "connection",
+            "network",
         )
-        return not any(token in text for token in permanent_tokens)
+        return any(token in text for token in transient_tokens)
 
     def _mark_inline_session_failed_and_record_access(
         self,
