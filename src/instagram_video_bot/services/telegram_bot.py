@@ -1177,7 +1177,14 @@ class TelegramBot:
     def _should_retry_inline_download(error: DownloadError) -> bool:
         if isinstance(error, video_downloader_module.InstagramProviderTimeoutError):
             return False
-        if "instagram provider timed out" in str(error).lower():
+        error_text = str(error).lower()
+        if (
+            error_text.startswith("instagram provider timed out")
+            or error_text.startswith("download failed: instagram provider timed out")
+            or error_text.startswith(
+                "download failed: fast_path_error=instagram provider timed out"
+            )
+        ):
             return False
         return video_downloader_module.is_transient_download_error(error)
 
