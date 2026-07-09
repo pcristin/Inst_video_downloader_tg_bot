@@ -783,7 +783,7 @@ async def test_inline_download_wrapper_does_not_retry_wrapped_provider_timeout(
 
 
 @pytest.mark.asyncio
-async def test_inline_download_wrapper_does_not_retry_transient_with_fast_timeout(
+async def test_inline_download_wrapper_retries_transient_failure_with_fast_timeout(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 2)
@@ -794,26 +794,41 @@ async def test_inline_download_wrapper_does_not_retry_transient_with_fast_timeou
     class FakeDownloader:
         async def download_video(self, original_url, target_dir):
             attempts.append((original_url, target_dir.exists()))
-            raise DownloadError(
-                "Download failed: temporary fallback network failure "
-                "(fast_path_error=Instagram provider timed out after 1 seconds)"
+            if len(attempts) == 1:
+                raise DownloadError(
+                    "Download failed: temporary fallback network failure "
+                    "(fast_path_error=Instagram provider timed out after 1 seconds)"
+                )
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[
+                    MediaItem(
+                        file_path=media_file,
+                        media_type="video",
+                        caption="Caption",
+                    )
+                ],
+                primary_media_type="video",
             )
 
     monkeypatch.setattr(
         "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
     )
 
-    with pytest.raises(DownloadError, match="temporary fallback network failure"):
-        await bot._download_inline_video_with_retries(
-            SimpleNamespace(
-                provider="instagram",
-                original_url="https://www.instagram.com/reel/abc/",
-                normalized_url="https://www.instagram.com/reel/abc/",
-            ),
-            tmp_path / "inline",
-        )
+    video_info = await bot._download_inline_video_with_retries(
+        SimpleNamespace(
+            provider="instagram",
+            original_url="https://www.instagram.com/reel/abc/",
+            normalized_url="https://www.instagram.com/reel/abc/",
+        ),
+        tmp_path / "inline",
+    )
 
-    assert len(attempts) == 1
+    assert len(attempts) == 2
+    assert video_info.file_path.name == "video.mp4"
 
 
 @pytest.mark.asyncio
