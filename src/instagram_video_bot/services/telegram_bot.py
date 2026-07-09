@@ -1135,7 +1135,11 @@ class TelegramBot:
     async def _download_inline_video_with_retries(
         self, parsed_link: ParsedRequestLink, output_dir: Path
     ) -> VideoInfo:
-        attempts = max(1, settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS)
+        attempts = (
+            max(1, settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS)
+            if parsed_link.provider == "instagram"
+            else 1
+        )
         last_error: DownloadError | None = None
         for attempt in range(attempts):
             downloader = VideoDownloader()
