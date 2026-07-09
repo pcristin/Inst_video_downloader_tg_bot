@@ -17,6 +17,7 @@ from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
+from . import video_downloader as video_downloader_module
 from .chaos_text import ChaosText, TextContext
 from .inline_access import (build_inline_result_id,
                             build_one_time_entitlement_result_id,
@@ -1174,16 +1175,7 @@ class TelegramBot:
 
     @staticmethod
     def _should_retry_inline_download(error: DownloadError) -> bool:
-        text = str(error).lower()
-        transient_tokens = (
-            "timeout",
-            "timed out",
-            "temporary",
-            "temporarily",
-            "connection",
-            "network",
-        )
-        return any(token in text for token in transient_tokens)
+        return video_downloader_module.is_transient_download_error(error)
 
     def _mark_inline_session_failed_and_record_access(
         self,
