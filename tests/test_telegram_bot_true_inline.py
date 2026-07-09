@@ -7,11 +7,19 @@ from telegram import InputInvoiceMessageContent
 from telegram.error import NetworkError, TelegramError
 
 from src.instagram_video_bot.config.settings import settings
-from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
-from src.instagram_video_bot.services.inline_access import build_one_time_payload, build_subscription_payload
+from src.instagram_video_bot.services.download_models import (
+    DownloadError,
+    MediaItem,
+    VideoInfo,
+)
+from src.instagram_video_bot.services.inline_access import (
+    build_one_time_payload,
+    build_subscription_payload,
+)
 from src.instagram_video_bot.services.inline_delivery import InlineCachedMediaItem
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
+from src.instagram_video_bot.services.video_downloader import InstagramProviderTimeoutError
 
 
 class _FakeInlineQuery:
@@ -573,7 +581,9 @@ async def test_inline_delivery_removes_download_files_after_storage_upload(monke
             )
 
     async def fake_upload(*args, **kwargs):
-        return InlineCachedMediaItem(media_type="video", file_id="video-file-id", caption="Caption")
+        return InlineCachedMediaItem(
+            media_type="video", file_id="video-file-id", caption="Caption"
+        )
 
     fake_telegram_bot = SimpleNamespace(edited_media=None)
 
@@ -581,8 +591,13 @@ async def test_inline_delivery_removes_download_files_after_storage_upload(monke
         fake_telegram_bot.edited_media = kwargs
 
     fake_telegram_bot.edit_message_media = edit_message_media
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader)
-    monkeypatch.setattr("src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage", fake_upload)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage",
+        fake_upload,
+    )
 
     await bot._deliver_inline_session(
         SimpleNamespace(bot=fake_telegram_bot),
@@ -593,6 +608,175 @@ async def test_inline_delivery_removes_download_files_after_storage_upload(monke
     assert store.get_inline_session("s1")["status"] == "delivered"
     assert fake_telegram_bot.edited_media["inline_message_id"] == "inline-msg"
     assert output_dir.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_inline_delivery_retries_provider_download_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(settings, "PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    bot = TelegramBot(state_store=store)
+    attempts = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            attempts.append((original_url, target_dir.exists()))
+            if len(attempts) == 1:
+                partial_file = target_dir / "partial.mp4"
+                partial_file.write_bytes(b"partial")
+                raise DownloadError("temporary provider failure")
+            assert (target_dir / "partial.mp4").exists() is False
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[
+                    MediaItem(
+                        file_path=media_file,
+                        media_type="video",
+                        caption="Caption",
+                    )
+                ],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*args, **kwargs):
+        return InlineCachedMediaItem(
+            media_type="video", file_id="video-file-id", caption="Caption"
+        )
+
+    fake_telegram_bot = SimpleNamespace(edited_media=None)
+
+    async def edit_message_media(**kwargs):
+        fake_telegram_bot.edited_media = kwargs
+
+    fake_telegram_bot.edit_message_media = edit_message_media
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage",
+        fake_upload,
+    )
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=fake_telegram_bot),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "delivered"
+    assert len(attempts) == 2
+    assert fake_telegram_bot.edited_media["inline_message_id"] == "inline-msg"
+
+
+@pytest.mark.asyncio
+async def test_inline_download_wrapper_does_not_retry_permanent_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr(settings, "PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    attempts = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            attempts.append((original_url, target_dir))
+            raise DownloadError("No Instagram accounts available")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+
+    with pytest.raises(DownloadError, match="No Instagram accounts available"):
+        await bot._download_inline_video_with_retries(
+            SimpleNamespace(
+                provider="instagram",
+                original_url="https://www.instagram.com/reel/abc/",
+                normalized_url="https://www.instagram.com/reel/abc/",
+            ),
+            tmp_path / "inline",
+        )
+
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_download_wrapper_does_not_retry_instagram_provider_timeout(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr(settings, "PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    attempts = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            attempts.append((original_url, target_dir))
+            raise InstagramProviderTimeoutError(
+                "Instagram provider timed out after 1 seconds"
+            )
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+
+    with pytest.raises(InstagramProviderTimeoutError, match="timed out"):
+        await bot._download_inline_video_with_retries(
+            SimpleNamespace(
+                provider="instagram",
+                original_url="https://www.instagram.com/reel/abc/",
+                normalized_url="https://www.instagram.com/reel/abc/",
+            ),
+            tmp_path / "inline",
+        )
+
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_download_wrapper_does_not_retry_non_instagram_provider(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "PROVIDER_TRANSIENT_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr(settings, "PROVIDER_RETRY_BACKOFF_SECONDS", 0)
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    attempts = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            attempts.append((original_url, target_dir))
+            raise DownloadError("temporary provider failure")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+
+    with pytest.raises(DownloadError):
+        await bot._download_inline_video_with_retries(
+            SimpleNamespace(
+                provider="twitter",
+                original_url="https://x.com/example/status/123",
+                normalized_url="https://x.com/example/status/123",
+            ),
+            tmp_path / "inline",
+        )
+
+    assert len(attempts) == 1
 
 
 @pytest.mark.asyncio

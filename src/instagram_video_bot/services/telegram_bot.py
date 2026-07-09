@@ -17,6 +17,7 @@ from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
+from . import video_downloader as video_downloader_module
 from .chaos_text import ChaosText, TextContext
 from .inline_access import (build_inline_result_id,
                             build_one_time_entitlement_result_id,
@@ -1066,8 +1067,8 @@ class TelegramBot:
                     ):
                         output_dir.mkdir(parents=True, exist_ok=True)
                         failure_stage = "download"
-                        video_info = await VideoDownloader().download_video(
-                            parsed_link.original_url, output_dir
+                        video_info = await self._download_inline_video_with_retries(
+                            parsed_link, output_dir
                         )
                         failure_stage = "storage_upload"
                         inline_item = await upload_first_media_to_storage(
@@ -1131,6 +1132,52 @@ class TelegramBot:
                 )
         finally:
             self._inline_delivery_session_tokens.discard(session_token)
+
+    async def _download_inline_video_with_retries(
+        self, parsed_link: ParsedRequestLink, output_dir: Path
+    ) -> VideoInfo:
+        attempts = (
+            max(1, settings.PROVIDER_TRANSIENT_RETRY_ATTEMPTS)
+            if parsed_link.provider == "instagram"
+            else 1
+        )
+        last_error: DownloadError | None = None
+        for attempt in range(attempts):
+            downloader = VideoDownloader()
+            try:
+                return await downloader.download_video(
+                    parsed_link.original_url, output_dir
+                )
+            except DownloadError as error:
+                last_error = error
+                if (
+                    attempt == attempts - 1
+                    or not self._should_retry_inline_download(error)
+                ):
+                    raise
+                logger.warning(
+                    "Retrying inline provider download after failure",
+                    extra={
+                        "provider": parsed_link.provider,
+                        "normalized_url": parsed_link.normalized_url,
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                        "error_class": error.__class__.__name__,
+                    },
+                )
+                shutil.rmtree(output_dir, ignore_errors=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                await asyncio.sleep(
+                    max(0.0, settings.PROVIDER_RETRY_BACKOFF_SECONDS) * (attempt + 1)
+                )
+        assert last_error is not None
+        raise last_error
+
+    @staticmethod
+    def _should_retry_inline_download(error: DownloadError) -> bool:
+        if isinstance(error, video_downloader_module.InstagramProviderTimeoutError):
+            return False
+        return video_downloader_module.is_transient_download_error(error)
 
     def _mark_inline_session_failed_and_record_access(
         self,
