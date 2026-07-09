@@ -41,6 +41,21 @@ class InstagramProviderTimeoutError(DownloadError):
     """Raised when a blocking Instagram provider operation exceeds its budget."""
 
 
+def is_transient_download_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(
+        token in text
+        for token in (
+            "timeout",
+            "timed out",
+            "temporary",
+            "temporarily",
+            "connection",
+            "network",
+        )
+    )
+
+
 class VideoDownloader:
     """Service for downloading Instagram videos using instagrapi."""
 
@@ -421,11 +436,7 @@ class VideoDownloader:
 
     @staticmethod
     def _is_transient_download_error(error: Exception) -> bool:
-        text = str(error).lower()
-        return any(
-            token in text
-            for token in ("timeout", "timed out", "temporary", "temporarily", "connection", "network")
-        )
+        return is_transient_download_error(error)
 
     @staticmethod
     def _classify_instagram_account_failure(error: Exception) -> str:
