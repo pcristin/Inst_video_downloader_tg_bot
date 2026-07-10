@@ -273,6 +273,13 @@ class JobManager:
         if job.delivery_future and not job.delivery_future.done():
             job.delivery_future.set_result(True)
 
+    def mark_delivery_unknown(self, job: SharedJob, error: Exception) -> None:
+        """Stop delivery without replaying an ambiguous Telegram send."""
+        job.last_delivery_error = error
+        job.delivery_request_id = None
+        if job.delivery_future and not job.delivery_future.done():
+            job.delivery_future.set_result(False)
+
     def mark_delivery_failed(self, job: SharedJob, request_id: str, error: Exception) -> bool:
         return self._handoff_delivery(job, request_id, error)
 

@@ -1436,9 +1436,9 @@ class TelegramBot:
                             and not storage_upload_attempted
                         ):
                             # Telegram may have accepted the send before the timeout.
-                            # File ID delivery is safe to treat as complete without a retry.
-                            self.job_manager.mark_delivery_completed(job)
-                            break
+                            # Do not replay it, but report the unknown outcome to every waiter.
+                            self.job_manager.mark_delivery_unknown(job, error)
+                            raise
                         handed_off = self.job_manager.mark_delivery_failed(
                             job,
                             request_context.request_id,

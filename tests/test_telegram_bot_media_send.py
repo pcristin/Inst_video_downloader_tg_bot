@@ -1747,7 +1747,7 @@ async def test_shared_delivery_does_not_handoff_after_ambiguous_multi_chunk_send
         statuses = telegram_bot.state_store._conn.execute(
             "SELECT status FROM request_events ORDER BY created_at"
         ).fetchall()
-    assert [row["status"] for row in statuses] == ["completed", "completed"]
+    assert [row["status"] for row in statuses] == ["failed", "failed"]
 
 
 @pytest.mark.asyncio
