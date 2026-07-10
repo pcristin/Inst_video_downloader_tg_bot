@@ -81,7 +81,20 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             instagram_success_path TEXT,
             instagram_fallback_path TEXT,
             instagram_metadata_reused INTEGER NOT NULL DEFAULT 0,
-            failure_class TEXT
+            failure_class TEXT,
+            delivery_status TEXT,
+            delivery_error_class TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS delivery_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            error_class TEXT,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS inline_sessions (
@@ -197,6 +210,8 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             ON recent_results (chat_id, normalized_url);
         CREATE INDEX IF NOT EXISTS idx_perf_chat_finished
             ON performance_metrics (chat_id, finished_at);
+        CREATE INDEX IF NOT EXISTS idx_delivery_attempts_job_created
+            ON delivery_attempts (job_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_user_notifications_key_status
             ON user_notifications (notification_key, status);
         CREATE INDEX IF NOT EXISTS idx_user_rate_limit_user_created
@@ -224,6 +239,15 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "joined_existing INTEGER NOT NULL DEFAULT 0",
     )
     add_column_if_missing(conn, "performance_metrics", "failure_class", "failure_class TEXT")
+    add_column_if_missing(
+        conn, "performance_metrics", "delivery_status", "delivery_status TEXT"
+    )
+    add_column_if_missing(
+        conn,
+        "performance_metrics",
+        "delivery_error_class",
+        "delivery_error_class TEXT",
+    )
     add_column_if_missing(
         conn,
         "performance_metrics",
