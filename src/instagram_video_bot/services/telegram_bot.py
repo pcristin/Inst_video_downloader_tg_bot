@@ -1381,10 +1381,6 @@ class TelegramBot:
 
                     delivery_started_at = time.perf_counter()
                     try:
-                        delivery_uses_file_ids = bool(delivery_info.media_items) and all(
-                            item.telegram_file_id
-                            for item in delivery_info.media_items
-                        )
                         await self._send_staged_media(
                             context, request_context, delivery_info
                         )
@@ -1431,8 +1427,6 @@ class TelegramBot:
                         )
                         if (
                             delivery_status == "unknown"
-                            and delivery_uses_file_ids
-                            and not getattr(error, "telegram_local_upload_attempted", False)
                             and not storage_upload_attempted
                         ):
                             # Telegram may have accepted the send before the timeout.
