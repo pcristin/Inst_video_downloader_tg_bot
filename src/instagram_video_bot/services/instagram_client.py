@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
+from urllib.parse import urlparse
 
 import requests
 from instagrapi import Client
@@ -32,7 +33,13 @@ class InstagramDownloadResult:
 
     file_paths: list[Path]
     fallback_path: Literal[
-        "raw_direct", "instagrapi_native", "yt_dlp", "album", "photo", "story"
+        "raw_direct",
+        "instagrapi_native",
+        "yt_dlp",
+        "yt_dlp_public",
+        "album",
+        "photo",
+        "story",
     ]
     metadata: dict = field(default_factory=dict)
     metadata_reused: bool = False
@@ -174,7 +181,114 @@ class InstagramClient:
         """Download media by URL, including authenticated story/post handling."""
         if "/stories/" in url.lower():
             return self._download_story_media(url, output_dir)
+
+        public_result = self._download_public_ytdlp_media(url, output_dir)
+        if public_result:
+            return public_result
         return self._download_post_media(url, output_dir)
+
+    def _download_public_ytdlp_media(
+        self, url: str, output_dir: Path
+    ) -> Optional[InstagramDownloadResult]:
+        """Recover public media without account cookies or proxy settings."""
+        from yt_dlp import YoutubeDL
+
+        try:
+            with YoutubeDL(
+                {
+                    "quiet": True,
+                    "skip_download": True,
+                    "ignoreerrors": True,
+                    "ignore_no_formats_error": True,
+                    "noplaylist": False,
+                }
+            ) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+            if not isinstance(info, dict):
+                return None
+
+            entries = info.get("entries")
+            if entries is None:
+                entries = [info]
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            file_paths: list[Path] = []
+            for index, entry in enumerate(entries, start=1):
+                if not isinstance(entry, dict):
+                    continue
+
+                source = self._public_ytdlp_source(entry)
+                if not source:
+                    continue
+
+                source_url, extension = source
+                try:
+                    response = requests.get(
+                        source_url,
+                        timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+                    )
+                    response.raise_for_status()
+                    file_path = output_dir / f"public_{index}.{extension}"
+                    file_path.write_bytes(response.content)
+                    if file_path.stat().st_size > 0:
+                        file_paths.append(file_path)
+                except Exception as error:
+                    logger.info("Public yt-dlp media fetch failed: %s", error)
+
+            if not file_paths:
+                return None
+
+            return InstagramDownloadResult(
+                file_paths=file_paths,
+                fallback_path="yt_dlp_public",
+                metadata={"title": info.get("title") or ""},
+                metadata_reused=True,
+            )
+        except Exception as error:
+            logger.info("Public yt-dlp extraction failed: %s", error)
+            return None
+
+    @staticmethod
+    def _public_ytdlp_source(entry: dict) -> Optional[tuple[str, str]]:
+        """Return the best public video format or largest thumbnail source."""
+        formats = [
+            media_format
+            for media_format in entry.get("formats") or []
+            if isinstance(media_format, dict)
+            and media_format.get("url")
+            and media_format.get("vcodec") != "none"
+        ]
+        if formats:
+            selected = max(
+                formats,
+                key=lambda media_format: (
+                    media_format.get("height") or 0,
+                    media_format.get("width") or 0,
+                    media_format.get("filesize") or 0,
+                    media_format.get("tbr") or 0,
+                ),
+            )
+        else:
+            thumbnails = [
+                thumbnail
+                for thumbnail in entry.get("thumbnails") or []
+                if isinstance(thumbnail, dict) and thumbnail.get("url")
+            ]
+            if not thumbnails:
+                return None
+            selected = max(
+                thumbnails,
+                key=lambda thumbnail: (
+                    (thumbnail.get("width") or 0) * (thumbnail.get("height") or 0),
+                    thumbnail.get("width") or 0,
+                    thumbnail.get("height") or 0,
+                ),
+            )
+
+        source_url = selected["url"]
+        extension = selected.get("ext") or Path(urlparse(source_url).path).suffix.lstrip(".")
+        return source_url, extension or "bin"
 
     def _download_post_media(
         self, url: str, output_dir: Path

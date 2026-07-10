@@ -1,6 +1,13 @@
+import sys
+import types
+
 import pytest
 
-from src.instagram_video_bot.services.instagram_client import InstagramAuthError, InstagramClient
+from src.instagram_video_bot.services.instagram_client import (
+    InstagramAuthError,
+    InstagramClient,
+    InstagramDownloadResult,
+)
 
 
 class _FailingMediaAPIClient:
@@ -165,3 +172,112 @@ def test_download_media_preserves_carousel_items_from_raw_payload(tmp_path):
 
     assert result.fallback_path == "album"
     assert [path.suffix for path in result.file_paths] == [".jpg", ".mp4"]
+
+
+def test_download_media_returns_public_ytdlp_result_before_account_lookup(tmp_path):
+    expected = InstagramDownloadResult(
+        file_paths=[tmp_path / "public_1.mp4"],
+        fallback_path="yt_dlp_public",
+        metadata_reused=True,
+    )
+    client = InstagramClient(username="u", password="p")
+    client._download_public_ytdlp_media = lambda _url, _output_dir: expected
+    client._download_post_media = lambda *_args: pytest.fail(
+        "account path should not run"
+    )
+
+    assert client.download_media("https://www.instagram.com/reel/example/", tmp_path) is expected
+
+
+def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, tmp_path):
+    captured = {}
+
+    class _YoutubeDL:
+        def __init__(self, options):
+            captured["options"] = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            return {
+                "title": "Public carousel",
+                "entries": [
+                    {
+                        "formats": [
+                            {
+                                "url": "https://cdn.example.com/video-low.mp4",
+                                "ext": "mp4",
+                                "height": 480,
+                            },
+                            {
+                                "url": "https://cdn.example.com/video-high.mp4",
+                                "ext": "mp4",
+                                "height": 1080,
+                            },
+                        ]
+                    },
+                    {
+                        "thumbnails": [
+                            {
+                                "url": "https://cdn.example.com/thumb-small.jpg",
+                                "width": 320,
+                                "height": 320,
+                            },
+                            {
+                                "url": "https://cdn.example.com/thumb-large.jpg",
+                                "width": 1080,
+                                "height": 1080,
+                            },
+                        ]
+                    },
+                ],
+            }
+
+    class _Response:
+        def __init__(self, content):
+            self.content = content
+
+        def raise_for_status(self):
+            return None
+
+    requested_urls = []
+
+    def _get(url, timeout):
+        requested_urls.append((url, timeout))
+        return _Response(url.encode())
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YoutubeDL))
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get", _get
+    )
+    client = InstagramClient(username="u", password="p", proxy="http://private-proxy")
+
+    result = client._download_public_ytdlp_media(
+        "https://www.instagram.com/p/example/", tmp_path
+    )
+
+    assert result is not None
+    assert result.fallback_path == "yt_dlp_public"
+    assert result.metadata == {"title": "Public carousel"}
+    assert result.metadata_reused is True
+    assert [path.name for path in result.file_paths] == ["public_1.mp4", "public_2.jpg"]
+    assert [path.read_bytes() for path in result.file_paths] == [
+        b"https://cdn.example.com/video-high.mp4",
+        b"https://cdn.example.com/thumb-large.jpg",
+    ]
+    assert requested_urls == [
+        ("https://cdn.example.com/video-high.mp4", 15.0),
+        ("https://cdn.example.com/thumb-large.jpg", 15.0),
+    ]
+    assert captured["options"] == {
+        "quiet": True,
+        "skip_download": True,
+        "ignoreerrors": True,
+        "ignore_no_formats_error": True,
+        "noplaylist": False,
+    }
