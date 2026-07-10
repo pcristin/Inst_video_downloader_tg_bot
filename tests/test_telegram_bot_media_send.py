@@ -1692,8 +1692,12 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
 
 
 @pytest.mark.asyncio
-async def test_shared_delivery_does_not_handoff_after_ambiguous_multi_chunk_send(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("staged", "media_count"),
+    [(False, 1), (True, TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)],
+)
+async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
+    monkeypatch, tmp_path, staged, media_count
 ):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     context = _FakeContext(_FakeBot())
@@ -1716,9 +1720,9 @@ async def test_shared_delivery_does_not_handoff_after_ambiguous_multi_chunk_send
                 MediaItem(
                     file_path=media_file,
                     media_type="video",
-                    telegram_file_id=f"staged-video-id-{index}",
+                    telegram_file_id=(f"staged-video-id-{index}" if staged else None),
                 )
-                for index in range(TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)
+                for index in range(media_count)
             ],
             primary_media_type="video",
         )
