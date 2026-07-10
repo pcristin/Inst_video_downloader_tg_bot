@@ -1402,6 +1402,64 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
 
 
 @pytest.mark.asyncio
+async def test_storage_failure_fails_original_request_before_handoff(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1001, message_id=10
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1002, message_id=11
+    )
+    media_file = tmp_path / "handoff.mp4"
+    media_file.write_bytes(b"video")
+    delivered_message_ids = []
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="handoff",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    async def fake_stage_media(self, context, request_context, video_info):
+        if request_context.original_message_id == 10:
+            raise TimedOut("storage upload timed out")
+        return video_info
+
+    async def fake_send_staged_media(self, context, request_context, video_info):
+        delivered_message_ids.append(request_context.original_message_id)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+    monkeypatch.setattr(
+        TelegramBot, "_stage_media_for_delivery", fake_stage_media
+    )
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_staged_media)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert delivered_message_ids == [11]
+    with telegram_bot.state_store._lock:
+        statuses = telegram_bot.state_store._conn.execute(
+            "SELECT request_id, status FROM request_events ORDER BY created_at"
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["failed", "completed"]
+    assert first_update.message.status_messages[0].deleted is False
+    assert second_update.message.status_messages[0].deleted is True
+
+
+@pytest.mark.asyncio
 async def test_owner_only_quiet_command_requires_owner(monkeypatch, tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     update = _FakeUpdate("/quiet on")
