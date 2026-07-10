@@ -2,6 +2,7 @@ import asyncio
 import json
 from concurrent.futures import Future
 from pathlib import Path
+import sys
 import time
 import threading
 from types import SimpleNamespace
@@ -463,6 +464,33 @@ def test_instagram_client_uses_raw_direct_video_before_ytdlp(tmp_path):
     }
     assert result.metadata_reused is True
     assert calls == [("raw_direct", "https://cdn.example/high.mp4")]
+
+
+def test_instagram_client_ytdlp_fallback_uses_active_python_module(
+    tmp_path, monkeypatch
+):
+    output_file = tmp_path / "video_123.mp4"
+    captured = {}
+    client = InstagramClient.__new__(InstagramClient)
+    client.username = "acc_ytdlp"
+    client.proxy = None
+    client.last_failure_class = None
+    client.last_failure_reason = None
+    client.client = SimpleNamespace(user_agent="test-agent", cookie_jar={})
+
+    def fake_run(command, *, capture_output, text, timeout):
+        captured["command"] = command
+        output_file.write_bytes(b"x" * 1001)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = client._download_with_ytdlp_first(
+        "https://www.instagram.com/reel/example/", 123, tmp_path
+    )
+
+    assert result == output_file
+    assert captured["command"][:3] == [sys.executable, "-m", "yt_dlp"]
 
 
 def test_instagram_client_falls_back_to_native_then_ytdlp_when_raw_direct_fails(tmp_path):

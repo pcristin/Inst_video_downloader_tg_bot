@@ -1,5 +1,6 @@
 """Instagram client using instagrapi."""
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -884,7 +885,9 @@ class InstagramClient:
             output_file = output_dir / f"video_{media_pk}.mp4"
             
             cmd = [
-                "yt-dlp",
+                sys.executable,
+                "-m",
+                "yt_dlp",
                 "--no-warnings",
                 "-o", str(output_file),
                 "--no-playlist",
