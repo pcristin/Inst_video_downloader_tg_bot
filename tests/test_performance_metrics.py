@@ -85,6 +85,19 @@ def test_delivery_attempt_records_unknown_user_send_outcome(tmp_path):
     }
 
 
+def test_delivery_attempt_telemetry_write_is_best_effort(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store._conn.close()
+
+    store.record_delivery_attempt(
+        job_id="job-1",
+        request_id="request-1",
+        stage="user_send",
+        status="delivered",
+        duration_ms=200,
+    )
+
+
 def test_successful_delivery_clears_prior_delivery_error(tmp_path):
     store = StateStore(tmp_path / "state.db")
     store.start_job_metrics(

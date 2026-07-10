@@ -579,26 +579,25 @@ class StateStore:
         error_class: str | None = None,
     ) -> None:
         """Persist one direct-delivery boundary outcome for reliability analysis."""
-        with self._lock, self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO delivery_attempts (
-                    attempt_id, job_id, request_id, stage, status,
-                    duration_ms, error_class, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    uuid.uuid4().hex,
-                    job_id,
-                    request_id,
-                    stage,
-                    status,
-                    max(0, duration_ms),
-                    error_class,
-                    _utc_now().isoformat(),
-                ),
+        self._safe_metrics_write(
+            """
+            INSERT INTO delivery_attempts (
+                attempt_id, job_id, request_id, stage, status,
+                duration_ms, error_class, created_at
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                job_id,
+                request_id,
+                stage,
+                status,
+                max(0, duration_ms),
+                error_class,
+                _utc_now().isoformat(),
+            ),
+        )
 
     def get_delivery_attempts(self, job_id: str) -> list[sqlite3.Row]:
         """Return durable delivery outcomes for one job in creation order."""
