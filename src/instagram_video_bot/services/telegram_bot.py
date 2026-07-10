@@ -1402,9 +1402,13 @@ class TelegramBot:
                         )
                     except Exception as error:
                         delivery_duration_ms = self._elapsed_ms(delivery_started_at)
+                        storage_upload_attempted = getattr(
+                            error, "telegram_storage_upload_attempted", False
+                        )
                         delivery_status = (
                             "unknown"
                             if isinstance(error, NetworkError)
+                            and not storage_upload_attempted
                             else "failed"
                         )
                         self.state_store.record_delivery_metrics(
@@ -1416,7 +1420,11 @@ class TelegramBot:
                         self.state_store.record_delivery_attempt(
                             job_id=job.job_id,
                             request_id=request_context.request_id,
-                            stage="user_send",
+                            stage=(
+                                "storage_upload"
+                                if storage_upload_attempted
+                                else "user_send"
+                            ),
                             status=delivery_status,
                             duration_ms=delivery_duration_ms,
                             error_class=error.__class__.__name__,
@@ -1427,6 +1435,7 @@ class TelegramBot:
                             and len(delivery_info.media_items)
                             <= self.TELEGRAM_MEDIA_GROUP_LIMIT
                             and not getattr(error, "telegram_local_upload_attempted", False)
+                            and not storage_upload_attempted
                         ):
                             # Telegram may have accepted the send before the timeout.
                             # File ID delivery is safe to treat as complete without a retry.
@@ -1727,9 +1736,13 @@ class TelegramBot:
         except RejectedTelegramFileIdError:
             if self.media_stager is None:
                 raise
-            staged_items = await self.media_stager.stage_media(
-                context.bot, video_info.media_items, force=True
-            )
+            try:
+                staged_items = await self.media_stager.stage_media(
+                    context.bot, video_info.media_items, force=True
+                )
+            except Exception as error:
+                setattr(error, "telegram_storage_upload_attempted", True)
+                raise
             self.state_store.update_cached_telegram_file_ids(
                 request_context.chat_id,
                 request_context.normalized_url,
