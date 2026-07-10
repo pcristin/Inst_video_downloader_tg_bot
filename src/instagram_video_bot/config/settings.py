@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS: float = 30.0
     TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS: int = 2
     TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS: float = 1.0
+    TELEGRAM_MEDIA_STORAGE_CHAT_ID: Optional[int] = None
     
     # Docker-specific settings
     RUNNING_IN_DOCKER: bool = os.path.exists('/.dockerenv')
@@ -117,7 +118,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        env_ignore_empty=True,
     )
     
     def __init__(self, **kwargs):

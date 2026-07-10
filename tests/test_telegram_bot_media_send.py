@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import MessageEntity
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.download_models import \
@@ -15,6 +15,8 @@ from src.instagram_video_bot.services.job_manager import (RequestRecord,
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import (RequestContext,
                                                            TelegramBot)
+from src.instagram_video_bot.services.telegram_media_sender import \
+    RejectedTelegramFileIdError
 from src.instagram_video_bot.services.video_downloader import (DownloadError,
                                                                MediaItem,
                                                                VideoInfo)
@@ -67,6 +69,74 @@ class _FakeBot:
         return SimpleNamespace(status=self.member_status)
 
 
+class _StorageAndUserBot(_FakeBot):
+    def __init__(self, storage_chat_id: int):
+        super().__init__()
+        self.storage_chat_id = storage_chat_id
+        self.storage_video_calls = []
+        self.user_video_calls = []
+
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            self.storage_video_calls.append(kwargs)
+            return SimpleNamespace(
+                video=SimpleNamespace(file_id="stored-video-id"), photo=None
+            )
+        self.user_video_calls.append(kwargs)
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="user-video-id"), photo=None
+        )
+
+
+class _RejectStaleStorageAndUserBot(_StorageAndUserBot):
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            return await super().send_video(**kwargs)
+        self.user_video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="user-video-id"), photo=None
+        )
+
+
+class _RejectStaleStorageTimeoutBot(_StorageAndUserBot):
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            self.storage_video_calls.append(kwargs)
+            raise TimedOut("storage upload timed out")
+        self.user_video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        raise AssertionError("user delivery must not retry after restaging fails")
+
+
+class _TimeoutUserBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        raise TimedOut("user delivery timed out")
+
+
+class _RejectStaleFileIdTimeoutBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        raise TimedOut("local fallback upload timed out")
+
+
+class _StorageTimeoutBot(_FakeBot):
+    def __init__(self, storage_chat_id: int):
+        super().__init__()
+        self.storage_chat_id = storage_chat_id
+
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if kwargs["chat_id"] == self.storage_chat_id:
+            raise TimedOut("storage upload timed out")
+        raise AssertionError("final user delivery must not run after staging fails")
+
+
 class _RejectStaleFileIdBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -91,6 +161,21 @@ class _RejectStaleGroupFileIdBot(_FakeBot):
             )
             for _ in kwargs["media"]
         ]
+
+
+class _RejectSecondStagedAlbumChunkBot(_FakeBot):
+    async def send_media_group(self, **kwargs):
+        self.group_calls.append(kwargs)
+        return [
+            SimpleNamespace(
+                video=None, photo=[SimpleNamespace(file_id=f"fresh-photo-{index}")]
+            )
+            for index in range(len(kwargs["media"]))
+        ]
+
+    async def send_photo(self, **kwargs):
+        self.photo_calls.append(kwargs)
+        raise BadRequest("Wrong file identifier/HTTP URL specified")
 
 
 class _FakeStatusMessage:
@@ -224,6 +309,495 @@ async def test_send_single_video_uses_send_video(tmp_path):
     assert len(fake_bot.video_calls) == 1
     assert len(fake_bot.photo_calls) == 0
     assert len(fake_bot.group_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_send_media_stages_local_video_then_delivers_file_id(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    fake_bot = _StorageAndUserBot(storage_chat_id)
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="Video title",
+        media_items=[
+            {
+                "file_path": str(video_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+            }
+        ],
+        ttl_seconds=3600,
+    )
+    info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[MediaItem(file_path=video_file, media_type="video")],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    assert len(fake_bot.storage_video_calls) == 1
+    assert fake_bot.user_video_calls[0]["video"] == "stored-video-id"
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert cached is not None
+    assert cached.media_items[0]["telegram_file_id"] == "user-video-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_restages_rejected_cached_file_id_privately(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    fake_bot = _RejectStaleStorageAndUserBot(storage_chat_id)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="Video title",
+        media_items=[
+            {
+                "file_path": str(video_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+                "telegram_file_id": "stale-video-file-id",
+            }
+        ],
+        ttl_seconds=3600,
+    )
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert cached is not None
+
+    await telegram_bot._send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        telegram_bot._video_info_from_cache(cached),
+    )
+
+    assert [call["video"] for call in fake_bot.user_video_calls] == [
+        "stale-video-file-id",
+        "stored-video-id",
+    ]
+    assert len(fake_bot.storage_video_calls) == 1
+    refreshed = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert refreshed is not None
+    assert refreshed.media_items[0]["telegram_file_id"] == "user-video-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_reuses_healthy_cached_file_id_without_private_upload(
+    monkeypatch, tmp_path
+):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _StorageAndUserBot(storage_chat_id)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[
+            MediaItem(
+                file_path=video_file,
+                media_type="video",
+                telegram_file_id="cached-video-id",
+            )
+        ],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(_FakeContext(fake_bot), request_context, info)
+
+    assert fake_bot.storage_video_calls == []
+    assert [call["video"] for call in fake_bot.user_video_calls] == ["cached-video-id"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_timeout_records_unknown_outcome_without_failing_download(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[
+                MediaItem(
+                    file_path=video_file,
+                    media_type="video",
+                    telegram_file_id="stale-video-file-id",
+                )
+            ],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_RejectStaleFileIdTimeoutBot()), request_context, job
+    )
+
+    assert store.get_delivery_attempts(job.job_id)[0]["status"] == "unknown"
+    with store._lock:
+        request = store._conn.execute(
+            "SELECT status FROM request_events WHERE request_id = ?",
+            (request_context.request_id,),
+        ).fetchone()
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+        persisted_job = store._conn.execute(
+            "SELECT status, error_class FROM jobs WHERE job_id = ?", (job.job_id,)
+        ).fetchone()
+    assert request["status"] == "failed"
+    assert dict(metrics) == {
+        "delivery_status": "unknown",
+        "delivery_error_class": "TimedOut",
+    }
+    assert dict(persisted_job) == {"status": "completed", "error_class": None}
+
+
+@pytest.mark.asyncio
+async def test_restage_timeout_records_failed_storage_outcome(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[
+                MediaItem(
+                    file_path=video_file,
+                    media_type="video",
+                    telegram_file_id="stale-video-file-id",
+                )
+            ],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_RejectStaleStorageTimeoutBot(storage_chat_id)),
+        request_context,
+        job,
+    )
+
+    attempts = store.get_delivery_attempts(job.job_id)
+    assert [(attempt["stage"], attempt["status"]) for attempt in attempts] == [
+        ("storage_upload", "failed")
+    ]
+    with store._lock:
+        request = store._conn.execute(
+            "SELECT status FROM request_events WHERE request_id = ?",
+            (request_context.request_id,),
+        ).fetchone()
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+    assert request["status"] == "failed"
+    assert dict(metrics) == {
+        "delivery_status": "failed",
+        "delivery_error_class": "TimedOut",
+    }
+
+
+@pytest.mark.asyncio
+async def test_storage_timeout_records_failed_storage_outcome(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[MediaItem(file_path=video_file, media_type="video")],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_StorageTimeoutBot(storage_chat_id)), request_context, job
+    )
+
+    attempt = store.get_delivery_attempts(job.job_id)[0]
+    assert dict(attempt)["stage"] == "storage_upload"
+    assert dict(attempt)["status"] == "failed"
+    with store._lock:
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+    assert dict(metrics) == {
+        "delivery_status": "failed",
+        "delivery_error_class": "TimedOut",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_cached_file_id", [False, True])
+async def test_storage_success_records_successful_storage_outcome(
+    monkeypatch, tmp_path, stale_cached_file_id
+):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    video_info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[
+            MediaItem(
+                file_path=video_file,
+                media_type="video",
+                telegram_file_id=(
+                    "stale-video-file-id" if stale_cached_file_id else None
+                ),
+            )
+        ],
+        primary_media_type="video",
+    )
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(video_info)
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(
+            _RejectStaleStorageAndUserBot(storage_chat_id)
+            if stale_cached_file_id
+            else _StorageAndUserBot(storage_chat_id)
+        ),
+        request_context,
+        job,
+    )
+
+    attempts = store.get_delivery_attempts(job.job_id)
+    assert [(row["stage"], row["status"]) for row in attempts] == [
+        ("storage_upload", "delivered"),
+        ("user_send", "delivered"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1136,7 +1710,7 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
         "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
         fake_download_video,
     )
-    monkeypatch.setattr(TelegramBot, "_send_media", fake_send_media)
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_media)
 
     await telegram_bot.handle_message(first_update, context)
     await telegram_bot.handle_message(second_update, context)
@@ -1147,6 +1721,127 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
     assert second_update.message.status_messages[0].deleted is True
     assert first_update.message.status_messages[0].texts == ["Instagram: скачиваю."]
     assert second_update.message.status_messages[0].texts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("staged", "media_count"),
+    [(False, 1), (True, TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)],
+)
+async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
+    monkeypatch, tmp_path, staged, media_count
+):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1001, message_id=10
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1002, message_id=11
+    )
+    media_file = tmp_path / "ambiguous.mp4"
+    media_file.write_bytes(b"video")
+    send_attempts = []
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="ambiguous",
+            media_items=[
+                MediaItem(
+                    file_path=media_file,
+                    media_type="video",
+                    telegram_file_id=(f"staged-video-id-{index}" if staged else None),
+                )
+                for index in range(media_count)
+            ],
+            primary_media_type="video",
+        )
+
+    async def fake_send_staged_media(self, context, request_context, video_info):
+        send_attempts.append(request_context.original_message_id)
+        if request_context.original_message_id == 10:
+            raise TimedOut("Telegram send timed out")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_staged_media)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert send_attempts == [10]
+    with telegram_bot.state_store._lock:
+        statuses = telegram_bot.state_store._conn.execute(
+            "SELECT status FROM request_events ORDER BY created_at"
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["failed", "failed"]
+
+
+@pytest.mark.asyncio
+async def test_storage_failure_fails_original_request_before_handoff(monkeypatch, tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1001, message_id=10
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1002, message_id=11
+    )
+    media_file = tmp_path / "handoff.mp4"
+    media_file.write_bytes(b"video")
+    delivered_message_ids = []
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="handoff",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    async def fake_stage_media(self, context, request_context, video_info):
+        if request_context.original_message_id == 10:
+            raise TimedOut("storage upload timed out")
+        return video_info
+
+    async def fake_send_staged_media(self, context, request_context, video_info):
+        delivered_message_ids.append(request_context.original_message_id)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+    monkeypatch.setattr(
+        TelegramBot, "_stage_media_for_delivery", fake_stage_media
+    )
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_staged_media)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert delivered_message_ids == [11]
+    with telegram_bot.state_store._lock:
+        statuses = telegram_bot.state_store._conn.execute(
+            "SELECT request_id, status FROM request_events ORDER BY created_at"
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["failed", "completed"]
+    assert first_update.message.status_messages[0].deleted is False
+    assert second_update.message.status_messages[0].deleted is True
 
 
 @pytest.mark.asyncio
@@ -1707,6 +2402,38 @@ async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_i
     assert all(
         not isinstance(item.media, str) for item in fake_bot.group_calls[1]["media"]
     )
+
+
+@pytest.mark.asyncio
+async def test_later_staged_album_chunk_marks_rejected_file_id_as_ambiguous(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _RejectSecondStagedAlbumChunkBot()
+    request_context = _make_request_context(_FakeStatusMessage())
+    media_file = tmp_path / "staged.jpg"
+    media_file.write_bytes(b"photo")
+    info = VideoInfo(
+        file_path=media_file,
+        title="staged album",
+        media_items=[
+            MediaItem(
+                file_path=media_file,
+                media_type="photo",
+                telegram_file_id=f"staged-photo-{index}",
+            )
+            for index in range(TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)
+        ],
+        primary_media_type="photo",
+    )
+
+    with pytest.raises(RejectedTelegramFileIdError) as error:
+        await telegram_bot.media_sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            info,
+            fallback_to_local_on_rejected_file_id=False,
+        )
+
+    assert getattr(error.value, "telegram_user_send_ambiguous", False) is True
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,88 @@ def test_metrics_lifecycle_records_timings_and_summary(tmp_path):
     assert summary["instagram"]["auth_failures"] == 1
 
 
+def test_delivery_attempt_records_unknown_user_send_outcome(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.start_job_metrics(
+        job_id="job-1",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+    )
+
+    store.record_delivery_attempt(
+        job_id="job-1",
+        request_id="request-1",
+        stage="user_send",
+        status="unknown",
+        duration_ms=60_000,
+        error_class="TimedOut",
+    )
+    store.record_delivery_metrics(
+        "job-1",
+        delivery_duration_ms=60_000,
+        delivery_status="unknown",
+        delivery_error_class="TimedOut",
+    )
+
+    attempts = store.get_delivery_attempts("job-1")
+    assert attempts[0]["request_id"] == "request-1"
+    assert attempts[0]["stage"] == "user_send"
+    assert attempts[0]["status"] == "unknown"
+    assert attempts[0]["error_class"] == "TimedOut"
+    with store._lock:
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            ("job-1",),
+        ).fetchone()
+    assert dict(metrics) == {
+        "delivery_status": "unknown",
+        "delivery_error_class": "TimedOut",
+    }
+
+
+def test_delivery_attempt_telemetry_write_is_best_effort(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store._conn.close()
+
+    store.record_delivery_attempt(
+        job_id="job-1",
+        request_id="request-1",
+        stage="user_send",
+        status="delivered",
+        duration_ms=200,
+    )
+
+
+def test_successful_delivery_clears_prior_delivery_error(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.start_job_metrics(
+        job_id="job-1",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+    )
+    store.record_delivery_metrics(
+        "job-1",
+        delivery_duration_ms=60_000,
+        delivery_status="unknown",
+        delivery_error_class="TimedOut",
+    )
+    store.record_delivery_metrics(
+        "job-1", delivery_duration_ms=200, delivery_status="delivered"
+    )
+
+    with store._lock:
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            ("job-1",),
+        ).fetchone()
+    assert dict(metrics) == {
+        "delivery_status": "delivered",
+        "delivery_error_class": None,
+    }
+
+
 def test_metrics_schema_migrates_existing_database(tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)
@@ -181,4 +263,3 @@ def test_metrics_records_cold_instagram_latency_breakdown(tmp_path):
     assert summary["instagram"]["fast_budget_exhausted"] == 1
     assert summary["instagram"]["fallback_paths"]["raw_direct"] == 1
     assert summary["instagram"]["metadata_reused"] == 1
-

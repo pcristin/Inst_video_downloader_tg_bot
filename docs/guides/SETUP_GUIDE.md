@@ -31,7 +31,17 @@ PROXY_PASSWORD=proxypass
 
 # Optional Settings
 LOG_LEVEL=INFO
+
+# Optional reliable direct delivery staging
+# Private chat where the bot may upload media before sending a file ID to users.
+TELEGRAM_MEDIA_STORAGE_CHAT_ID=-1001234567890
 ```
+
+### Reliable Telegram Delivery
+
+Set `TELEGRAM_MEDIA_STORAGE_CHAT_ID` to a private chat where the bot has permission to send photos and videos. When configured, the bot uploads downloaded media to that chat with bounded transport retries, stores the resulting Telegram file ID, and then sends the ID to the user chat. Retried uploads can create duplicates only in private storage; the final user-chat send remains non-retried after ambiguous network failures to avoid duplicate media for users.
+
+Monitor delivery outcomes separately from downloads. A `delivery_status` of `unknown` means Telegram timed out or the network failed after the final request was sent, so the user may already have received the media. A repeated URL can reuse the stored file ID without downloading the source again.
 
 Optional authenticated fast fallback can use a read-only Instagram cookie/token JSON file before the full account fallback:
 
