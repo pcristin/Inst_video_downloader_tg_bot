@@ -388,7 +388,7 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         persisted_job = store._conn.execute(
             "SELECT status, error_class FROM jobs WHERE job_id = ?", (job.job_id,)
         ).fetchone()
-    assert request["status"] == "completed"
+    assert request["status"] == "failed"
     assert dict(metrics) == {
         "delivery_status": "unknown",
         "delivery_error_class": "TimedOut",
@@ -1422,7 +1422,13 @@ async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
         return VideoInfo(
             file_path=media_file,
             title="ambiguous",
-            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            media_items=[
+                MediaItem(
+                    file_path=media_file,
+                    media_type="video",
+                    telegram_file_id="staged-video-id",
+                )
+            ],
             primary_media_type="video",
         )
 
