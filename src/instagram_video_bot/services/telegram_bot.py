@@ -1405,6 +1405,11 @@ class TelegramBot:
                             duration_ms=delivery_duration_ms,
                             error_class=error.__class__.__name__,
                         )
+                        if delivery_status == "unknown":
+                            # Telegram may have accepted the send before the timeout.
+                            # Do not risk a duplicate by sending it to another requester.
+                            self.job_manager.mark_delivery_completed(job)
+                            break
                         handed_off = self.job_manager.mark_delivery_failed(
                             job,
                             request_context.request_id,

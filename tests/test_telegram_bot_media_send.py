@@ -388,7 +388,7 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         persisted_job = store._conn.execute(
             "SELECT status, error_class FROM jobs WHERE job_id = ?", (job.job_id,)
         ).fetchone()
-    assert request["status"] == "failed"
+    assert request["status"] == "completed"
     assert dict(metrics) == {
         "delivery_status": "unknown",
         "delivery_error_class": "TimedOut",
@@ -1399,6 +1399,57 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
     assert second_update.message.status_messages[0].deleted is True
     assert first_update.message.status_messages[0].texts == ["Instagram: скачиваю."]
     assert second_update.message.status_messages[0].texts == []
+
+
+@pytest.mark.asyncio
+async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
+    monkeypatch, tmp_path
+):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    context = _FakeContext(_FakeBot())
+    first_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1001, message_id=10
+    )
+    second_update = _FakeUpdate(
+        "https://www.instagram.com/reel/a/", user_id=1002, message_id=11
+    )
+    media_file = tmp_path / "ambiguous.mp4"
+    media_file.write_bytes(b"video")
+    send_attempts = []
+
+    async def fake_download_video(self, url: str, output_dir: Path):
+        await asyncio.sleep(0)
+        return VideoInfo(
+            file_path=media_file,
+            title="ambiguous",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        )
+
+    async def fake_send_staged_media(self, context, request_context, video_info):
+        send_attempts.append(request_context.original_message_id)
+        raise TimedOut("Telegram send timed out")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",
+        False,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        fake_download_video,
+    )
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_staged_media)
+
+    await telegram_bot.handle_message(first_update, context)
+    await telegram_bot.handle_message(second_update, context)
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+
+    assert send_attempts == [10]
+    with telegram_bot.state_store._lock:
+        statuses = telegram_bot.state_store._conn.execute(
+            "SELECT status FROM request_events ORDER BY created_at"
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["completed", "completed"]
 
 
 @pytest.mark.asyncio
