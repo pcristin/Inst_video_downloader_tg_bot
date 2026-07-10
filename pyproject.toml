@@ -14,7 +14,7 @@ dependencies = [
   "pydantic==2.13.4",
   "pydantic-settings==2.14.2",
   "python-dotenv==1.2.2",
-  "yt-dlp==2026.6.9",
+  "yt-dlp==2026.7.4",
   "pyotp==2.9.0",
   "requests==2.34.2",
   "aiofiles==25.1.0",
