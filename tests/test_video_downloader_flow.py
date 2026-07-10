@@ -493,6 +493,62 @@ def test_instagram_client_ytdlp_fallback_uses_active_python_module(
     assert captured["command"][:3] == [sys.executable, "-m", "yt_dlp"]
 
 
+def test_instagram_client_legacy_ytdlp_fallback_uses_active_python_module(
+    tmp_path, monkeypatch
+):
+    captured = {}
+    client = InstagramClient.__new__(InstagramClient)
+    client.username = "acc_ytdlp"
+    client.proxy = None
+    client.last_failure_class = None
+    client.last_failure_reason = None
+    client._pk_to_shortcode = lambda _media_pk: "example"
+    client._download_video_manually = lambda url, *_args: tmp_path / Path(url).name
+
+    def fake_run(command, *, capture_output, text, timeout):
+        captured["command"] = command
+        return SimpleNamespace(
+            returncode=0,
+            stdout="https://cdn.example/video.mp4\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert client._download_with_ytdlp(123, tmp_path) == tmp_path / "video.mp4"
+    assert captured["command"][:3] == [sys.executable, "-m", "yt_dlp"]
+
+
+def test_public_ytdlp_adapter_maps_structured_result_without_client(monkeypatch, tmp_path):
+    public_path = tmp_path / "public.jpg"
+    public_path.write_bytes(b"image")
+    adapter = InstagramProviderAdapter(None)
+
+    monkeypatch.setattr(
+        InstagramClient,
+        "download_public_ytdlp_media",
+        staticmethod(
+            lambda _url, _output_dir: SimpleNamespace(
+                file_paths=[public_path],
+                fallback_path="yt_dlp_public",
+                metadata={"title": "public title"},
+                metadata_reused=True,
+            )
+        ),
+    )
+
+    result = adapter.download_with_public_ytdlp(
+        "https://www.instagram.com/p/example/", tmp_path
+    )
+
+    assert result is not None
+    assert result.file_path == public_path
+    assert result.title == "public title"
+    assert result.primary_media_type == "photo"
+    assert result.instagram_fallback_path == "yt_dlp_public"
+    assert result.instagram_metadata_reused is True
+
+
 def test_instagram_client_falls_back_to_native_then_ytdlp_when_raw_direct_fails(tmp_path):
     ytdlp_path = tmp_path / "fallback.mp4"
     ytdlp_path.write_bytes(b"video")
@@ -658,6 +714,12 @@ async def test_fast_failure_falls_back_to_single_account(monkeypatch, tmp_path):
     expected_path.write_bytes(b"video")
 
     downloader.fast_extractor = _FastExtractorFailure()
+    public_attempts = []
+    monkeypatch.setattr(
+        downloader.instagram_adapter,
+        "download_with_public_ytdlp",
+        lambda url, _output_dir: public_attempts.append(url) or None,
+    )
     monkeypatch.setattr(
         downloader,
         "_build_single_account_client",
@@ -670,6 +732,7 @@ async def test_fast_failure_falls_back_to_single_account(monkeypatch, tmp_path):
     assert info.title == "legacy-title"
     assert info.primary_media_type == "video"
     assert len(info.media_items) == 1
+    assert public_attempts == ["https://www.instagram.com/reel/a/"]
 
 
 @pytest.mark.asyncio
@@ -684,6 +747,11 @@ async def test_story_url_routes_directly_to_legacy(monkeypatch, tmp_path):
     expected_path.write_bytes(b"photo")
 
     downloader.fast_extractor = _FastExtractorSuccess(expected_path)
+    monkeypatch.setattr(
+        downloader.instagram_adapter,
+        "download_with_public_ytdlp",
+        lambda *_args: pytest.fail("public recovery should not run for stories"),
+    )
     monkeypatch.setattr(
         downloader,
         "_build_single_account_client",
@@ -1553,6 +1621,52 @@ async def test_instagram_fast_failure_records_fallback_metrics(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_public_recovery_after_fast_failure_skips_account_acquisition_and_login(
+    monkeypatch, tmp_path
+):
+    downloader = VideoDownloader()
+    public_path = tmp_path / "public-recovery.jpg"
+    public_path.write_bytes(b"image")
+    expected = VideoInfo(
+        file_path=public_path,
+        title="public recovery",
+        description="public recovery",
+        media_items=[MediaItem(file_path=public_path, media_type="photo")],
+        primary_media_type="photo",
+        instagram_fallback_path="yt_dlp_public",
+        instagram_metadata_reused=True,
+    )
+    downloader.fast_extractor = _FastExtractorFailure()
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.get_account_manager",
+        lambda: pytest.fail("account manager should not be acquired for public recovery"),
+    )
+    monkeypatch.setattr(
+        downloader,
+        "_build_single_account_client",
+        lambda: pytest.fail("account login should not run for public recovery"),
+    )
+    monkeypatch.setattr(
+        downloader.instagram_adapter,
+        "download_with_public_ytdlp",
+        lambda _url, _output_dir: expected,
+    )
+
+    assert await downloader.download_video("https://www.instagram.com/reel/a/", tmp_path) is expected
+
+    metrics = downloader.last_provider_metrics
+    assert metrics.instagram_fast_status == "failed"
+    assert metrics.instagram_fallback_attempted is True
+    assert metrics.instagram_success_path == "yt_dlp_public"
+    assert metrics.instagram_fallback_path == "yt_dlp_public"
+    assert metrics.instagram_account_attempts == 0
+
+
+@pytest.mark.asyncio
 async def test_single_account_fallback_success_records_adapter_result_metrics(monkeypatch, tmp_path):
     downloader = VideoDownloader()
     downloader.min_delay_between_downloads = 0
@@ -1594,10 +1708,19 @@ async def test_single_account_fallback_metrics_use_result_when_adapter_state_cha
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.get_account_manager", lambda: None)
+    monkeypatch.setattr(
+        downloader.instagram_adapter, "download_with_public_ytdlp", lambda *_args: None
+    )
     expected_path = tmp_path / "single-result-metrics.mp4"
     expected_path.write_bytes(b"video")
 
+    calls = 0
+
     async def _run_instagram_sync(_operation, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
         result = VideoInfo(
             file_path=expected_path,
             title="result metrics",

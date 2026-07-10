@@ -181,14 +181,11 @@ class InstagramClient:
         """Download media by URL, including authenticated story/post handling."""
         if "/stories/" in url.lower():
             return self._download_story_media(url, output_dir)
-
-        public_result = self._download_public_ytdlp_media(url, output_dir)
-        if public_result:
-            return public_result
         return self._download_post_media(url, output_dir)
 
-    def _download_public_ytdlp_media(
-        self, url: str, output_dir: Path
+    @staticmethod
+    def download_public_ytdlp_media(
+        url: str, output_dir: Path
     ) -> Optional[InstagramDownloadResult]:
         """Recover public media without account cookies or proxy settings."""
         try:
@@ -218,7 +215,7 @@ class InstagramClient:
                 if not isinstance(entry, dict):
                     continue
 
-                source = self._public_ytdlp_source(entry)
+                source = InstagramClient._public_ytdlp_source(entry)
                 if not source:
                     continue
 
@@ -248,6 +245,13 @@ class InstagramClient:
         except Exception as error:
             logger.info("Public yt-dlp extraction failed: %s", error)
             return None
+
+    @staticmethod
+    def _download_public_ytdlp_media(
+        url: str, output_dir: Path
+    ) -> Optional[InstagramDownloadResult]:
+        """Compatibility wrapper for public yt-dlp recovery."""
+        return InstagramClient.download_public_ytdlp_media(url, output_dir)
 
     @staticmethod
     def _public_ytdlp_source(entry: dict) -> Optional[tuple[str, str]]:
@@ -1067,7 +1071,9 @@ class InstagramClient:
             output_template = str(output_dir / f"video_{media_pk}.%(ext)s")
             
             cmd = [
-                "yt-dlp",
+                sys.executable,
+                "-m",
+                "yt_dlp",
                 "--no-warnings",
                 "--extract-flat",
                 "--print", "url",

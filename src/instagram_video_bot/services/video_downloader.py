@@ -197,7 +197,6 @@ class VideoDownloader:
         """Download Instagram media with fast-path and leased fallback."""
         self.last_provider_metrics = ProviderExecutionMetrics(provider="instagram")
         lease_key = "instagram-fast"
-        manager = get_account_manager()
 
         fast_error: Optional[Exception] = None
         is_story_url = self.instagram_adapter.is_story_url(url)
@@ -251,6 +250,30 @@ class VideoDownloader:
                 )
 
         self.last_provider_metrics.instagram_fallback_attempted = True
+        if not is_story_url:
+            try:
+                public_result = await self._run_instagram_sync(
+                    lambda: self.instagram_adapter.download_with_public_ytdlp(
+                        url, output_dir
+                    )
+                )
+                if public_result:
+                    fallback_path = getattr(
+                        public_result, "instagram_fallback_path", "yt_dlp_public"
+                    )
+                    self.last_provider_metrics.instagram_success_path = "yt_dlp_public"
+                    self.last_provider_metrics.instagram_fallback_path = fallback_path
+                    self.last_provider_metrics.instagram_metadata_reused = bool(
+                        getattr(public_result, "instagram_metadata_reused", False)
+                    )
+                    return public_result
+            except Exception as error:
+                logger.info(
+                    "Public yt-dlp recovery failed; falling back to account path",
+                    extra={"error_class": error.__class__.__name__},
+                )
+
+        manager = get_account_manager()
         if manager:
             return await self._download_with_account_leases(url, output_dir, fast_error)
         return await self._download_with_single_account(url, output_dir, fast_error)

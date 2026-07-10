@@ -177,17 +177,17 @@ def test_download_media_preserves_carousel_items_from_raw_payload(tmp_path):
     assert [path.suffix for path in result.file_paths] == [".jpg", ".mp4"]
 
 
-def test_download_media_returns_public_ytdlp_result_before_account_lookup(tmp_path):
+def test_download_media_uses_account_path_after_public_recovery_moves_to_adapter(tmp_path):
     expected = InstagramDownloadResult(
-        file_paths=[tmp_path / "public_1.mp4"],
-        fallback_path="yt_dlp_public",
+        file_paths=[tmp_path / "account_1.mp4"],
+        fallback_path="instagrapi_native",
         metadata_reused=True,
     )
     client = InstagramClient(username="u", password="p")
-    client._download_public_ytdlp_media = lambda _url, _output_dir: expected
-    client._download_post_media = lambda *_args: pytest.fail(
-        "account path should not run"
+    client._download_public_ytdlp_media = lambda *_args: pytest.fail(
+        "public recovery belongs to the adapter before account construction"
     )
+    client._download_post_media = lambda *_args: expected
 
     assert client.download_media("https://www.instagram.com/reel/example/", tmp_path) is expected
 

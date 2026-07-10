@@ -92,6 +92,44 @@ class InstagramProviderAdapter:
             instagram_success_path=result.success_path,
         )
 
+    def download_with_public_ytdlp(
+        self, url: str, output_dir: Path
+    ) -> VideoInfo | None:
+        """Recover public media without constructing or authenticating an account client."""
+        self.last_fallback_path = None
+        self.last_metadata_reused = False
+        download_result = InstagramClient.download_public_ytdlp_media(url, output_dir)
+        if not download_result or not download_result.file_paths:
+            return None
+
+        metadata = download_result.metadata or {}
+        title = metadata.get("title") or metadata.get("caption") or ""
+        media_items = [
+            self._build_media_item(
+                file_path=file_path,
+                media_type=self._infer_media_type(file_path),
+                caption=title or None,
+                duration=metadata.get("duration"),
+                width=metadata.get("width"),
+                height=metadata.get("height"),
+            )
+            for file_path in download_result.file_paths
+        ]
+        primary_item = media_items[0]
+        self.last_fallback_path = download_result.fallback_path
+        self.last_metadata_reused = bool(download_result.metadata_reused)
+        return VideoInfo(
+            file_path=primary_item.file_path,
+            title=title,
+            duration=primary_item.duration,
+            description=title,
+            media_items=media_items,
+            primary_media_type=primary_item.media_type,
+            instagram_fallback_path=download_result.fallback_path,
+            instagram_metadata_reused=bool(download_result.metadata_reused),
+            instagram_success_path="yt_dlp_public",
+        )
+
     def download_with_instagram_client(
         self,
         *,
