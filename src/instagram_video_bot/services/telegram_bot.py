@@ -1345,6 +1345,9 @@ class TelegramBot:
                     job, request_context.request_id
                 ):
                     staging_started_at = time.perf_counter()
+                    staging_required = self.media_stager is not None and any(
+                        not item.telegram_file_id for item in video_info.media_items
+                    )
                     try:
                         delivery_info = await self._stage_media_for_delivery(
                             context, request_context, video_info
@@ -1366,6 +1369,14 @@ class TelegramBot:
                             error_class=error.__class__.__name__,
                         )
                         raise
+                    if staging_required:
+                        self.state_store.record_delivery_attempt(
+                            job_id=job.job_id,
+                            request_id=request_context.request_id,
+                            stage="storage_upload",
+                            status="delivered",
+                            duration_ms=self._elapsed_ms(staging_started_at),
+                        )
 
                     delivery_started_at = time.perf_counter()
                     try:
