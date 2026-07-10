@@ -18,12 +18,14 @@ class TelegramMediaStager:
     def __init__(self, storage_chat_id: int):
         self.storage_chat_id = storage_chat_id
 
-    async def stage_media(self, bot: Any, media_items: list[MediaItem]) -> list[MediaItem]:
+    async def stage_media(
+        self, bot: Any, media_items: list[MediaItem], *, force: bool = False
+    ) -> list[MediaItem]:
         """Return media items with durable Telegram IDs, retaining existing IDs."""
-        return [await self._stage_item(bot, item) for item in media_items]
+        return [await self._stage_item(bot, item, force=force) for item in media_items]
 
-    async def _stage_item(self, bot: Any, media_item: MediaItem) -> MediaItem:
-        if media_item.telegram_file_id:
+    async def _stage_item(self, bot: Any, media_item: MediaItem, *, force: bool) -> MediaItem:
+        if media_item.telegram_file_id and not force:
             return media_item
         self._validate_local_media(media_item)
 

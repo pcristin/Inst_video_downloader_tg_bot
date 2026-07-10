@@ -1345,9 +1345,7 @@ class TelegramBot:
                     job, request_context.request_id
                 ):
                     staging_started_at = time.perf_counter()
-                    staging_required = self.media_stager is not None and any(
-                        not item.telegram_file_id for item in video_info.media_items
-                    )
+                    staging_required = self.media_stager is not None
                     try:
                         delivery_info = await self._stage_media_for_delivery(
                             context, request_context, video_info
@@ -1695,11 +1693,9 @@ class TelegramBot:
     ) -> VideoInfo:
         """Stage local media privately so final user delivery uses file IDs."""
         delivery_info = video_info
-        if self.media_stager and any(
-            not item.telegram_file_id for item in video_info.media_items
-        ):
+        if self.media_stager:
             staged_items = await self.media_stager.stage_media(
-                context.bot, video_info.media_items
+                context.bot, video_info.media_items, force=True
             )
             self.state_store.update_cached_telegram_file_ids(
                 request_context.chat_id,
