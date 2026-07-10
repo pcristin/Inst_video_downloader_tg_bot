@@ -86,6 +86,18 @@ class _StorageAndUserBot(_FakeBot):
         )
 
 
+class _RejectStaleStorageAndUserBot(_StorageAndUserBot):
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            return await super().send_video(**kwargs)
+        self.user_video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="user-video-id"), photo=None
+        )
+
+
 class _TimeoutUserBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -315,6 +327,87 @@ async def test_send_media_stages_local_video_then_delivers_file_id(monkeypatch, 
     )
     assert cached is not None
     assert cached.media_items[0]["telegram_file_id"] == "user-video-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_restages_rejected_cached_file_id_privately(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    fake_bot = _RejectStaleStorageAndUserBot(storage_chat_id)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="Video title",
+        media_items=[
+            {
+                "file_path": str(video_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+                "telegram_file_id": "stale-video-file-id",
+            }
+        ],
+        ttl_seconds=3600,
+    )
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert cached is not None
+
+    await telegram_bot._send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        telegram_bot._video_info_from_cache(cached),
+    )
+
+    assert [call["video"] for call in fake_bot.user_video_calls] == [
+        "stale-video-file-id",
+        "stored-video-id",
+    ]
+    assert len(fake_bot.storage_video_calls) == 1
+    refreshed = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert refreshed is not None
+    assert refreshed.media_items[0]["telegram_file_id"] == "user-video-id"
+
+
+@pytest.mark.asyncio
+async def test_send_media_reuses_healthy_cached_file_id_without_private_upload(
+    monkeypatch, tmp_path
+):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _StorageAndUserBot(storage_chat_id)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[
+            MediaItem(
+                file_path=video_file,
+                media_type="video",
+                telegram_file_id="cached-video-id",
+            )
+        ],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(_FakeContext(fake_bot), request_context, info)
+
+    assert fake_bot.storage_video_calls == []
+    assert [call["video"] for call in fake_bot.user_video_calls] == ["cached-video-id"]
 
 
 @pytest.mark.asyncio
