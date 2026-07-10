@@ -191,9 +191,9 @@ class InstagramClient:
         self, url: str, output_dir: Path
     ) -> Optional[InstagramDownloadResult]:
         """Recover public media without account cookies or proxy settings."""
-        from yt_dlp import YoutubeDL
-
         try:
+            from yt_dlp import YoutubeDL
+
             with YoutubeDL(
                 {
                     "quiet": True,

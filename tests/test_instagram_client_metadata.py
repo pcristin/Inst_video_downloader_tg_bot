@@ -1,3 +1,4 @@
+import builtins
 import sys
 import types
 
@@ -157,6 +158,7 @@ def test_download_media_uses_photo_download_for_photo_posts(tmp_path):
     photo_path.write_bytes(b"photo")
     client = InstagramClient(username="u", password="p")
     client.client = _PhotoPostClient(photo_path)
+    client._download_public_ytdlp_media = lambda *_args: None
 
     result = client.download_media("https://www.instagram.com/p/photo/", tmp_path)
 
@@ -167,6 +169,7 @@ def test_download_media_uses_photo_download_for_photo_posts(tmp_path):
 def test_download_media_preserves_carousel_items_from_raw_payload(tmp_path):
     client = InstagramClient(username="u", password="p")
     client.client = _CarouselPostClient(tmp_path)
+    client._download_public_ytdlp_media = lambda *_args: None
 
     result = client.download_media("https://www.instagram.com/p/album/", tmp_path)
 
@@ -187,6 +190,26 @@ def test_download_media_returns_public_ytdlp_result_before_account_lookup(tmp_pa
     )
 
     assert client.download_media("https://www.instagram.com/reel/example/", tmp_path) is expected
+
+
+def test_download_media_uses_account_path_when_public_ytdlp_is_unavailable(
+    monkeypatch, tmp_path
+):
+    client = InstagramClient(username="u", password="p")
+    expected = InstagramDownloadResult(
+        file_paths=[tmp_path / "account.mp4"], fallback_path="instagrapi_native"
+    )
+    client._download_post_media = lambda *_args: expected
+    original_import = builtins.__import__
+
+    def _missing_ytdlp(name, *args, **kwargs):
+        if name == "yt_dlp":
+            raise ModuleNotFoundError("No module named 'yt_dlp'")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _missing_ytdlp)
+
+    assert client.download_media("https://www.instagram.com/p/example/", tmp_path) is expected
 
 
 def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, tmp_path):
