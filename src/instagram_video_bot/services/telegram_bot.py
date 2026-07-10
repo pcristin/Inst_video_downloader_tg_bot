@@ -1365,21 +1365,6 @@ class TelegramBot:
                             duration_ms=staging_duration_ms,
                             error_class=error.__class__.__name__,
                         )
-                        handed_off = self.job_manager.mark_delivery_failed(
-                            job,
-                            request_context.request_id,
-                            error,
-                        )
-                        if handed_off:
-                            logger.warning(
-                                "Delivery handoff triggered after storage staging failure",
-                                extra={
-                                    "request_id": request_context.request_id,
-                                    "job_id": job.job_id,
-                                    "chat_id": request_context.chat_id,
-                                },
-                            )
-                            continue
                         raise
 
                     delivery_started_at = time.perf_counter()
