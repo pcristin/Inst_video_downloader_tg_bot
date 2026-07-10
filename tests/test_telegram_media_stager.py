@@ -60,3 +60,9 @@ async def test_stager_preserves_existing_file_id_without_upload(tmp_path):
 
     assert staged == [item]
     assert bot.video_calls == []
+
+
+def test_stager_only_enables_streaming_for_supported_video_suffixes(tmp_path):
+    item = MediaItem(file_path=tmp_path / "video.webm", media_type="video")
+
+    assert "supports_streaming" not in TelegramMediaStager._video_kwargs(item)

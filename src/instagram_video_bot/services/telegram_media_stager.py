@@ -85,7 +85,7 @@ class TelegramMediaStager:
 
     @staticmethod
     def _video_kwargs(media_item: MediaItem) -> dict[str, object]:
-        kwargs: dict[str, object] = {"supports_streaming": True}
+        kwargs: dict[str, object] = {}
         if media_item.width:
             kwargs["width"] = media_item.width
         if media_item.height:
@@ -94,4 +94,6 @@ class TelegramMediaStager:
             kwargs["duration"] = dtm.timedelta(
                 seconds=max(0, round(float(media_item.duration)))
             )
+        if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
+            kwargs["supports_streaming"] = True
         return kwargs

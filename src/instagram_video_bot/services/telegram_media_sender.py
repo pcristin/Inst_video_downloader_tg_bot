@@ -82,26 +82,31 @@ class TelegramMediaSender:
         for offset in range(0, len(media_items), self.TELEGRAM_MEDIA_GROUP_LIMIT):
             chunk = media_items[offset : offset + self.TELEGRAM_MEDIA_GROUP_LIMIT]
             chunk_caption = caption_available if offset == 0 else None
-            if len(chunk) == 1:
-                telegram_file_ids.append(
-                    await self._send_single_media_item(
-                        context,
-                        request_context,
-                        chunk[0],
-                        chunk_caption,
-                        fallback_to_local_on_rejected_file_id,
+            try:
+                if len(chunk) == 1:
+                    telegram_file_ids.append(
+                        await self._send_single_media_item(
+                            context,
+                            request_context,
+                            chunk[0],
+                            chunk_caption,
+                            fallback_to_local_on_rejected_file_id,
+                        )
                     )
-                )
-            else:
-                telegram_file_ids.extend(
-                    await self._send_media_group_chunk(
-                        context,
-                        request_context,
-                        chunk,
-                        chunk_caption,
-                        fallback_to_local_on_rejected_file_id,
+                else:
+                    telegram_file_ids.extend(
+                        await self._send_media_group_chunk(
+                            context,
+                            request_context,
+                            chunk,
+                            chunk_caption,
+                            fallback_to_local_on_rejected_file_id,
+                        )
                     )
-                )
+            except RejectedTelegramFileIdError as error:
+                if offset:
+                    setattr(error, "telegram_user_send_ambiguous", True)
+                raise
         self._persist_telegram_file_ids(request_context, telegram_file_ids)
 
     @staticmethod
@@ -158,21 +163,17 @@ class TelegramMediaSender:
                     timeout_kwargs=timeout_kwargs,
                 )
 
-        try:
-            message = await call_telegram_with_retries(
-                upload_local_media,
-                attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
-                backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
-                timeout_kwargs=self._telegram_media_timeout_kwargs(),
-                retry_network_errors=False,
-                context={
-                    "chat_id": request_context.chat_id,
-                    "media_type": media_item.media_type,
-                },
-            )
-        except TelegramError as error:
-            self._mark_local_upload_error(error)
-            raise
+        message = await call_telegram_with_retries(
+            upload_local_media,
+            attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
+            backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
+            timeout_kwargs=self._telegram_media_timeout_kwargs(),
+            retry_network_errors=False,
+            context={
+                "chat_id": request_context.chat_id,
+                "media_type": media_item.media_type,
+            },
+        )
         return self.extract_telegram_file_id(message, media_item.media_type)
 
     async def _send_single_media_value(
@@ -246,21 +247,13 @@ class TelegramMediaSender:
                     "failure_class": "telegram_file_id_rejected",
                 },
             )
-            try:
-                messages = await self._send_media_group_values(
-                    context,
-                    request_context,
-                    media_items,
-                    caption,
-                    force_local_upload=True,
-                )
-            except TelegramError as error:
-                self._mark_local_upload_error(error)
-                raise
-        except TelegramError as error:
-            if any(not item.telegram_file_id for item in media_items):
-                self._mark_local_upload_error(error)
-            raise
+            messages = await self._send_media_group_values(
+                context,
+                request_context,
+                media_items,
+                caption,
+                force_local_upload=True,
+            )
         return [
             self.extract_telegram_file_id(message, media_item.media_type)
             for message, media_item in zip(messages or [], media_items)
@@ -368,10 +361,6 @@ class TelegramMediaSender:
                 "file reference expired",
             )
         )
-
-    @staticmethod
-    def _mark_local_upload_error(error: TelegramError) -> None:
-        setattr(error, "telegram_local_upload_attempted", True)
 
     def _persist_telegram_file_ids(
         self,

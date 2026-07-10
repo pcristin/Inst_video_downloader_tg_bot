@@ -15,6 +15,8 @@ from src.instagram_video_bot.services.job_manager import (RequestRecord,
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import (RequestContext,
                                                            TelegramBot)
+from src.instagram_video_bot.services.telegram_media_sender import \
+    RejectedTelegramFileIdError
 from src.instagram_video_bot.services.video_downloader import (DownloadError,
                                                                MediaItem,
                                                                VideoInfo)
@@ -159,6 +161,21 @@ class _RejectStaleGroupFileIdBot(_FakeBot):
             )
             for _ in kwargs["media"]
         ]
+
+
+class _RejectSecondStagedAlbumChunkBot(_FakeBot):
+    async def send_media_group(self, **kwargs):
+        self.group_calls.append(kwargs)
+        return [
+            SimpleNamespace(
+                video=None, photo=[SimpleNamespace(file_id=f"fresh-photo-{index}")]
+            )
+            for index in range(len(kwargs["media"]))
+        ]
+
+    async def send_photo(self, **kwargs):
+        self.photo_calls.append(kwargs)
+        raise BadRequest("Wrong file identifier/HTTP URL specified")
 
 
 class _FakeStatusMessage:
@@ -693,8 +710,9 @@ async def test_storage_timeout_records_failed_storage_outcome(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stale_cached_file_id", [False, True])
 async def test_storage_success_records_successful_storage_outcome(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, stale_cached_file_id
 ):
     storage_chat_id = -1001
     monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
@@ -706,7 +724,15 @@ async def test_storage_success_records_successful_storage_outcome(
     video_info = VideoInfo(
         file_path=video_file,
         title="Video title",
-        media_items=[MediaItem(file_path=video_file, media_type="video")],
+        media_items=[
+            MediaItem(
+                file_path=video_file,
+                media_type="video",
+                telegram_file_id=(
+                    "stale-video-file-id" if stale_cached_file_id else None
+                ),
+            )
+        ],
         primary_media_type="video",
     )
     result_future = asyncio.get_running_loop().create_future()
@@ -758,7 +784,13 @@ async def test_storage_success_records_successful_storage_outcome(
     )
 
     await telegram_bot._await_request(
-        _FakeContext(_StorageAndUserBot(storage_chat_id)), request_context, job
+        _FakeContext(
+            _RejectStaleStorageAndUserBot(storage_chat_id)
+            if stale_cached_file_id
+            else _StorageAndUserBot(storage_chat_id)
+        ),
+        request_context,
+        job,
     )
 
     attempts = store.get_delivery_attempts(job.job_id)
@@ -2370,6 +2402,38 @@ async def test_send_media_group_falls_back_to_local_upload_when_cached_file_id_i
     assert all(
         not isinstance(item.media, str) for item in fake_bot.group_calls[1]["media"]
     )
+
+
+@pytest.mark.asyncio
+async def test_later_staged_album_chunk_marks_rejected_file_id_as_ambiguous(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _RejectSecondStagedAlbumChunkBot()
+    request_context = _make_request_context(_FakeStatusMessage())
+    media_file = tmp_path / "staged.jpg"
+    media_file.write_bytes(b"photo")
+    info = VideoInfo(
+        file_path=media_file,
+        title="staged album",
+        media_items=[
+            MediaItem(
+                file_path=media_file,
+                media_type="photo",
+                telegram_file_id=f"staged-photo-{index}",
+            )
+            for index in range(TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)
+        ],
+        primary_media_type="photo",
+    )
+
+    with pytest.raises(RejectedTelegramFileIdError) as error:
+        await telegram_bot.media_sender.send_media(
+            _FakeContext(fake_bot),
+            request_context,
+            info,
+            fallback_to_local_on_rejected_file_id=False,
+        )
+
+    assert getattr(error.value, "telegram_user_send_ambiguous", False) is True
 
 
 @pytest.mark.asyncio
