@@ -1692,7 +1692,7 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
 
 
 @pytest.mark.asyncio
-async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
+async def test_shared_delivery_does_not_handoff_after_ambiguous_multi_chunk_send(
     monkeypatch, tmp_path
 ):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
@@ -1716,15 +1716,17 @@ async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
                 MediaItem(
                     file_path=media_file,
                     media_type="video",
-                    telegram_file_id="staged-video-id",
+                    telegram_file_id=f"staged-video-id-{index}",
                 )
+                for index in range(TelegramBot.TELEGRAM_MEDIA_GROUP_LIMIT + 1)
             ],
             primary_media_type="video",
         )
 
     async def fake_send_staged_media(self, context, request_context, video_info):
         send_attempts.append(request_context.original_message_id)
-        raise TimedOut("Telegram send timed out")
+        if request_context.original_message_id == 10:
+            raise TimedOut("Telegram send timed out")
 
     monkeypatch.setattr(
         "src.instagram_video_bot.services.telegram_bot.settings.RESULT_CACHE_ENABLED",

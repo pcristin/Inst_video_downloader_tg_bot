@@ -1432,8 +1432,6 @@ class TelegramBot:
                         if (
                             delivery_status == "unknown"
                             and delivery_uses_file_ids
-                            and len(delivery_info.media_items)
-                            <= self.TELEGRAM_MEDIA_GROUP_LIMIT
                             and not getattr(error, "telegram_local_upload_attempted", False)
                             and not storage_upload_attempted
                         ):
