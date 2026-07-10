@@ -36,7 +36,8 @@ from .telegram_inline_sessions import (inline_session_is_expired,
                                        record_failed_inline_access,
                                        record_successful_inline_access,
                                        subscription_expires_at)
-from .telegram_media_sender import TelegramMediaSender
+from .telegram_media_sender import (RejectedTelegramFileIdError,
+                                    TelegramMediaSender)
 from .telegram_media_retry import classify_telegram_delivery_error
 from .telegram_media_stager import TelegramMediaStager
 from .telegram_performance import (build_admin_performance_summary,
@@ -1345,7 +1346,9 @@ class TelegramBot:
                     job, request_context.request_id
                 ):
                     staging_started_at = time.perf_counter()
-                    staging_required = self.media_stager is not None
+                    staging_required = self.media_stager is not None and any(
+                        not item.telegram_file_id for item in video_info.media_items
+                    )
                     try:
                         delivery_info = await self._stage_media_for_delivery(
                             context, request_context, video_info
@@ -1693,9 +1696,11 @@ class TelegramBot:
     ) -> VideoInfo:
         """Stage local media privately so final user delivery uses file IDs."""
         delivery_info = video_info
-        if self.media_stager:
+        if self.media_stager and any(
+            not item.telegram_file_id for item in video_info.media_items
+        ):
             staged_items = await self.media_stager.stage_media(
-                context.bot, video_info.media_items, force=True
+                context.bot, video_info.media_items
             )
             self.state_store.update_cached_telegram_file_ids(
                 request_context.chat_id,
@@ -1712,7 +1717,30 @@ class TelegramBot:
         video_info: VideoInfo,
     ) -> None:
         """Send staged file IDs to the user chat without ambiguous retries."""
-        await self.media_sender.send_media(context, request_context, video_info)
+        try:
+            await self.media_sender.send_media(
+                context,
+                request_context,
+                video_info,
+                fallback_to_local_on_rejected_file_id=self.media_stager is None,
+            )
+        except RejectedTelegramFileIdError:
+            if self.media_stager is None:
+                raise
+            staged_items = await self.media_stager.stage_media(
+                context.bot, video_info.media_items, force=True
+            )
+            self.state_store.update_cached_telegram_file_ids(
+                request_context.chat_id,
+                request_context.normalized_url,
+                [item.telegram_file_id for item in staged_items],
+            )
+            await self.media_sender.send_media(
+                context,
+                request_context,
+                replace(video_info, media_items=staged_items),
+                fallback_to_local_on_rejected_file_id=False,
+            )
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:

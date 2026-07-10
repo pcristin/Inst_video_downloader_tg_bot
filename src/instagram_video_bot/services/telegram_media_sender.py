@@ -22,6 +22,10 @@ from .telegram_media_retry import (build_telegram_timeout_kwargs,
 logger = logging.getLogger(__name__)
 
 
+class RejectedTelegramFileIdError(TelegramError):
+    """A cached file ID was rejected before Telegram accepted a user send."""
+
+
 class MediaRequestContext(Protocol):
     """Request fields required to send and cache Telegram media."""
 
@@ -44,6 +48,8 @@ class TelegramMediaSender:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: MediaRequestContext,
         video_info: VideoInfo,
+        *,
+        fallback_to_local_on_rejected_file_id: bool = True,
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
         media_items = video_info.media_items
@@ -59,6 +65,7 @@ class TelegramMediaSender:
                     request_context,
                     media_item,
                     caption,
+                    fallback_to_local_on_rejected_file_id,
                 )
             )
             self._persist_telegram_file_ids(request_context, telegram_file_ids)
@@ -82,6 +89,7 @@ class TelegramMediaSender:
                         request_context,
                         chunk[0],
                         chunk_caption,
+                        fallback_to_local_on_rejected_file_id,
                     )
                 )
             else:
@@ -91,6 +99,7 @@ class TelegramMediaSender:
                         request_context,
                         chunk,
                         chunk_caption,
+                        fallback_to_local_on_rejected_file_id,
                     )
                 )
         self._persist_telegram_file_ids(request_context, telegram_file_ids)
@@ -110,6 +119,7 @@ class TelegramMediaSender:
         request_context: MediaRequestContext,
         media_item: MediaItem,
         caption: RichText | None,
+        fallback_to_local_on_rejected_file_id: bool,
     ) -> str | None:
         if media_item.telegram_file_id:
             try:
@@ -124,6 +134,8 @@ class TelegramMediaSender:
             except BadRequest as exc:
                 if not self.is_rejected_telegram_file_id(exc):
                     raise
+                if not fallback_to_local_on_rejected_file_id:
+                    raise RejectedTelegramFileIdError(str(exc)) from exc
                 logger.info(
                     "Cached Telegram file_id rejected; retrying local media upload",
                     extra={
@@ -210,6 +222,7 @@ class TelegramMediaSender:
         request_context: MediaRequestContext,
         media_items: list[MediaItem],
         caption: RichText | None,
+        fallback_to_local_on_rejected_file_id: bool,
     ) -> list[str | None]:
         try:
             messages = await self._send_media_group_values(
@@ -223,6 +236,8 @@ class TelegramMediaSender:
                 item.telegram_file_id for item in media_items
             ) or not self.is_rejected_telegram_file_id(exc):
                 raise
+            if not fallback_to_local_on_rejected_file_id:
+                raise RejectedTelegramFileIdError(str(exc)) from exc
             logger.info(
                 "Cached Telegram file_id rejected in media group; retrying local media upload",
                 extra={
