@@ -67,6 +67,25 @@ class _FakeBot:
         return SimpleNamespace(status=self.member_status)
 
 
+class _StorageAndUserBot(_FakeBot):
+    def __init__(self, storage_chat_id: int):
+        super().__init__()
+        self.storage_chat_id = storage_chat_id
+        self.storage_video_calls = []
+        self.user_video_calls = []
+
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            self.storage_video_calls.append(kwargs)
+            return SimpleNamespace(
+                video=SimpleNamespace(file_id="stored-video-id"), photo=None
+            )
+        self.user_video_calls.append(kwargs)
+        return SimpleNamespace(
+            video=SimpleNamespace(file_id="user-video-id"), photo=None
+        )
+
+
 class _RejectStaleFileIdBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -224,6 +243,52 @@ async def test_send_single_video_uses_send_video(tmp_path):
     assert len(fake_bot.video_calls) == 1
     assert len(fake_bot.photo_calls) == 0
     assert len(fake_bot.group_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_send_media_stages_local_video_then_delivers_file_id(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    fake_bot = _StorageAndUserBot(storage_chat_id)
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="Video title",
+        media_items=[
+            {
+                "file_path": str(video_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+            }
+        ],
+        ttl_seconds=3600,
+    )
+    info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[MediaItem(file_path=video_file, media_type="video")],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    assert len(fake_bot.storage_video_calls) == 1
+    assert fake_bot.user_video_calls[0]["video"] == "stored-video-id"
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert cached is not None
+    assert cached.media_items[0]["telegram_file_id"] == "user-video-id"
 
 
 @pytest.mark.asyncio

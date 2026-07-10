@@ -6,6 +6,7 @@ import asyncio
 import logging
 import shutil
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -37,6 +38,7 @@ from .telegram_inline_sessions import (inline_session_is_expired,
                                        subscription_expires_at)
 from .telegram_media_sender import TelegramMediaSender
 from .telegram_media_retry import classify_telegram_delivery_error
+from .telegram_media_stager import TelegramMediaStager
 from .telegram_performance import (build_admin_performance_summary,
                                    format_performance_summary)
 from .telegram_provider_metrics import record_provider_metrics
@@ -68,6 +70,11 @@ class TelegramBot:
         self.application: Optional[Application] = None
         self.state_store = state_store or StateStore()
         self.media_sender = TelegramMediaSender(self.state_store)
+        self.media_stager = (
+            TelegramMediaStager(settings.TELEGRAM_MEDIA_STORAGE_CHAT_ID)
+            if settings.TELEGRAM_MEDIA_STORAGE_CHAT_ID is not None
+            else None
+        )
         self.job_manager = JobManager(self.state_store)
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1605,7 +1612,20 @@ class TelegramBot:
         video_info: VideoInfo,
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
-        await self.media_sender.send_media(context, request_context, video_info)
+        delivery_info = video_info
+        if self.media_stager and any(
+            not item.telegram_file_id for item in video_info.media_items
+        ):
+            staged_items = await self.media_stager.stage_media(
+                context.bot, video_info.media_items
+            )
+            self.state_store.update_cached_telegram_file_ids(
+                request_context.chat_id,
+                request_context.normalized_url,
+                [item.telegram_file_id for item in staged_items],
+            )
+            delivery_info = replace(video_info, media_items=staged_items)
+        await self.media_sender.send_media(context, request_context, delivery_info)
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:
