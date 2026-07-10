@@ -1420,7 +1420,11 @@ class TelegramBot:
                             duration_ms=delivery_duration_ms,
                             error_class=error.__class__.__name__,
                         )
-                        if delivery_status == "unknown" and delivery_uses_file_ids:
+                        if (
+                            delivery_status == "unknown"
+                            and delivery_uses_file_ids
+                            and not getattr(error, "telegram_local_upload_attempted", False)
+                        ):
                             # Telegram may have accepted the send before the timeout.
                             # File ID delivery is safe to treat as complete without a retry.
                             self.job_manager.mark_delivery_completed(job)

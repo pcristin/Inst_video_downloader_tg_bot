@@ -92,6 +92,14 @@ class _TimeoutUserBot(_FakeBot):
         raise TimedOut("user delivery timed out")
 
 
+class _RejectStaleFileIdTimeoutBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        raise TimedOut("local fallback upload timed out")
+
+
 class _StorageTimeoutBot(_FakeBot):
     def __init__(self, storage_chat_id: int):
         super().__init__()
@@ -321,7 +329,13 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         VideoInfo(
             file_path=video_file,
             title="Video title",
-            media_items=[MediaItem(file_path=video_file, media_type="video")],
+            media_items=[
+                MediaItem(
+                    file_path=video_file,
+                    media_type="video",
+                    telegram_file_id="stale-video-file-id",
+                )
+            ],
             primary_media_type="video",
         )
     )
@@ -372,7 +386,7 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
     )
 
     await telegram_bot._await_request(
-        _FakeContext(_TimeoutUserBot()), request_context, job
+        _FakeContext(_RejectStaleFileIdTimeoutBot()), request_context, job
     )
 
     assert store.get_delivery_attempts(job.job_id)[0]["status"] == "unknown"
