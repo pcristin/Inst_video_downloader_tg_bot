@@ -1381,9 +1381,17 @@ class TelegramBot:
 
                     delivery_started_at = time.perf_counter()
                     try:
-                        await self._send_staged_media(
+                        restage_duration_ms = await self._send_staged_media(
                             context, request_context, delivery_info
                         )
+                        if restage_duration_ms is not None:
+                            self.state_store.record_delivery_attempt(
+                                job_id=job.job_id,
+                                request_id=request_context.request_id,
+                                stage="storage_upload",
+                                status="delivered",
+                                duration_ms=restage_duration_ms,
+                            )
                         self.state_store.record_delivery_metrics(
                             job.job_id,
                             delivery_duration_ms=self._elapsed_ms(delivery_started_at),
@@ -1401,12 +1409,26 @@ class TelegramBot:
                         storage_upload_attempted = getattr(
                             error, "telegram_storage_upload_attempted", False
                         )
+                        restage_duration_ms = getattr(
+                            error, "telegram_storage_upload_duration_ms", None
+                        )
+                        user_send_ambiguous = getattr(
+                            error, "telegram_user_send_ambiguous", False
+                        )
                         delivery_status = (
                             "unknown"
-                            if isinstance(error, NetworkError)
+                            if (isinstance(error, NetworkError) or user_send_ambiguous)
                             and not storage_upload_attempted
                             else "failed"
                         )
+                        if restage_duration_ms is not None:
+                            self.state_store.record_delivery_attempt(
+                                job_id=job.job_id,
+                                request_id=request_context.request_id,
+                                stage="storage_upload",
+                                status="delivered",
+                                duration_ms=restage_duration_ms,
+                            )
                         self.state_store.record_delivery_metrics(
                             job.job_id,
                             delivery_duration_ms=delivery_duration_ms,
@@ -1716,7 +1738,7 @@ class TelegramBot:
         context: ContextTypes.DEFAULT_TYPE,
         request_context: RequestContext,
         video_info: VideoInfo,
-    ) -> None:
+    ) -> int | None:
         """Send staged file IDs to the user chat without ambiguous retries."""
         try:
             await self.media_sender.send_media(
@@ -1725,9 +1747,13 @@ class TelegramBot:
                 video_info,
                 fallback_to_local_on_rejected_file_id=self.media_stager is None,
             )
-        except RejectedTelegramFileIdError:
+            return None
+        except RejectedTelegramFileIdError as error:
             if self.media_stager is None:
                 raise
+            if getattr(error, "telegram_user_send_ambiguous", False):
+                raise
+            restage_started_at = time.perf_counter()
             try:
                 staged_items = await self.media_stager.stage_media(
                     context.bot, video_info.media_items, force=True
@@ -1740,12 +1766,18 @@ class TelegramBot:
                 request_context.normalized_url,
                 [item.telegram_file_id for item in staged_items],
             )
-            await self.media_sender.send_media(
-                context,
-                request_context,
-                replace(video_info, media_items=staged_items),
-                fallback_to_local_on_rejected_file_id=False,
-            )
+            restage_duration_ms = self._elapsed_ms(restage_started_at)
+            try:
+                await self.media_sender.send_media(
+                    context,
+                    request_context,
+                    replace(video_info, media_items=staged_items),
+                    fallback_to_local_on_rejected_file_id=False,
+                )
+            except Exception as error:
+                setattr(error, "telegram_storage_upload_duration_ms", restage_duration_ms)
+                raise
+            return restage_duration_ms
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:
