@@ -98,6 +98,17 @@ class _RejectStaleStorageAndUserBot(_StorageAndUserBot):
         )
 
 
+class _RejectStaleStorageTimeoutBot(_StorageAndUserBot):
+    async def send_video(self, **kwargs):
+        if kwargs["chat_id"] == self.storage_chat_id:
+            self.storage_video_calls.append(kwargs)
+            raise TimedOut("storage upload timed out")
+        self.user_video_calls.append(kwargs)
+        if kwargs["video"] == "stale-video-file-id":
+            raise BadRequest("Wrong file identifier/HTTP URL specified")
+        raise AssertionError("user delivery must not retry after restaging fails")
+
+
 class _TimeoutUserBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -501,6 +512,102 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         "delivery_error_class": "TimedOut",
     }
     assert dict(persisted_job) == {"status": "completed", "error_class": None}
+
+
+@pytest.mark.asyncio
+async def test_restage_timeout_records_failed_storage_outcome(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[
+                MediaItem(
+                    file_path=video_file,
+                    media_type="video",
+                    telegram_file_id="stale-video-file-id",
+                )
+            ],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_RejectStaleStorageTimeoutBot(storage_chat_id)),
+        request_context,
+        job,
+    )
+
+    attempts = store.get_delivery_attempts(job.job_id)
+    assert [(attempt["stage"], attempt["status"]) for attempt in attempts] == [
+        ("storage_upload", "failed")
+    ]
+    with store._lock:
+        request = store._conn.execute(
+            "SELECT status FROM request_events WHERE request_id = ?",
+            (request_context.request_id,),
+        ).fetchone()
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+    assert request["status"] == "failed"
+    assert dict(metrics) == {
+        "delivery_status": "failed",
+        "delivery_error_class": "TimedOut",
+    }
 
 
 @pytest.mark.asyncio
