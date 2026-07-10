@@ -541,16 +541,73 @@ class StateStore:
         )
 
     def record_delivery_metrics(
-        self, job_id: str, *, delivery_duration_ms: int
+        self,
+        job_id: str,
+        *,
+        delivery_duration_ms: int,
+        delivery_status: str | None = None,
+        delivery_error_class: str | None = None,
     ) -> None:
         self._safe_metrics_write(
             """
             UPDATE performance_metrics
-            SET delivery_duration_ms = ?
+            SET delivery_duration_ms = ?,
+                delivery_status = COALESCE(?, delivery_status),
+                delivery_error_class = COALESCE(?, delivery_error_class)
             WHERE job_id = ?
             """,
-            (delivery_duration_ms, job_id),
+            (
+                delivery_duration_ms,
+                delivery_status,
+                delivery_error_class,
+                job_id,
+            ),
         )
+
+    def record_delivery_attempt(
+        self,
+        *,
+        job_id: str,
+        request_id: str,
+        stage: str,
+        status: str,
+        duration_ms: int,
+        error_class: str | None = None,
+    ) -> None:
+        """Persist one direct-delivery boundary outcome for reliability analysis."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO delivery_attempts (
+                    attempt_id, job_id, request_id, stage, status,
+                    duration_ms, error_class, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    job_id,
+                    request_id,
+                    stage,
+                    status,
+                    max(0, duration_ms),
+                    error_class,
+                    _utc_now().isoformat(),
+                ),
+            )
+
+    def get_delivery_attempts(self, job_id: str) -> list[sqlite3.Row]:
+        """Return durable delivery outcomes for one job in creation order."""
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT request_id, stage, status, duration_ms, error_class, created_at
+                FROM delivery_attempts
+                WHERE job_id = ?
+                ORDER BY created_at, attempt_id
+                """,
+                (job_id,),
+            ).fetchall()
 
     def finalize_job_metrics(self, job_id: str, *, status: str) -> None:
         now = _utc_now().isoformat()

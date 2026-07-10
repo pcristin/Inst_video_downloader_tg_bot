@@ -1350,16 +1350,35 @@ class TelegramBot:
                         self.state_store.record_delivery_metrics(
                             job.job_id,
                             delivery_duration_ms=self._elapsed_ms(delivery_started_at),
+                            delivery_status="delivered",
+                        )
+                        self.state_store.record_delivery_attempt(
+                            job_id=job.job_id,
+                            request_id=request_context.request_id,
+                            stage="user_send",
+                            status="delivered",
+                            duration_ms=self._elapsed_ms(delivery_started_at),
                         )
                     except Exception as error:
+                        delivery_duration_ms = self._elapsed_ms(delivery_started_at)
+                        delivery_status = (
+                            "unknown"
+                            if isinstance(error, NetworkError)
+                            else "failed"
+                        )
                         self.state_store.record_delivery_metrics(
                             job.job_id,
-                            delivery_duration_ms=self._elapsed_ms(delivery_started_at),
+                            delivery_duration_ms=delivery_duration_ms,
+                            delivery_status=delivery_status,
+                            delivery_error_class=error.__class__.__name__,
                         )
-                        self.state_store.update_job_status(
-                            job.job_id,
-                            job.state,
-                            error.__class__.__name__,
+                        self.state_store.record_delivery_attempt(
+                            job_id=job.job_id,
+                            request_id=request_context.request_id,
+                            stage="user_send",
+                            status=delivery_status,
+                            duration_ms=delivery_duration_ms,
+                            error_class=error.__class__.__name__,
                         )
                         handed_off = self.job_manager.mark_delivery_failed(
                             job,
