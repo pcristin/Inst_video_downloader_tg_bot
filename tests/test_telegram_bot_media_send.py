@@ -92,6 +92,18 @@ class _TimeoutUserBot(_FakeBot):
         raise TimedOut("user delivery timed out")
 
 
+class _StorageTimeoutBot(_FakeBot):
+    def __init__(self, storage_chat_id: int):
+        super().__init__()
+        self.storage_chat_id = storage_chat_id
+
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        if kwargs["chat_id"] == self.storage_chat_id:
+            raise TimedOut("storage upload timed out")
+        raise AssertionError("final user delivery must not run after staging fails")
+
+
 class _RejectStaleFileIdBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -382,6 +394,88 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         "delivery_error_class": "TimedOut",
     }
     assert dict(persisted_job) == {"status": "completed", "error_class": None}
+
+
+@pytest.mark.asyncio
+async def test_storage_timeout_records_failed_storage_outcome(monkeypatch, tmp_path):
+    storage_chat_id = -1001
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[MediaItem(file_path=video_file, media_type="video")],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_StorageTimeoutBot(storage_chat_id)), request_context, job
+    )
+
+    attempt = store.get_delivery_attempts(job.job_id)[0]
+    assert dict(attempt)["stage"] == "storage_upload"
+    assert dict(attempt)["status"] == "failed"
+    with store._lock:
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+    assert dict(metrics) == {
+        "delivery_status": "failed",
+        "delivery_error_class": "TimedOut",
+    }
 
 
 @pytest.mark.asyncio
@@ -1294,7 +1388,7 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
         "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
         fake_download_video,
     )
-    monkeypatch.setattr(TelegramBot, "_send_media", fake_send_media)
+    monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_media)
 
     await telegram_bot.handle_message(first_update, context)
     await telegram_bot.handle_message(second_update, context)

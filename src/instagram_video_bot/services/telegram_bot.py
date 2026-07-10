@@ -1344,9 +1344,49 @@ class TelegramBot:
                 if self.job_manager.is_delivery_request(
                     job, request_context.request_id
                 ):
+                    staging_started_at = time.perf_counter()
                     try:
-                        delivery_started_at = time.perf_counter()
-                        await self._send_media(context, request_context, video_info)
+                        delivery_info = await self._stage_media_for_delivery(
+                            context, request_context, video_info
+                        )
+                    except Exception as error:
+                        staging_duration_ms = self._elapsed_ms(staging_started_at)
+                        self.state_store.record_delivery_metrics(
+                            job.job_id,
+                            delivery_duration_ms=staging_duration_ms,
+                            delivery_status="failed",
+                            delivery_error_class=error.__class__.__name__,
+                        )
+                        self.state_store.record_delivery_attempt(
+                            job_id=job.job_id,
+                            request_id=request_context.request_id,
+                            stage="storage_upload",
+                            status="failed",
+                            duration_ms=staging_duration_ms,
+                            error_class=error.__class__.__name__,
+                        )
+                        handed_off = self.job_manager.mark_delivery_failed(
+                            job,
+                            request_context.request_id,
+                            error,
+                        )
+                        if handed_off:
+                            logger.warning(
+                                "Delivery handoff triggered after storage staging failure",
+                                extra={
+                                    "request_id": request_context.request_id,
+                                    "job_id": job.job_id,
+                                    "chat_id": request_context.chat_id,
+                                },
+                            )
+                            continue
+                        raise
+
+                    delivery_started_at = time.perf_counter()
+                    try:
+                        await self._send_staged_media(
+                            context, request_context, delivery_info
+                        )
                         self.state_store.record_delivery_metrics(
                             job.job_id,
                             delivery_duration_ms=self._elapsed_ms(delivery_started_at),
@@ -1631,6 +1671,18 @@ class TelegramBot:
         video_info: VideoInfo,
     ) -> None:
         """Send one media item or a multi-item album based on downloader result."""
+        delivery_info = await self._stage_media_for_delivery(
+            context, request_context, video_info
+        )
+        await self._send_staged_media(context, request_context, delivery_info)
+
+    async def _stage_media_for_delivery(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        video_info: VideoInfo,
+    ) -> VideoInfo:
+        """Stage local media privately so final user delivery uses file IDs."""
         delivery_info = video_info
         if self.media_stager and any(
             not item.telegram_file_id for item in video_info.media_items
@@ -1644,7 +1696,16 @@ class TelegramBot:
                 [item.telegram_file_id for item in staged_items],
             )
             delivery_info = replace(video_info, media_items=staged_items)
-        await self.media_sender.send_media(context, request_context, delivery_info)
+        return delivery_info
+
+    async def _send_staged_media(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        request_context: RequestContext,
+        video_info: VideoInfo,
+    ) -> None:
+        """Send staged file IDs to the user chat without ambiguous retries."""
+        await self.media_sender.send_media(context, request_context, video_info)
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:

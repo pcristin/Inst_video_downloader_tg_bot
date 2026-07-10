@@ -85,6 +85,35 @@ def test_delivery_attempt_records_unknown_user_send_outcome(tmp_path):
     }
 
 
+def test_successful_delivery_clears_prior_delivery_error(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.start_job_metrics(
+        job_id="job-1",
+        chat_id=77,
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+    )
+    store.record_delivery_metrics(
+        "job-1",
+        delivery_duration_ms=60_000,
+        delivery_status="unknown",
+        delivery_error_class="TimedOut",
+    )
+    store.record_delivery_metrics(
+        "job-1", delivery_duration_ms=200, delivery_status="delivered"
+    )
+
+    with store._lock:
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics WHERE job_id = ?",
+            ("job-1",),
+        ).fetchone()
+    assert dict(metrics) == {
+        "delivery_status": "delivered",
+        "delivery_error_class": None,
+    }
+
+
 def test_metrics_schema_migrates_existing_database(tmp_path):
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(db_path)

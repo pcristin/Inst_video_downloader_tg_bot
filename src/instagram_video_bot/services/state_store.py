@@ -553,11 +553,15 @@ class StateStore:
             UPDATE performance_metrics
             SET delivery_duration_ms = ?,
                 delivery_status = COALESCE(?, delivery_status),
-                delivery_error_class = COALESCE(?, delivery_error_class)
+                delivery_error_class = CASE
+                    WHEN ? = 'delivered' THEN NULL
+                    ELSE COALESCE(?, delivery_error_class)
+                END
             WHERE job_id = ?
             """,
             (
                 delivery_duration_ms,
+                delivery_status,
                 delivery_status,
                 delivery_error_class,
                 job_id,
