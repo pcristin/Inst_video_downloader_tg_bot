@@ -23,6 +23,7 @@ from .download_models import (
 )
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor
+from .media_normalizer import normalize_instagram_media
 from .provider_adapters import (
     InstagramProviderAdapter,
     TwitterProviderAdapter,
@@ -227,7 +228,7 @@ class VideoDownloader:
                 self.last_provider_metrics.instagram_success_path = (
                     getattr(fast_result, "instagram_success_path", None) or "fast"
                 )
-                return fast_result
+                return await self._normalize_instagram_result(fast_result)
             except Exception as error:
                 fast_error = error
                 self.last_provider_metrics.instagram_fast_status = "failed"
@@ -266,7 +267,7 @@ class VideoDownloader:
                     self.last_provider_metrics.instagram_metadata_reused = bool(
                         getattr(public_result, "instagram_metadata_reused", False)
                     )
-                    return public_result
+                    return await self._normalize_instagram_result(public_result)
             except Exception as error:
                 logger.info(
                     "Public yt-dlp recovery failed; falling back to account path",
@@ -275,8 +276,15 @@ class VideoDownloader:
 
         manager = get_account_manager()
         if manager:
-            return await self._download_with_account_leases(url, output_dir, fast_error)
-        return await self._download_with_single_account(url, output_dir, fast_error)
+            result = await self._download_with_account_leases(url, output_dir, fast_error)
+        else:
+            result = await self._download_with_single_account(url, output_dir, fast_error)
+        return await self._normalize_instagram_result(result)
+
+    @staticmethod
+    async def _normalize_instagram_result(video_info: VideoInfo) -> VideoInfo:
+        """Normalize Instagram videos without blocking the event loop."""
+        return await asyncio.to_thread(normalize_instagram_media, video_info)
 
     async def _download_with_account_leases(
         self, url: str, output_dir: Path, fast_error: Optional[Exception]
