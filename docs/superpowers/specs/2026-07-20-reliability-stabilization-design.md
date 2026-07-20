@@ -13,7 +13,8 @@ Included:
 - an explicit lifecycle boundary around the shared Instagram executor;
 - offline-by-default unit tests for Instagram fallbacks;
 - Docker health semantics aligned with supported bot modes;
-- crash-safe persistence of `accounts_state.json`.
+- crash-safe persistence of `accounts_state.json`;
+- a directory-level Docker state mount that permits atomic file replacement.
 
 Deferred to the next slice:
 
@@ -147,6 +148,17 @@ Requirements:
 - the parent directory is created when necessary;
 - existing logging behavior remains, without exposing account credentials.
 
+Docker Compose currently bind-mounts `accounts_state.json` as an individual
+file. Linux does not reliably allow `os.replace` to replace a mount point, so
+Compose will instead mount `./account-state` at `/app/account-state`.
+`ACCOUNT_STATE_FILE` will default to `accounts_state.json` for backward
+compatibility and Compose will set it to
+`/app/account-state/accounts_state.json`.
+
+The deployment guide will include a one-time migration command that copies an
+existing host `accounts_state.json` into
+`account-state/accounts_state.json` before restarting the service.
+
 ## Testing
 
 Implementation follows red-green-refactor cycles.
@@ -170,8 +182,10 @@ exits successfully.
 
 ## Compatibility and Rollout
 
-No environment variables, database schema, Telegram commands, or user-visible
-messages change in this slice. Deployment remains a single polling bot.
+No database schema, Telegram commands, or user-visible messages change in this
+slice. Deployment remains a single polling bot. The optional
+`ACCOUNT_STATE_FILE` environment variable is new; its default preserves
+non-Compose behavior.
 
 The health change can convert previously unhealthy Twitter-only/public-fallback
 deployments to healthy. It does not make a failing Telegram token healthy.
