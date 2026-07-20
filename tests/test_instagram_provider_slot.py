@@ -81,6 +81,15 @@ class _TemporarilyLeasedManager:
 
 @pytest.mark.asyncio
 async def test_instagram_account_wait_does_not_consume_provider_slot(monkeypatch, tmp_path):
+    async def _identity(video_info):
+        return video_info
+
+    monkeypatch.setattr(
+        VideoDownloader,
+        "_normalize_instagram_result",
+        staticmethod(_identity),
+    )
+
     story_downloader = VideoDownloader()
     fast_downloader = VideoDownloader()
     for downloader in (story_downloader, fast_downloader):
