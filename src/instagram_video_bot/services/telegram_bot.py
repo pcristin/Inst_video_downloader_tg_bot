@@ -52,12 +52,14 @@ from .telegram_update_helpers import (language_from_profile,
                                       user_label)
 from .telegram_wiring import build_telegram_application
 from .telegram.command_handlers import TelegramCommandHandlers
+from .telegram.job_actions import JobAction, parse_job_action_data
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
 from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
                                VideoDownloadError, VideoInfo)
 
 logger = logging.getLogger(__name__)
+_REPLY_MARKUP_UNSET = object()
 
 
 class TelegramBot:
@@ -91,6 +93,98 @@ class TelegramBot:
     ) -> None:
         """Handle incoming messages by queueing supported provider links."""
         await self.request_intake.handle_message(update, context)
+
+    async def job_action_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Apply an authorized Cancel or Retry action to a persisted request."""
+
+        query = update.callback_query
+        if not query or not query.data or not query.from_user or not query.message:
+            return
+        parsed = parse_job_action_data(query.data)
+        if parsed is None:
+            await query.answer("This action is no longer available.", show_alert=True)
+            return
+        action, request_id = parsed
+        row = self.state_store.get_request_for_action(request_id)
+        if row is None:
+            await query.answer("This action is no longer available.", show_alert=True)
+            return
+        if (
+            not update.effective_chat
+            or int(row["chat_id"]) != update.effective_chat.id
+            or int(row["user_id"]) != query.from_user.id
+        ):
+            await query.answer(
+                "This action belongs to another request.", show_alert=True
+            )
+            return
+
+        if action is JobAction.CANCEL:
+            task = self.active_request_tasks.get(request_id)
+            if task and not task.done():
+                task.cancel()
+            job = self.job_manager.cancel_request(request_id)
+            if job is None:
+                await query.answer(
+                    "This action is no longer available.", show_alert=True
+                )
+                return
+            text = ChaosText.cancelled(
+                False,
+                self._language_for_update(update),
+            )
+            await self._safe_edit_text(
+                query.message,
+                text,
+                reply_markup=None,
+            )
+            await query.answer(text)
+            return
+
+        if row["status"] != "failed" or not bool(row["retryable"]):
+            await query.answer(
+                "This request cannot be retried safely.", show_alert=True
+            )
+            return
+        rate_limit = self._consume_user_rate_limit(
+            query.from_user.id,
+            source="direct",
+        )
+        if not rate_limit["allowed"]:
+            await query.answer(
+                ChaosText.rate_limited(
+                    rate_limit["retry_after_seconds"],
+                    self._language_for_update(update),
+                ),
+                show_alert=True,
+            )
+            return
+        links = RequestParser.extract_supported_links(
+            str(row["job_normalized_url"]),
+            limit=1,
+        )
+        if not links:
+            await query.answer(
+                "This action is no longer available.", show_alert=True
+            )
+            return
+        new_request_id = await self.request_intake.submit_parsed_link(
+            update,
+            context,
+            links[0],
+            status_message=query.message,
+            retry_of_request_id=request_id,
+        )
+        if new_request_id is None:
+            await query.answer(
+                "This action is no longer available.", show_alert=True
+            )
+            return
+        await query.answer("Retry started.")
+        return
+
 
     async def start_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1839,9 +1933,17 @@ class TelegramBot:
         await edit_status_message(message, text)
 
     @staticmethod
-    async def _safe_edit_text(message: Message, text: str) -> None:
+    async def _safe_edit_text(
+        message: Message,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None | object = _REPLY_MARKUP_UNSET,
+    ) -> None:
         """Edit status text, falling back to a new visible reply for important states."""
-        await safe_edit_text(message, text)
+        if reply_markup is _REPLY_MARKUP_UNSET:
+            await safe_edit_text(message, text)
+        else:
+            await safe_edit_text(message, text, reply_markup=reply_markup)
 
     @staticmethod
     async def _delete_status_message(message: Message) -> None:

@@ -285,8 +285,22 @@ class JobManager:
                 elif job.delivery_request_id == request_id:
                     self._promote_delivery_request(job)
                 if not any(item.active for item in job.requesters.values()):
+                    job.state = JobState.CANCELLED
+                    self.store.update_job_status(
+                        job.job_id, JobState.CANCELLED.value
+                    )
+                    self.store.finalize_job_metrics(
+                        job.job_id, status=JobState.CANCELLED.value
+                    )
+                    if job.result_future and not job.result_future.done():
+                        job.result_future.cancel()
+                    if job.delivery_future and not job.delivery_future.done():
+                        job.delivery_future.set_result(False)
                     if job.task and not job.task.done():
                         job.task.cancel()
+                    self._active_jobs.pop(
+                        (job.chat_id, job.normalized_url), None
+                    )
                 return job
         return None
 
