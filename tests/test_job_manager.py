@@ -2,11 +2,18 @@ import asyncio
 
 import pytest
 
-from src.instagram_video_bot.services.job_manager import JobManager, RequestRecord, SharedJob
+from src.instagram_video_bot.services.job_manager import (
+    JobManager,
+    RequestRecord,
+    SharedJob,
+)
+from src.instagram_video_bot.services.job_states import FailureReason
 from src.instagram_video_bot.services.state_store import StateStore
 
 
-async def _wait_for_started(started: list[tuple[str, int] | str], expected: tuple[str, int] | str) -> None:
+async def _wait_for_started(
+    started: list[tuple[str, int] | str], expected: tuple[str, int] | str
+) -> None:
     async def _wait() -> None:
         while expected not in started:
             await asyncio.sleep(0.01)
@@ -14,7 +21,9 @@ async def _wait_for_started(started: list[tuple[str, int] | str], expected: tupl
     await asyncio.wait_for(_wait(), timeout=1)
 
 
-async def _wait_for_start_count(started: list[tuple[str, int] | str], count: int) -> None:
+async def _wait_for_start_count(
+    started: list[tuple[str, int] | str], count: int
+) -> None:
     async def _wait() -> None:
         while len(started) < count:
             await asyncio.sleep(0.01)
@@ -24,7 +33,13 @@ async def _wait_for_start_count(started: list[tuple[str, int] | str], count: int
 
 def test_job_manager_reconciles_interrupted_persisted_jobs_on_startup(tmp_path):
     store = StateStore(tmp_path / "state.db")
-    store.create_job("running-job", 77, "https://www.instagram.com/reel/running/", "instagram", "running")
+    store.create_job(
+        "running-job",
+        77,
+        "https://www.instagram.com/reel/running/",
+        "instagram",
+        "running",
+    )
     store.create_request(
         "running-request",
         "running-job",
@@ -42,7 +57,13 @@ def test_job_manager_reconciles_interrupted_persisted_jobs_on_startup(tmp_path):
         normalized_url="https://www.instagram.com/reel/running/",
     )
     store.mark_job_metrics_started("running-job")
-    store.create_job("queued-job", 77, "https://www.instagram.com/reel/queued/", "instagram", "queued")
+    store.create_job(
+        "queued-job",
+        77,
+        "https://www.instagram.com/reel/queued/",
+        "instagram",
+        "queued",
+    )
 
     JobManager(store)
 
@@ -83,16 +104,40 @@ async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_pat
         normalized_url="https://www.instagram.com/reel/a/",
         delivery_request_id="req-1",
         requesters={
-            "req-1": RequestRecord(request_id="req-1", chat_id=77, user_id=1001, user_label="alice"),
-            "req-2": RequestRecord(request_id="req-2", chat_id=77, user_id=1002, user_label="bob"),
+            "req-1": RequestRecord(
+                request_id="req-1", chat_id=77, user_id=1001, user_label="alice"
+            ),
+            "req-2": RequestRecord(
+                request_id="req-2", chat_id=77, user_id=1002, user_label="bob"
+            ),
         },
     )
     old_future = asyncio.get_running_loop().create_future()
     job.delivery_future = old_future
     manager._jobs[job.job_id] = job
-    store.create_job(job.job_id, job.chat_id, job.normalized_url, job.provider, "running")
-    store.create_request("req-1", job.job_id, job.chat_id, 1001, "alice", job.provider, job.normalized_url, "running")
-    store.create_request("req-2", job.job_id, job.chat_id, 1002, "bob", job.provider, job.normalized_url, "running")
+    store.create_job(
+        job.job_id, job.chat_id, job.normalized_url, job.provider, "running"
+    )
+    store.create_request(
+        "req-1",
+        job.job_id,
+        job.chat_id,
+        1001,
+        "alice",
+        job.provider,
+        job.normalized_url,
+        "running",
+    )
+    store.create_request(
+        "req-2",
+        job.job_id,
+        job.chat_id,
+        1002,
+        "bob",
+        job.provider,
+        job.normalized_url,
+        "running",
+    )
 
     waiter = asyncio.create_task(manager.wait_for_delivery(job))
     await asyncio.sleep(0)
@@ -107,7 +152,9 @@ async def test_promote_delivery_request_wakes_waiters_and_rotates_future(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_mark_request_failed_cancels_job_when_no_active_requesters_remain(tmp_path):
+async def test_mark_request_failed_cancels_job_when_no_active_requesters_remain(
+    tmp_path,
+):
     store = StateStore(tmp_path / "state.db")
     manager = JobManager(store)
     started = asyncio.Event()
@@ -195,12 +242,86 @@ async def test_job_manager_supports_zero_arg_executor_for_compatibility(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_provider_semaphore_limits_same_provider_without_blocking_other_provider(monkeypatch, tmp_path):
+async def test_job_manager_persists_typed_acquisition_failure(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    manager = JobManager(store)
+
+    async def execute(_job):
+        raise TimeoutError("provider timed out")
+
+    submission = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+
+    with pytest.raises(TimeoutError):
+        await submission.job.result_future
+    await submission.job.task
+
+    row = store.get_request_for_action(submission.request_id)
+    assert submission.job.failure is not None
+    assert submission.job.failure.reason is FailureReason.PROVIDER_TIMEOUT
+    assert submission.job.failure.retryable is True
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["failure_reason"] == "provider_timeout"
+    assert row["retryable"] == 1
+
+
+@pytest.mark.asyncio
+async def test_job_manager_persists_retry_parent_request(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    manager = JobManager(store)
+
+    async def execute(_job):
+        return "ok"
+
+    submission = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url="https://x.com/a/status/1",
+        normalized_url="https://x.com/a/status/1",
+        execute=execute,
+        duplicate_suppression=False,
+        retry_of_request_id="previous-request",
+    )
+
+    assert await submission.job.result_future == "ok"
+    await submission.job.task
+
+    row = store.get_request_for_action(submission.request_id)
+    assert row is not None
+    assert row["retry_of_request_id"] == "previous-request"
+
+
+@pytest.mark.asyncio
+async def test_provider_semaphore_limits_same_provider_without_blocking_other_provider(
+    monkeypatch, tmp_path
+):
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 2)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.YOUTUBE_SHORTS_MAX_CONCURRENT_JOBS", 2)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        2,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS",
+        1,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.YOUTUBE_SHORTS_MAX_CONCURRENT_JOBS",
+        2,
+    )
     manager = JobManager(store)
     started = []
     release = asyncio.Event()
@@ -255,12 +376,23 @@ async def test_provider_semaphore_limits_same_provider_without_blocking_other_pr
 
 
 @pytest.mark.asyncio
-async def test_instagram_executor_wait_does_not_hold_global_capacity(monkeypatch, tmp_path):
+async def test_instagram_executor_wait_does_not_hold_global_capacity(
+    monkeypatch, tmp_path
+):
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 1)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS", 2)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        1,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.INSTAGRAM_MAX_CONCURRENT_JOBS",
+        2,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS",
+        1,
+    )
     manager = JobManager(store)
     started = []
     instagram_waiting = asyncio.Event()
@@ -302,15 +434,25 @@ async def test_instagram_executor_wait_does_not_hold_global_capacity(monkeypatch
         await _wait_for_started(started, "twitter")
     finally:
         release_instagram.set()
-        await asyncio.gather(instagram.job.task, twitter.job.task, return_exceptions=True)
+        await asyncio.gather(
+            instagram.job.task, twitter.job.task, return_exceptions=True
+        )
 
 
 @pytest.mark.asyncio
-async def test_provider_waiters_progress_after_provider_slot_releases(monkeypatch, tmp_path):
+async def test_provider_waiters_progress_after_provider_slot_releases(
+    monkeypatch, tmp_path
+):
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        3,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS",
+        1,
+    )
     manager = JobManager(store)
     started = []
     release = asyncio.Event()
@@ -367,8 +509,14 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
     store = StateStore(tmp_path / "state.db")
     store.update_group_settings(77, chat_max_concurrent_jobs=1)
     store.update_group_settings(88, chat_max_concurrent_jobs=1)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS", 3)
-    monkeypatch.setattr("src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS", 2)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        3,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS",
+        2,
+    )
     manager = JobManager(store)
     started = []
     release = asyncio.Event()

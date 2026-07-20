@@ -32,6 +32,9 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             cache_hit INTEGER NOT NULL DEFAULT 0,
             joined_existing INTEGER NOT NULL DEFAULT 0,
+            failure_reason TEXT,
+            retryable INTEGER NOT NULL DEFAULT 0,
+            retry_of_request_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -221,7 +224,10 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         """)
 
     add_column_if_missing(
-        conn, "group_settings", "chat_max_concurrent_jobs", "chat_max_concurrent_jobs INTEGER"
+        conn,
+        "group_settings",
+        "chat_max_concurrent_jobs",
+        "chat_max_concurrent_jobs INTEGER",
     )
     add_column_if_missing(
         conn, "group_settings", "user_max_active_jobs", "user_max_active_jobs INTEGER"
@@ -238,7 +244,24 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "joined_existing",
         "joined_existing INTEGER NOT NULL DEFAULT 0",
     )
-    add_column_if_missing(conn, "performance_metrics", "failure_class", "failure_class TEXT")
+    add_column_if_missing(
+        conn, "request_events", "failure_reason", "failure_reason TEXT"
+    )
+    add_column_if_missing(
+        conn,
+        "request_events",
+        "retryable",
+        "retryable INTEGER NOT NULL DEFAULT 0",
+    )
+    add_column_if_missing(
+        conn,
+        "request_events",
+        "retry_of_request_id",
+        "retry_of_request_id TEXT",
+    )
+    add_column_if_missing(
+        conn, "performance_metrics", "failure_class", "failure_class TEXT"
+    )
     add_column_if_missing(
         conn, "performance_metrics", "delivery_status", "delivery_status TEXT"
     )
@@ -272,9 +295,7 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "instagram_metadata_reused",
         "instagram_metadata_reused INTEGER NOT NULL DEFAULT 0",
     )
-    add_column_if_missing(
-        conn, "inline_one_time_payments", "provider", "provider TEXT"
-    )
+    add_column_if_missing(conn, "inline_one_time_payments", "provider", "provider TEXT")
     add_column_if_missing(
         conn, "inline_one_time_payments", "normalized_url", "normalized_url TEXT"
     )
@@ -284,8 +305,12 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "access_kind",
         "access_kind TEXT NOT NULL DEFAULT 'free'",
     )
-    add_column_if_missing(conn, "inline_sessions", "failure_class", "failure_class TEXT")
-    add_column_if_missing(conn, "inline_sessions", "failure_stage", "failure_stage TEXT")
+    add_column_if_missing(
+        conn, "inline_sessions", "failure_class", "failure_class TEXT"
+    )
+    add_column_if_missing(
+        conn, "inline_sessions", "failure_stage", "failure_stage TEXT"
+    )
     add_column_if_missing(conn, "inline_sessions", "error_class", "error_class TEXT")
 
     had_subscription_started_at = "started_at" in _column_names(

@@ -12,6 +12,12 @@ from time import monotonic
 from typing import Any, Awaitable, Callable
 
 from ..config.settings import settings
+from .job_states import (
+    FailureDetails,
+    FailureStage,
+    JobState,
+    classify_failure,
+)
 from .state_store import StateStore
 
 logger = logging.getLogger(__name__)
@@ -43,7 +49,7 @@ class SharedJob:
     provider_label: str
     original_url: str
     normalized_url: str
-    state: str = "queued"
+    state: JobState = JobState.QUEUED
     created_monotonic: float = field(default_factory=monotonic)
     requesters: dict[str, RequestRecord] = field(default_factory=dict)
     result_future: asyncio.Future[Any] | None = None
@@ -52,6 +58,7 @@ class SharedJob:
     queue_position_at_submit: int = 1
     delivery_request_id: str | None = None
     last_delivery_error: Exception | None = None
+    failure: FailureDetails | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +90,10 @@ class JobManager:
         if interrupted:
             logger.warning(
                 "Reconciled interrupted persisted jobs",
-                extra={"interrupted_jobs": interrupted, "failure_class": "process_restarted"},
+                extra={
+                    "interrupted_jobs": interrupted,
+                    "failure_class": "process_restarted",
+                },
             )
 
     def add_state_listener(self, listener: StateListener) -> None:
@@ -101,11 +111,16 @@ class JobManager:
         normalized_url: str,
         execute: JobExecutor,
         duplicate_suppression: bool,
+        retry_of_request_id: str | None = None,
     ) -> JobSubmission:
         request_id = uuid.uuid4().hex
         active_key = (chat_id, normalized_url)
         existing = self._active_jobs.get(active_key) if duplicate_suppression else None
-        if existing and existing.state not in {"completed", "failed", "cancelled"}:
+        if existing and existing.state not in {
+            JobState.COMPLETED,
+            JobState.FAILED,
+            JobState.CANCELLED,
+        }:
             record = RequestRecord(
                 request_id=request_id,
                 chat_id=chat_id,
@@ -121,8 +136,9 @@ class JobManager:
                 user_label=user_label,
                 provider=provider,
                 normalized_url=normalized_url,
-                status=existing.state,
+                status=existing.state.value,
                 joined_existing=True,
+                retry_of_request_id=retry_of_request_id,
             )
             return JobSubmission(
                 job=existing,
@@ -131,7 +147,9 @@ class JobManager:
                 queue_position=existing.queue_position_at_submit,
             )
 
-        queued_count = sum(1 for job in self._jobs.values() if job.state == "queued")
+        queued_count = sum(
+            1 for job in self._jobs.values() if job.state is JobState.QUEUED
+        )
         job = SharedJob(
             job_id=uuid.uuid4().hex,
             chat_id=chat_id,
@@ -153,7 +171,13 @@ class JobManager:
         )
         self._jobs[job.job_id] = job
         self._active_jobs[active_key] = job
-        self.store.create_job(job.job_id, chat_id, normalized_url, provider, "queued")
+        self.store.create_job(
+            job.job_id,
+            chat_id,
+            normalized_url,
+            provider,
+            JobState.QUEUED.value,
+        )
         self.store.start_job_metrics(
             job_id=job.job_id,
             chat_id=chat_id,
@@ -168,7 +192,8 @@ class JobManager:
             user_label=user_label,
             provider=provider,
             normalized_url=normalized_url,
-            status="queued",
+            status=JobState.QUEUED.value,
+            retry_of_request_id=retry_of_request_id,
         )
         job.task = asyncio.create_task(self._run_job(job, execute))
         return JobSubmission(
@@ -183,37 +208,59 @@ class JobManager:
             async with AsyncExitStack() as stack:
                 for semaphore in self._job_semaphores(job):
                     await stack.enter_async_context(semaphore)
-                await self._set_state(job, "running")
+                await self._set_state(job, JobState.RUNNING)
                 self.store.mark_job_metrics_started(job.job_id)
                 result = await self._execute_job(execute, job)
                 if job.result_future and not job.result_future.done():
                     job.result_future.set_result(result)
-                await self._set_state(job, "completed")
-                self.store.finalize_job_metrics(job.job_id, status="completed")
+                await self._set_state(job, JobState.COMPLETED)
+                self.store.finalize_job_metrics(
+                    job.job_id, status=JobState.COMPLETED.value
+                )
         except asyncio.CancelledError:
-            self.store.update_job_status(job.job_id, "cancelled")
-            self.store.finalize_job_metrics(job.job_id, status="cancelled")
+            self.store.update_job_status(job.job_id, JobState.CANCELLED.value)
+            self.store.finalize_job_metrics(job.job_id, status=JobState.CANCELLED.value)
             if job.result_future and not job.result_future.done():
                 job.result_future.cancel()
-            await self._set_state(job, "cancelled")
+            await self._set_state(job, JobState.CANCELLED)
             raise
         except Exception as error:
-            logger.exception("Shared job failed", extra={"job_id": job.job_id, "provider": job.provider})
-            self.store.update_job_status(job.job_id, "failed", error.__class__.__name__)
-            self.store.finalize_job_metrics(job.job_id, status="failed")
+            logger.exception(
+                "Shared job failed",
+                extra={"job_id": job.job_id, "provider": job.provider},
+            )
+            job.failure = classify_failure(error, stage=FailureStage.ACQUISITION)
+            self.store.update_job_status(
+                job.job_id,
+                JobState.FAILED.value,
+                error.__class__.__name__,
+            )
+            self.store.finalize_job_metrics(job.job_id, status=JobState.FAILED.value)
             if job.result_future and not job.result_future.done():
                 job.result_future.set_exception(error)
-            await self._set_state(job, "failed")
+            await self._set_state(job, JobState.FAILED)
         finally:
             self._active_jobs.pop((job.chat_id, job.normalized_url), None)
 
-    async def _set_state(self, job: SharedJob, state: str) -> None:
+    async def _set_state(self, job: SharedJob, state: JobState) -> None:
         job.state = state
-        self.store.update_job_status(job.job_id, state)
-        if state in {"queued", "running", "failed", "cancelled"}:
+        self.store.update_job_status(job.job_id, state.value)
+        if state in {
+            JobState.QUEUED,
+            JobState.RUNNING,
+            JobState.FAILED,
+            JobState.CANCELLED,
+        }:
             for request_id, request in job.requesters.items():
                 if request.active:
-                    self.store.update_request_status(request_id, state)
+                    self.store.update_request_status(
+                        request_id,
+                        state.value,
+                        failure_reason=(
+                            job.failure.reason.value if job.failure else None
+                        ),
+                        retryable=(job.failure.retryable if job.failure else None),
+                    )
         await self._notify(job)
 
     async def _notify(self, job: SharedJob) -> None:
@@ -229,7 +276,11 @@ class JobManager:
             if request and request.active:
                 request.active = False
                 self.store.update_request_status(request_id, "cancelled")
-                if job.delivery_request_id == request_id and job.delivery_future and not job.delivery_future.done():
+                if (
+                    job.delivery_request_id == request_id
+                    and job.delivery_future
+                    and not job.delivery_future.done()
+                ):
                     self._handoff_delivery(job, request_id, asyncio.CancelledError())
                 elif job.delivery_request_id == request_id:
                     self._promote_delivery_request(job)
@@ -243,7 +294,11 @@ class JobManager:
         candidates: list[RequestRecord] = []
         for job in self._jobs.values():
             for request in job.requesters.values():
-                if request.chat_id == chat_id and request.user_id == user_id and request.active:
+                if (
+                    request.chat_id == chat_id
+                    and request.user_id == user_id
+                    and request.active
+                ):
                     if job.state not in {"completed", "failed", "cancelled"}:
                         candidates.append(request)
         if not candidates:
@@ -251,17 +306,32 @@ class JobManager:
         candidates.sort(key=lambda item: item.created_monotonic, reverse=True)
         return candidates[0].request_id
 
-    def mark_request_completed(self, request_id: str, *, cache_hit: bool = False) -> None:
+    def mark_request_completed(
+        self, request_id: str, *, cache_hit: bool = False
+    ) -> None:
         self.store.update_request_status(request_id, "completed", cache_hit=cache_hit)
         self._deactivate_request(request_id)
 
-    def mark_request_failed(self, request_id: str, status: str = "failed") -> None:
-        self.store.update_request_status(request_id, status)
+    def mark_request_failed(
+        self,
+        request_id: str,
+        status: str = "failed",
+        *,
+        failure: FailureDetails | None = None,
+    ) -> None:
+        self.store.update_request_status(
+            request_id,
+            status,
+            failure_reason=failure.reason.value if failure else None,
+            retryable=failure.retryable if failure else None,
+        )
         self._deactivate_request(request_id)
 
     def is_delivery_request(self, job: SharedJob, request_id: str) -> bool:
         request = job.requesters.get(request_id)
-        return bool(request and request.active and job.delivery_request_id == request_id)
+        return bool(
+            request and request.active and job.delivery_request_id == request_id
+        )
 
     async def wait_for_delivery(self, job: SharedJob) -> bool:
         if job.delivery_future:
@@ -280,7 +350,9 @@ class JobManager:
         if job.delivery_future and not job.delivery_future.done():
             job.delivery_future.set_result(False)
 
-    def mark_delivery_failed(self, job: SharedJob, request_id: str, error: Exception) -> bool:
+    def mark_delivery_failed(
+        self, job: SharedJob, request_id: str, error: Exception
+    ) -> bool:
         return self._handoff_delivery(job, request_id, error)
 
     def get_snapshot(self, chat_id: int) -> dict[str, int]:
@@ -295,7 +367,9 @@ class JobManager:
             elif job.state == "queued":
                 queued += 1
             if job.state not in {"completed", "failed", "cancelled"}:
-                watchers += sum(1 for request in job.requesters.values() if request.active)
+                watchers += sum(
+                    1 for request in job.requesters.values() if request.active
+                )
         limits = self.store.get_queue_limits(chat_id)
         return {
             "active_jobs": active,
@@ -315,7 +389,9 @@ class JobManager:
             elif job.state == "queued":
                 queued += 1
             if job.state not in {"completed", "failed", "cancelled"}:
-                watchers += sum(1 for request in job.requesters.values() if request.active)
+                watchers += sum(
+                    1 for request in job.requesters.values() if request.active
+                )
         return {
             "active_jobs": active,
             "queued_jobs": queued,
@@ -323,7 +399,13 @@ class JobManager:
             "global_limit": settings.GLOBAL_MAX_CONCURRENT_JOBS,
         }
 
-    def update_chat_limits(self, chat_id: int, *, chat_limit: int | None = None, user_limit: int | None = None) -> None:
+    def update_chat_limits(
+        self,
+        chat_id: int,
+        *,
+        chat_limit: int | None = None,
+        user_limit: int | None = None,
+    ) -> None:
         """Refresh in-memory semaphores for updated owner-defined limits."""
         if chat_limit is not None:
             self._chat_semaphores[chat_id] = asyncio.Semaphore(chat_limit)
@@ -384,9 +466,12 @@ class JobManager:
         if next_request_id is not None:
             job.delivery_future = asyncio.get_running_loop().create_future()
 
-    def _next_delivery_request_id(self, job: SharedJob, *, exclude_request_id: str | None = None) -> str | None:
+    def _next_delivery_request_id(
+        self, job: SharedJob, *, exclude_request_id: str | None = None
+    ) -> str | None:
         active_requests = [
-            request for request in job.requesters.values()
+            request
+            for request in job.requesters.values()
             if request.active and request.request_id != exclude_request_id
         ]
         if not active_requests:
@@ -394,8 +479,12 @@ class JobManager:
         active_requests.sort(key=lambda item: item.created_monotonic)
         return active_requests[0].request_id
 
-    def _handoff_delivery(self, job: SharedJob, failed_request_id: str, error: Exception) -> bool:
-        next_request_id = self._next_delivery_request_id(job, exclude_request_id=failed_request_id)
+    def _handoff_delivery(
+        self, job: SharedJob, failed_request_id: str, error: Exception
+    ) -> bool:
+        next_request_id = self._next_delivery_request_id(
+            job, exclude_request_id=failed_request_id
+        )
         current_future = job.delivery_future
         job.last_delivery_error = error
         if current_future and not current_future.done():

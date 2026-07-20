@@ -422,7 +422,8 @@ Expected: all tests pass twice; only the three pre-existing PTB deprecation warn
 
 ```bash
 git diff --check
-uv run ruff check src tests
+uv run black --target-version py311 --check src tests
+uv run isort --check-only src tests
 ```
 
 Expected: both commands exit zero.

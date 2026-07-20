@@ -312,14 +312,17 @@ class StateStore:
         normalized_url: str,
         status: str,
         joined_existing: bool = False,
+        retry_of_request_id: str | None = None,
     ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
             self._conn.execute(
                 """
                 INSERT INTO request_events
-                    (request_id, job_id, chat_id, user_id, user_label, provider, normalized_url, status, joined_existing, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (request_id, job_id, chat_id, user_id, user_label, provider,
+                     normalized_url, status, joined_existing, retry_of_request_id,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     request_id,
@@ -331,13 +334,20 @@ class StateStore:
                     normalized_url,
                     status,
                     1 if joined_existing else 0,
+                    retry_of_request_id,
                     now,
                     now,
                 ),
             )
 
     def update_request_status(
-        self, request_id: str, status: str, cache_hit: bool = False
+        self,
+        request_id: str,
+        status: str,
+        cache_hit: bool = False,
+        *,
+        failure_reason: str | None = None,
+        retryable: bool | None = None,
     ) -> None:
         now = _utc_now().isoformat()
         with self._lock, self._conn:
@@ -346,11 +356,37 @@ class StateStore:
                 UPDATE request_events
                 SET status = ?,
                     cache_hit = CASE WHEN ? THEN 1 ELSE cache_hit END,
+                    failure_reason = COALESCE(?, failure_reason),
+                    retryable = CASE WHEN ? IS NULL THEN retryable ELSE ? END,
                     updated_at = ?
                 WHERE request_id = ?
                 """,
-                (status, 1 if cache_hit else 0, now, request_id),
+                (
+                    status,
+                    1 if cache_hit else 0,
+                    failure_reason,
+                    retryable,
+                    1 if retryable else 0,
+                    now,
+                    request_id,
+                ),
             )
+
+    def get_request_for_action(self, request_id: str) -> sqlite3.Row | None:
+        """Return persisted request and job data required by a callback action."""
+
+        with self._lock:
+            return self._conn.execute(
+                """
+                SELECT r.*,
+                       j.normalized_url AS job_normalized_url,
+                       j.provider AS job_provider
+                FROM request_events AS r
+                JOIN jobs AS j ON j.job_id = r.job_id
+                WHERE r.request_id = ?
+                """,
+                (request_id,),
+            ).fetchone()
 
     def list_distinct_request_user_ids(self) -> list[int]:
         """Return users who have submitted at least one request."""
