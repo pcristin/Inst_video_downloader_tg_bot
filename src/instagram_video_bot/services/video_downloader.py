@@ -6,6 +6,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ from .download_models import (
 )
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor
+from .instagram_provider_runtime import InstagramProviderRuntime
 from .media_normalizer import normalize_instagram_media
 from .provider_adapters import (
     InstagramProviderAdapter,
@@ -62,15 +64,17 @@ class VideoDownloader:
 
     _throttle_lock = threading.Lock()
     _last_instagram_download_by_key: dict[str, float] = {}
-    _instagram_provider_executor: ThreadPoolExecutor | None = None
-    _instagram_provider_executor_limit: int | None = None
-    _instagram_provider_executor_lock = threading.Lock()
+    _shared_instagram_runtime = InstagramProviderRuntime()
     _instagram_provider_semaphore: asyncio.Semaphore | None = None
     _instagram_provider_semaphore_limit: int | None = None
     _instagram_provider_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
-    def __init__(self):
+    def __init__(
+        self,
+        instagram_runtime: InstagramProviderRuntime | None = None,
+    ):
         """Initialize the video downloader."""
+        self.instagram_runtime = instagram_runtime or self._shared_instagram_runtime
         self.min_delay_between_downloads = 10
         self.random_delay_range = (1.0, 3.0)
         self.fast_min_delay_between_downloads = max(
@@ -608,12 +612,24 @@ class VideoDownloader:
         """Run blocking Instagram provider code away from the Telegram event loop."""
         timeout_seconds = max(0.1, float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS))
         loop = asyncio.get_running_loop()
-        executor, future = self._submit_instagram_operation(operation)
+        submission = self._submit_instagram_operation(operation)
+        executor = submission.executor
+        future = submission.future
         deadline = loop.time() + timeout_seconds
+        resubmitted_after_recycle = False
         try:
             while True:
                 if future.done():
-                    return future.result()
+                    try:
+                        return future.result()
+                    except FutureCancelledError:
+                        if resubmitted_after_recycle or loop.time() >= deadline:
+                            break
+                        submission = self._submit_instagram_operation(operation)
+                        executor = submission.executor
+                        future = submission.future
+                        resubmitted_after_recycle = True
+                        continue
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     break
@@ -642,23 +658,11 @@ class VideoDownloader:
             f"Instagram provider timed out after {timeout_seconds:g} seconds"
         )
 
-    @classmethod
-    def _submit_instagram_operation(cls, operation: Callable[[], T]):
-        last_error: RuntimeError | None = None
-        for attempt in range(2):
-            executor = cls._get_instagram_provider_executor()
-            try:
-                return executor, executor.submit(operation)
-            except RuntimeError as error:
-                if "shutdown" not in str(error).lower():
-                    raise
-                last_error = error
-                logger.warning("Instagram provider executor shut down during submit; retrying")
-                if attempt == 0:
-                    continue
-                raise
-        assert last_error is not None
-        raise last_error
+    def _submit_instagram_operation(self, operation: Callable[[], T]):
+        return self.instagram_runtime.submit(
+            operation,
+            max_workers=settings.INSTAGRAM_MAX_CONCURRENT_JOBS,
+        )
 
     @staticmethod
     def _get_detached_instagram_lease_seconds() -> float:
@@ -704,7 +708,7 @@ class VideoDownloader:
                 return
             logger.warning("Timed-out Instagram worker exceeded detached lease window")
             run_cleanup(on_timeout_stale or on_timeout_finish)
-            self._recycle_instagram_provider_executor(executor)
+            self.instagram_runtime.retire(executor)
 
         if on_timeout_stale or recycle_on_stale:
             stale_timer = threading.Timer(self._get_detached_instagram_lease_seconds(), stale_cleanup)
@@ -752,30 +756,8 @@ class VideoDownloader:
         manager.release_account(account)
 
     @classmethod
-    def _recycle_instagram_provider_executor(cls, stale_executor: ThreadPoolExecutor) -> None:
-        with cls._instagram_provider_executor_lock:
-            if cls._instagram_provider_executor is not stale_executor:
-                return
-            logger.warning("Recycling Instagram provider executor after stale worker")
-            stale_executor.shutdown(wait=False, cancel_futures=True)
-            cls._instagram_provider_executor = None
-
-    @classmethod
-    def _get_instagram_provider_executor(cls) -> ThreadPoolExecutor:
-        limit = max(1, settings.INSTAGRAM_MAX_CONCURRENT_JOBS)
-        with cls._instagram_provider_executor_lock:
-            if (
-                cls._instagram_provider_executor is None
-                or cls._instagram_provider_executor_limit != limit
-            ):
-                if cls._instagram_provider_executor is not None:
-                    cls._instagram_provider_executor.shutdown(wait=False, cancel_futures=True)
-                cls._instagram_provider_executor = ThreadPoolExecutor(
-                    max_workers=limit,
-                    thread_name_prefix="instagram-provider",
-                )
-                cls._instagram_provider_executor_limit = limit
-            return cls._instagram_provider_executor
+    def shutdown_shared_instagram_runtime(cls) -> None:
+        cls._shared_instagram_runtime.shutdown()
 
     def _download_with_leased_account_sync(self, account, url: str, output_dir: Path) -> VideoInfo:
         client = self._build_leased_client(account)

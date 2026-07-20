@@ -18,6 +18,9 @@ from src.instagram_video_bot.services.instagram_fast_extractor import (
     FastExtractorDownloadResult,
     InstagramFastExtractorError,
 )
+from src.instagram_video_bot.services.instagram_provider_runtime import (
+    InstagramProviderRuntime,
+)
 from src.instagram_video_bot.services.media_metadata import MediaMetadata
 from src.instagram_video_bot.services.provider_adapters import InstagramProviderAdapter
 from src.instagram_video_bot.services.video_downloader import (
@@ -26,6 +29,34 @@ from src.instagram_video_bot.services.video_downloader import (
     VideoDownloader,
     VideoInfo,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_real_public_instagram_recovery(monkeypatch):
+    monkeypatch.setattr(
+        InstagramClient,
+        "download_public_ytdlp_media",
+        staticmethod(lambda _url, _output_dir: None),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _disable_provider_flow_media_normalization(monkeypatch):
+    async def _identity(video_info):
+        return video_info
+
+    monkeypatch.setattr(
+        VideoDownloader,
+        "_normalize_instagram_result",
+        staticmethod(_identity),
+    )
+
+
+@pytest.fixture
+def instagram_runtime():
+    runtime = InstagramProviderRuntime()
+    yield runtime
+    runtime.shutdown()
 
 
 class _SuccessDownloadClient:
@@ -297,24 +328,25 @@ class _Account:
         self.session_file = None
 
 
-class _ShutdownOnceExecutor:
+class _CancelledThenSuccessfulRuntime:
     def __init__(self):
         self.submit_calls = 0
 
-    def submit(self, _operation):
+    def submit(self, operation, *, max_workers):
         self.submit_calls += 1
-        raise RuntimeError("cannot schedule new futures after shutdown")
-
-
-class _ImmediateExecutor:
-    def __init__(self):
-        self.submit_calls = 0
-
-    def submit(self, operation):
-        self.submit_calls += 1
+        executor = object()
         future = Future()
-        future.set_result(operation())
-        return future
+        if self.submit_calls == 1:
+            future.cancel()
+        else:
+            future.set_result(operation())
+        return SimpleNamespace(executor=executor, future=future)
+
+    def retire(self, _executor):
+        return True
+
+    def shutdown(self):
+        return None
 
 
 def test_build_media_item_treats_zero_duration_as_missing(monkeypatch, tmp_path):
@@ -768,8 +800,10 @@ async def test_story_url_routes_directly_to_legacy(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_instagram_fallback_login_timeout_becomes_download_error(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_fallback_login_timeout_becomes_download_error(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -801,8 +835,10 @@ async def test_instagram_fallback_login_timeout_becomes_download_error(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_instagram_timeout_keeps_account_leased_until_worker_finishes(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_timeout_keeps_account_leased_until_worker_finishes(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -843,8 +879,10 @@ async def test_instagram_timeout_keeps_account_leased_until_worker_finishes(monk
 
 
 @pytest.mark.asyncio
-async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -896,8 +934,10 @@ async def test_instagram_cancellation_keeps_account_leased_until_worker_finishes
 
 
 @pytest.mark.asyncio
-async def test_instagram_cancellation_retires_account_as_cancelled_stale_after_detached_window(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_cancellation_retires_account_as_cancelled_stale_after_detached_window(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -954,8 +994,10 @@ async def test_instagram_cancellation_retires_account_as_cancelled_stale_after_d
 
 
 @pytest.mark.asyncio
-async def test_instagram_stale_timeout_retires_and_releases_account(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_stale_timeout_retires_and_releases_account(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -1003,8 +1045,10 @@ async def test_instagram_stale_timeout_retires_and_releases_account(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_instagram_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_instagram_stale_timeout_recycles_saturated_executor(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -1060,8 +1104,10 @@ async def test_instagram_stale_timeout_recycles_saturated_executor(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_single_account_stale_timeout_recycles_saturated_executor(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -1114,8 +1160,10 @@ async def test_single_account_stale_timeout_recycles_saturated_executor(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_single_account_cancellation_recycles_saturated_executor(monkeypatch, tmp_path):
-    downloader = VideoDownloader()
+async def test_single_account_cancellation_recycles_saturated_executor(
+    monkeypatch, tmp_path, instagram_runtime
+):
+    downloader = VideoDownloader(instagram_runtime=instagram_runtime)
     downloader.min_delay_between_downloads = 0
     downloader.random_delay_range = (0, 0)
     monkeypatch.setattr("src.instagram_video_bot.services.video_downloader.settings.IG_FAST_METHOD_ENABLED", False)
@@ -1179,23 +1227,14 @@ async def test_single_account_cancellation_recycles_saturated_executor(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_instagram_sync_retries_submit_after_executor_shutdown(monkeypatch):
-    downloader = VideoDownloader()
-    stale_executor = _ShutdownOnceExecutor()
-    fresh_executor = _ImmediateExecutor()
-    executors = [stale_executor, fresh_executor]
-
-    monkeypatch.setattr(
-        VideoDownloader,
-        "_get_instagram_provider_executor",
-        classmethod(lambda cls: executors.pop(0)),
-    )
+async def test_instagram_sync_resubmits_queued_work_cancelled_by_recycle():
+    runtime = _CancelledThenSuccessfulRuntime()
+    downloader = VideoDownloader(instagram_runtime=runtime)
 
     result = await downloader._run_instagram_sync(lambda: "ok")
 
     assert result == "ok"
-    assert stale_executor.submit_calls == 1
-    assert fresh_executor.submit_calls == 1
+    assert runtime.submit_calls == 2
 
 
 @pytest.mark.asyncio
