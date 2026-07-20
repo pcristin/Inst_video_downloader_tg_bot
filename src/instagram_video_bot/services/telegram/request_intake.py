@@ -10,9 +10,10 @@ from telegram.ext import ContextTypes
 
 from ...config.settings import settings
 from ..chaos_text import ChaosText
+from ..job_states import JobState
+from ..request_parser import ParsedRequestLink, RequestParser
 from .job_actions import cancel_keyboard
 from .request_context import RequestContext
-from ..request_parser import ParsedRequestLink, RequestParser
 
 
 class TelegramRequestIntake:
@@ -145,6 +146,8 @@ class TelegramRequestIntake:
             language_code=language_code,
         )
         bot.request_contexts[submission.request_id] = request_context
+        if submission.job.state is JobState.RUNNING:
+            await bot._on_job_state_change(submission.job)
         task = asyncio.create_task(
             bot._await_request(context, request_context, submission.job)
         )

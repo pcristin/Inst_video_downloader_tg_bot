@@ -8,18 +8,18 @@ from telegram import MessageEntity
 from telegram.error import BadRequest, TimedOut
 
 from src.instagram_video_bot.config.settings import settings
-from src.instagram_video_bot.services.download_models import \
-    ProviderExecutionMetrics
-from src.instagram_video_bot.services.job_manager import (RequestRecord,
-                                                          SharedJob)
+from src.instagram_video_bot.services.download_models import ProviderExecutionMetrics
+from src.instagram_video_bot.services.job_manager import RequestRecord, SharedJob
 from src.instagram_video_bot.services.state_store import StateStore
-from src.instagram_video_bot.services.telegram_bot import (RequestContext,
-                                                           TelegramBot)
-from src.instagram_video_bot.services.telegram_media_sender import \
-    RejectedTelegramFileIdError
-from src.instagram_video_bot.services.video_downloader import (DownloadError,
-                                                               MediaItem,
-                                                               VideoInfo)
+from src.instagram_video_bot.services.telegram_bot import RequestContext, TelegramBot
+from src.instagram_video_bot.services.telegram_media_sender import (
+    RejectedTelegramFileIdError,
+)
+from src.instagram_video_bot.services.video_downloader import (
+    DownloadError,
+    MediaItem,
+    VideoInfo,
+)
 from src.instagram_video_bot.utils.account_manager import AccountHealthEvent
 
 
@@ -181,11 +181,13 @@ class _RejectSecondStagedAlbumChunkBot(_FakeBot):
 class _FakeStatusMessage:
     def __init__(self):
         self.texts = []
+        self.edit_kwargs = []
         self.reply_kwargs = []
         self.deleted = False
 
-    async def edit_text(self, text: str):
+    async def edit_text(self, text: str, **kwargs):
         self.texts.append(text)
+        self.edit_kwargs.append(kwargs)
 
     async def reply_text(self, text: str, **kwargs):
         self.texts.append(text)
@@ -312,7 +314,9 @@ async def test_send_single_video_uses_send_video(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_media_stages_local_video_then_delivers_file_id(monkeypatch, tmp_path):
+async def test_send_media_stages_local_video_then_delivers_file_id(
+    monkeypatch, tmp_path
+):
     storage_chat_id = -1001
     monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
     store = StateStore(tmp_path / "state.db")
@@ -358,7 +362,9 @@ async def test_send_media_stages_local_video_then_delivers_file_id(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_send_media_restages_rejected_cached_file_id_privately(monkeypatch, tmp_path):
+async def test_send_media_restages_rejected_cached_file_id_privately(
+    monkeypatch, tmp_path
+):
     storage_chat_id = -1001
     monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", storage_chat_id)
     store = StateStore(tmp_path / "state.db")
@@ -439,7 +445,9 @@ async def test_send_media_reuses_healthy_cached_file_id_without_private_upload(
 
 
 @pytest.mark.asyncio
-async def test_delivery_timeout_records_unknown_outcome_without_failing_download(tmp_path):
+async def test_delivery_timeout_records_unknown_outcome_without_failing_download(
+    tmp_path,
+):
     store = StateStore(tmp_path / "state.db")
     telegram_bot = TelegramBot(state_store=store)
     request_context = _make_request_context(_FakeStatusMessage())
@@ -985,7 +993,11 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
     assert not media_file.exists()
     assert len(fake_bot.video_calls) == 1
     assert update.message.replies == ["Принял Instagram. Скоро начну скачивать."]
-    assert update.message.status_messages[0].texts == ["Instagram: скачиваю."]
+    assert update.message.status_messages[0].texts == [
+        "Instagram: скачиваю.",
+        "Instagram: подготавливаю медиа.",
+        "Instagram: отправляю в Telegram.",
+    ]
     assert update.message.status_messages[0].deleted is True
 
 
@@ -1020,7 +1032,11 @@ async def test_handle_message_uses_english_profile_language(monkeypatch, tmp_pat
     await asyncio.gather(*telegram_bot.active_request_tasks.values())
 
     assert update.message.replies == ["Got Instagram. I will start downloading soon."]
-    assert update.message.status_messages[0].texts == ["Instagram: downloading."]
+    assert update.message.status_messages[0].texts == [
+        "Instagram: downloading.",
+        "Instagram: preparing media.",
+        "Instagram: sending to Telegram.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1448,8 +1464,7 @@ async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
     update = _FakeUpdate("https://www.instagram.com/reel/fail/")
 
     async def fail_download_video(self, url: str, output_dir: Path):
-        from src.instagram_video_bot.services.video_downloader import \
-            DownloadError
+        from src.instagram_video_bot.services.video_downloader import DownloadError
 
         raise DownloadError("rate limit")
 
@@ -1463,7 +1478,7 @@ async def test_download_failure_uses_russian_error_text(monkeypatch, tmp_path):
 
     assert (
         update.message.status_messages[0].texts[-1]
-        == "Достигнут лимит провайдера. Попробуй позже."
+        == "Провайдер ограничил запросы. Можно повторить позже."
     )
 
 
@@ -1719,8 +1734,15 @@ async def test_shared_delivery_handoffs_to_another_requester_on_send_failure(
     assert delivered_message_ids == [11]
     assert first_update.message.status_messages[0].deleted is True
     assert second_update.message.status_messages[0].deleted is True
-    assert first_update.message.status_messages[0].texts == ["Instagram: скачиваю."]
-    assert second_update.message.status_messages[0].texts == []
+    assert first_update.message.status_messages[0].texts == [
+        "Instagram: скачиваю.",
+        "Instagram: подготавливаю медиа.",
+        "Instagram: отправляю в Telegram.",
+    ]
+    assert second_update.message.status_messages[0].texts == [
+        "Instagram: подготавливаю медиа.",
+        "Instagram: отправляю в Telegram.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1780,14 +1802,29 @@ async def test_shared_delivery_does_not_handoff_after_ambiguous_user_send(
 
     assert send_attempts == [10]
     with telegram_bot.state_store._lock:
-        statuses = telegram_bot.state_store._conn.execute(
-            "SELECT status FROM request_events ORDER BY created_at"
-        ).fetchall()
+        statuses = telegram_bot.state_store._conn.execute("""
+            SELECT status, failure_reason, retryable
+            FROM request_events
+            ORDER BY created_at
+            """).fetchall()
     assert [row["status"] for row in statuses] == ["failed", "failed"]
+    assert [row["failure_reason"] for row in statuses] == [
+        "delivery_ambiguous",
+        "delivery_ambiguous",
+    ]
+    assert [row["retryable"] for row in statuses] == [0, 0]
+    assert first_update.message.status_messages[0].edit_kwargs[-1] == {
+        "reply_markup": None
+    }
+    assert second_update.message.status_messages[0].edit_kwargs[-1] == {
+        "reply_markup": None
+    }
 
 
 @pytest.mark.asyncio
-async def test_storage_failure_fails_original_request_before_handoff(monkeypatch, tmp_path):
+async def test_storage_failure_fails_original_request_before_handoff(
+    monkeypatch, tmp_path
+):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     context = _FakeContext(_FakeBot())
     first_update = _FakeUpdate(
@@ -1825,9 +1862,7 @@ async def test_storage_failure_fails_original_request_before_handoff(monkeypatch
         "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
         fake_download_video,
     )
-    monkeypatch.setattr(
-        TelegramBot, "_stage_media_for_delivery", fake_stage_media
-    )
+    monkeypatch.setattr(TelegramBot, "_stage_media_for_delivery", fake_stage_media)
     monkeypatch.setattr(TelegramBot, "_send_staged_media", fake_send_staged_media)
 
     await telegram_bot.handle_message(first_update, context)

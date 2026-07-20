@@ -5,10 +5,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from telegram.ext import (Application, ApplicationBuilder,
-                          CallbackQueryHandler, ChosenInlineResultHandler,
-                          CommandHandler, InlineQueryHandler, MessageHandler,
-                          PreCheckoutQueryHandler, filters)
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    ChosenInlineResultHandler,
+    CommandHandler,
+    InlineQueryHandler,
+    MessageHandler,
+    PreCheckoutQueryHandler,
+    filters,
+)
 
 from ..config.settings import settings
 
@@ -50,7 +57,8 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
     from .post_deploy_notifications import (
         send_bot_migration_announcement_once,
         send_inline_mode_announcement_once,
-        send_inline_promo_refund_announcement_once)
+        send_inline_promo_refund_announcement_once,
+    )
 
     async def _post_init(application: Application) -> None:
         application.create_task(_run_post_deploy_tasks(application))
@@ -110,12 +118,6 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
             pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$",
         )
     )
-    application.add_handler(
-        CallbackQueryHandler(
-            bot.job_action_callback_handler,
-            pattern=r"^job:(?:cancel|retry):[A-Za-z0-9_-]+$",
-        )
-    )
     application.add_handler(PreCheckoutQueryHandler(bot.pre_checkout_handler))
     application.add_handler(
         MessageHandler(filters.SUCCESSFUL_PAYMENT, bot.successful_payment_handler)
@@ -128,6 +130,12 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
         CommandHandler("inline_onetime", bot.inline_onetime_command)
     )
     application.add_handler(CommandHandler("inline_refund", bot.inline_refund_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            bot.job_action_callback_handler,
+            pattern=r"^job:(?:cancel|retry):[A-Za-z0-9_-]+$",
+        )
+    )
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,

@@ -388,6 +388,22 @@ class StateStore:
                 (request_id,),
             ).fetchone()
 
+    def get_retry_request_id(self, request_id: str) -> str | None:
+        """Return the first request already created from a Retry action."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT request_id
+                FROM request_events
+                WHERE retry_of_request_id = ?
+                ORDER BY created_at
+                LIMIT 1
+                """,
+                (request_id,),
+            ).fetchone()
+        return str(row["request_id"]) if row is not None else None
+
     def list_distinct_request_user_ids(self) -> list[int]:
         """Return users who have submitted at least one request."""
 

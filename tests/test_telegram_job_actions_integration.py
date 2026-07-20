@@ -5,6 +5,7 @@ import pytest
 
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
+from src.instagram_video_bot.services.video_downloader import DownloadError, VideoInfo
 
 
 class _StatusMessage:
@@ -176,6 +177,52 @@ async def test_cancel_job_action_rejects_another_user(monkeypatch, tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_cancel_job_action_rejects_another_chat(monkeypatch, tmp_path):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    request_id, status, release = await _submit_waiting_request(bot, monkeypatch)
+    request_tasks = list(bot.active_request_tasks.values())
+    query = _CallbackQuery(f"job:cancel:{request_id}", status)
+
+    await bot.job_action_callback_handler(
+        _CallbackUpdate(query, chat_id=999),
+        _Context(),
+    )
+
+    row = bot.state_store.get_request_for_action(request_id)
+    assert row is not None
+    assert row["status"] in {"queued", "running"}
+    assert query.answers == [("This action belongs to another request.", True)]
+
+    bot.job_manager.cancel_request(request_id)
+    release.set()
+    await asyncio.wait_for(
+        asyncio.gather(*request_tasks, return_exceptions=True), timeout=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_action_is_stale_after_first_cancel(
+    monkeypatch, tmp_path
+):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    request_id, status, release = await _submit_waiting_request(bot, monkeypatch)
+    request_tasks = list(bot.active_request_tasks.values())
+    first_query = _CallbackQuery(f"job:cancel:{request_id}", status)
+    second_query = _CallbackQuery(f"job:cancel:{request_id}", status)
+
+    await bot.job_action_callback_handler(_CallbackUpdate(first_query), _Context())
+    await bot.job_action_callback_handler(_CallbackUpdate(second_query), _Context())
+
+    assert first_query.answers == [("Request cancelled.", False)]
+    assert second_query.answers == [("This action is no longer available.", True)]
+
+    release.set()
+    await asyncio.wait_for(
+        asyncio.gather(*request_tasks, return_exceptions=True), timeout=1
+    )
+
+
 def _persist_failed_request(store, *, retryable=True, request_id="failed-request"):
     normalized_url = "https://x.com/example/status/123"
     store.create_job("failed-job", 77, normalized_url, "twitter", "failed")
@@ -215,13 +262,11 @@ async def test_retry_action_uses_persisted_request_after_restart(monkeypatch, tm
     await bot.job_action_callback_handler(_CallbackUpdate(query), _Context())
 
     with store._lock:
-        retry = store._conn.execute(
-            """
+        retry = store._conn.execute("""
             SELECT request_id, normalized_url, retry_of_request_id
             FROM request_events
             WHERE retry_of_request_id = 'failed-request'
-            """
-        ).fetchone()
+            """).fetchone()
     assert retry is not None
     assert retry["normalized_url"] == "https://x.com/example/status/123"
     assert query.answers == [("Retry started.", False)]
@@ -253,3 +298,129 @@ async def test_retry_action_rejects_non_retryable_failure(tmp_path):
         ).fetchone()["count"]
     assert request_count == 1
     assert query.answers == [("This request cannot be retried safely.", True)]
+
+
+@pytest.mark.asyncio
+async def test_repeated_retry_action_creates_only_one_new_request(
+    monkeypatch, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    _persist_failed_request(store)
+    bot = TelegramBot(state_store=store)
+    release = asyncio.Event()
+
+    async def execute(_job):
+        await release.wait()
+        return SimpleNamespace(media_items=[], from_cache=True)
+
+    monkeypatch.setattr(bot, "_build_job_executor", lambda *_args: execute)
+    first_query = _CallbackQuery("job:retry:failed-request", _StatusMessage())
+    second_query = _CallbackQuery("job:retry:failed-request", _StatusMessage())
+
+    await bot.job_action_callback_handler(_CallbackUpdate(first_query), _Context())
+    await bot.job_action_callback_handler(_CallbackUpdate(second_query), _Context())
+
+    with store._lock:
+        retries = store._conn.execute("""
+            SELECT request_id
+            FROM request_events
+            WHERE retry_of_request_id = 'failed-request'
+            """).fetchall()
+    assert len(retries) == 1
+    assert second_query.answers == [("Retry already started.", False)]
+
+    request_tasks = list(bot.active_request_tasks.values())
+    bot.job_manager.cancel_request(retries[0]["request_id"])
+    release.set()
+    await asyncio.wait_for(
+        asyncio.gather(*request_tasks, return_exceptions=True), timeout=1
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_request_updates_one_status_through_delivery_stages(
+    monkeypatch, tmp_path
+):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    video_info = VideoInfo(file_path=tmp_path / "video.mp4", title="Video")
+
+    async def execute(_job):
+        await asyncio.sleep(0)
+        return video_info
+
+    async def stage(_context, _request_context, result):
+        return result
+
+    async def send(_context, _request_context, _result):
+        return None
+
+    monkeypatch.setattr(bot, "_build_job_executor", lambda *_args: execute)
+    monkeypatch.setattr(bot, "_stage_media_for_delivery", stage)
+    monkeypatch.setattr(bot, "_send_staged_media", send)
+    update = _Update("https://x.com/example/status/123")
+
+    await bot.handle_message(update, _Context())
+    request_tasks = list(bot.active_request_tasks.values())
+    await asyncio.wait_for(asyncio.gather(*request_tasks), timeout=1)
+
+    status = update.message.status_messages[0]
+    texts = [text for text, _kwargs in status.edits]
+    assert texts == [
+        "Twitter/X: downloading.",
+        "Twitter/X: preparing media.",
+        "Twitter/X: sending to Telegram.",
+    ]
+    assert status.edits[-1][1] == {"reply_markup": None}
+    assert status.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_retryable_provider_failure_shows_retry_button(monkeypatch, tmp_path):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+
+    async def execute(_job):
+        raise DownloadError("provider timed out")
+
+    monkeypatch.setattr(bot, "_build_job_executor", lambda *_args: execute)
+    update = _Update("https://x.com/example/status/123")
+
+    await bot.handle_message(update, _Context())
+    request_id = next(iter(bot.request_contexts))
+    request_tasks = list(bot.active_request_tasks.values())
+    await asyncio.wait_for(
+        asyncio.gather(*request_tasks, return_exceptions=True), timeout=1
+    )
+
+    status = update.message.status_messages[0]
+    text, kwargs = status.edits[-1]
+    assert text == "The download took too long. You can retry."
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == (
+        f"job:retry:{request_id}"
+    )
+    row = bot.state_store.get_request_for_action(request_id)
+    assert row is not None
+    assert row["failure_reason"] == "provider_timeout"
+    assert row["retryable"] == 1
+
+
+@pytest.mark.asyncio
+async def test_permanent_provider_failure_removes_actions(monkeypatch, tmp_path):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+
+    async def execute(_job):
+        raise DownloadError("Unsupported Twitter/X URL")
+
+    monkeypatch.setattr(bot, "_build_job_executor", lambda *_args: execute)
+    update = _Update("https://x.com/example/status/123")
+
+    await bot.handle_message(update, _Context())
+    request_tasks = list(bot.active_request_tasks.values())
+    await asyncio.wait_for(
+        asyncio.gather(*request_tasks, return_exceptions=True), timeout=1
+    )
+
+    status = update.message.status_messages[0]
+    assert status.edits[-1] == (
+        "This link is not supported.",
+        {"reply_markup": None},
+    )

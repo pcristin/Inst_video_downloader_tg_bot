@@ -11,52 +11,85 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
-                      InlineQueryResultArticle, InputInvoiceMessageContent,
-                      InputTextMessageContent, LabeledPrice, Message, Update)
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputInvoiceMessageContent,
+    InputTextMessageContent,
+    LabeledPrice,
+    Message,
+    Update,
+)
 from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
 from . import video_downloader as video_downloader_module
 from .chaos_text import ChaosText, TextContext
-from .inline_access import (build_inline_result_id,
-                            build_one_time_entitlement_result_id,
-                            build_one_time_payload, build_subscription_payload,
-                            generate_session_token,
-                            parse_inline_payment_payload, validate_star_amount)
-from .inline_delivery import (InlineCachedMediaItem, build_inline_input_media,
-                              upload_first_media_to_storage)
+from .inline_access import (
+    build_inline_result_id,
+    build_one_time_entitlement_result_id,
+    build_one_time_payload,
+    build_subscription_payload,
+    generate_session_token,
+    parse_inline_payment_payload,
+    validate_star_amount,
+)
+from .inline_delivery import (
+    InlineCachedMediaItem,
+    build_inline_input_media,
+    upload_first_media_to_storage,
+)
 from .job_manager import JobManager, SharedJob
+from .job_states import (
+    FailureDetails,
+    FailureStage,
+    classify_failure,
+)
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
-from .telegram_cache import purge_expired_cache_files, video_info_from_cache
-from .telegram_inline_sessions import (inline_session_is_expired,
-                                       parse_chosen_inline_session_token,
-                                       record_failed_inline_access,
-                                       record_successful_inline_access,
-                                       subscription_expires_at)
-from .telegram_media_sender import (RejectedTelegramFileIdError,
-                                    TelegramMediaSender)
-from .telegram_media_retry import classify_telegram_delivery_error
-from .telegram_media_stager import TelegramMediaStager
-from .telegram_performance import (build_admin_performance_summary,
-                                   format_performance_summary)
-from .telegram_provider_metrics import record_provider_metrics
-from .telegram_status import (build_error_message, build_submission_message,
-                              delete_status_message, edit_status_message,
-                              safe_edit_text)
-from .telegram_update_helpers import (language_from_profile,
-                                      parse_positive_int_arg, parse_toggle_arg,
-                                      request_user_id, request_user_label,
-                                      user_label)
-from .telegram_wiring import build_telegram_application
 from .telegram.command_handlers import TelegramCommandHandlers
-from .telegram.job_actions import JobAction, parse_job_action_data
+from .telegram.job_actions import (
+    JobAction,
+    parse_job_action_data,
+    retry_keyboard,
+)
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
-from .video_downloader import (DownloadError, MediaItem, VideoDownloader,
-                               VideoDownloadError, VideoInfo)
+from .telegram_cache import purge_expired_cache_files, video_info_from_cache
+from .telegram_inline_sessions import (
+    inline_session_is_expired,
+    parse_chosen_inline_session_token,
+    record_failed_inline_access,
+    record_successful_inline_access,
+    subscription_expires_at,
+)
+from .telegram_media_retry import classify_telegram_delivery_error
+from .telegram_media_sender import RejectedTelegramFileIdError, TelegramMediaSender
+from .telegram_media_stager import TelegramMediaStager
+from .telegram_performance import (
+    build_admin_performance_summary,
+    format_performance_summary,
+)
+from .telegram_provider_metrics import record_provider_metrics
+from .telegram_status import (
+    build_error_message,
+    build_submission_message,
+    delete_status_message,
+    edit_status_message,
+    safe_edit_text,
+)
+from .telegram_update_helpers import (
+    language_from_profile,
+    parse_positive_int_arg,
+    parse_toggle_arg,
+    request_user_id,
+    request_user_label,
+    user_label,
+)
+from .telegram_wiring import build_telegram_application
+from .video_downloader import DownloadError, MediaItem, VideoDownloader, VideoInfo
 
 logger = logging.getLogger(__name__)
 _REPLY_MARKUP_UNSET = object()
@@ -148,6 +181,9 @@ class TelegramBot:
                 "This request cannot be retried safely.", show_alert=True
             )
             return
+        if self.state_store.get_retry_request_id(request_id) is not None:
+            await query.answer("Retry already started.")
+            return
         rate_limit = self._consume_user_rate_limit(
             query.from_user.id,
             source="direct",
@@ -166,9 +202,7 @@ class TelegramBot:
             limit=1,
         )
         if not links:
-            await query.answer(
-                "This action is no longer available.", show_alert=True
-            )
+            await query.answer("This action is no longer available.", show_alert=True)
             return
         new_request_id = await self.request_intake.submit_parsed_link(
             update,
@@ -178,13 +212,10 @@ class TelegramBot:
             retry_of_request_id=request_id,
         )
         if new_request_id is None:
-            await query.answer(
-                "This action is no longer available.", show_alert=True
-            )
+            await query.answer("This action is no longer available.", show_alert=True)
             return
         await query.answer("Retry started.")
         return
-
 
     async def start_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1252,9 +1283,8 @@ class TelegramBot:
                 )
             except DownloadError as error:
                 last_error = error
-                if (
-                    attempt == attempts - 1
-                    or not self._should_retry_inline_download(error)
+                if attempt == attempts - 1 or not self._should_retry_inline_download(
+                    error
                 ):
                     raise
                 logger.warning(
@@ -1280,10 +1310,9 @@ class TelegramBot:
         if isinstance(error, video_downloader_module.InstagramProviderTimeoutError):
             return False
         error_text = TelegramBot._primary_inline_download_error_text(error)
-        if (
-            error_text.startswith("instagram provider timed out")
-            or error_text.startswith("fast_path_error=instagram provider timed out")
-        ):
+        if error_text.startswith(
+            "instagram provider timed out"
+        ) or error_text.startswith("fast_path_error=instagram provider timed out"):
             return False
         return video_downloader_module.is_transient_download_error(
             DownloadError(error_text)
@@ -1431,6 +1460,7 @@ class TelegramBot:
         job: SharedJob,
     ) -> None:
         """Wait for a shared job result and deliver it to one requester."""
+        request_failure: FailureDetails | None = None
         try:
             if not job.result_future:
                 raise DownloadError("Job result future was not initialized")
@@ -1439,6 +1469,17 @@ class TelegramBot:
                 if self.job_manager.is_delivery_request(
                     job, request_context.request_id
                 ):
+                    if not request_context.quiet_mode:
+                        await self._edit_status_message(
+                            request_context.status_message,
+                            ChaosText.preparing(
+                                TextContext(
+                                    provider_label=request_context.provider_label,
+                                    chaos_enabled=request_context.chaos_enabled,
+                                    language_code=request_context.language_code,
+                                )
+                            ),
+                        )
                     staging_started_at = time.perf_counter()
                     staging_required = self.media_stager is not None and any(
                         not item.telegram_file_id for item in video_info.media_items
@@ -1448,6 +1489,12 @@ class TelegramBot:
                             context, request_context, video_info
                         )
                     except Exception as error:
+                        request_failure = classify_failure(
+                            error,
+                            stage=FailureStage.DELIVERY,
+                            ambiguous_delivery=False,
+                        )
+                        setattr(error, "job_failure_details", request_failure)
                         staging_duration_ms = self._elapsed_ms(staging_started_at)
                         self.state_store.record_delivery_metrics(
                             job.job_id,
@@ -1474,6 +1521,18 @@ class TelegramBot:
                         )
 
                     delivery_started_at = time.perf_counter()
+                    if not request_context.quiet_mode:
+                        await self._edit_status_message(
+                            request_context.status_message,
+                            ChaosText.sending(
+                                TextContext(
+                                    provider_label=request_context.provider_label,
+                                    chaos_enabled=request_context.chaos_enabled,
+                                    language_code=request_context.language_code,
+                                )
+                            ),
+                            reply_markup=None,
+                        )
                     try:
                         restage_duration_ms = await self._send_staged_media(
                             context, request_context, delivery_info
@@ -1515,6 +1574,12 @@ class TelegramBot:
                             and not storage_upload_attempted
                             else "failed"
                         )
+                        request_failure = classify_failure(
+                            error,
+                            stage=FailureStage.DELIVERY,
+                            ambiguous_delivery=delivery_status == "unknown",
+                        )
+                        setattr(error, "job_failure_details", request_failure)
                         if restage_duration_ms is not None:
                             self.state_store.record_delivery_attempt(
                                 job_id=job.job_id,
@@ -1591,37 +1656,40 @@ class TelegramBot:
                 request_context.request_id, status="cancelled"
             )
             raise
-        except VideoDownloadError as error:
-            error_message = self._build_error_message(
-                error,
+        except Exception as error:
+            failure = (
+                getattr(error, "job_failure_details", None)
+                or job.failure
+                or request_failure
+                or classify_failure(error, stage=FailureStage.ACQUISITION)
+            )
+            error_message = ChaosText.failure(
+                failure,
                 chaos_enabled=request_context.chaos_enabled,
                 language_code=request_context.language_code,
             )
-            logger.error(
-                "Download error for %s: %s", request_context.original_url, error
-            )
+            logger.exception("Request failed for %s", request_context.original_url)
             if self.job_manager.is_delivery_request(job, request_context.request_id):
                 self.job_manager.mark_delivery_failed(
                     job, request_context.request_id, error
                 )
-            await self._safe_edit_text(request_context.status_message, error_message)
-            self.job_manager.mark_request_failed(
-                request_context.request_id, status="failed"
-            )
-        except Exception as error:
-            logger.exception(
-                "Unexpected error while delivering %s", request_context.original_url
-            )
-            if self.job_manager.is_delivery_request(job, request_context.request_id):
-                self.job_manager.mark_delivery_failed(
-                    job, request_context.request_id, error
+            markup = (
+                retry_keyboard(
+                    request_context.request_id,
+                    language_code=request_context.language_code,
                 )
+                if failure.retryable
+                else None
+            )
             await self._safe_edit_text(
                 request_context.status_message,
-                ChaosText.unexpected_error(request_context.language_code),
+                error_message,
+                reply_markup=markup,
             )
             self.job_manager.mark_request_failed(
-                request_context.request_id, status="failed"
+                request_context.request_id,
+                status="failed",
+                failure=failure,
             )
 
     def _build_job_executor(
@@ -1763,12 +1831,34 @@ class TelegramBot:
                 text = ChaosText.cancelled(
                     request_context.chaos_enabled, request_context.language_code
                 )
-                await self._safe_edit_text(request_context.status_message, text)
-            else:
-                text = ChaosText.failed(
-                    request_context.chaos_enabled, request_context.language_code
+                await self._safe_edit_text(
+                    request_context.status_message,
+                    text,
+                    reply_markup=None,
                 )
-                await self._safe_edit_text(request_context.status_message, text)
+            else:
+                failure = job.failure or classify_failure(
+                    RuntimeError("unknown provider failure"),
+                    stage=FailureStage.ACQUISITION,
+                )
+                text = ChaosText.failure(
+                    failure,
+                    chaos_enabled=request_context.chaos_enabled,
+                    language_code=request_context.language_code,
+                )
+                markup = (
+                    retry_keyboard(
+                        request_id,
+                        language_code=request_context.language_code,
+                    )
+                    if failure.retryable
+                    else None
+                )
+                await self._safe_edit_text(
+                    request_context.status_message,
+                    text,
+                    reply_markup=markup,
+                )
 
     async def _global_error_handler(
         self, update: object, context: ContextTypes.DEFAULT_TYPE
@@ -1869,7 +1959,9 @@ class TelegramBot:
                     fallback_to_local_on_rejected_file_id=False,
                 )
             except Exception as error:
-                setattr(error, "telegram_storage_upload_duration_ms", restage_duration_ms)
+                setattr(
+                    error, "telegram_storage_upload_duration_ms", restage_duration_ms
+                )
                 raise
             return restage_duration_ms
 
@@ -1928,9 +2020,17 @@ class TelegramBot:
         )
 
     @staticmethod
-    async def _edit_status_message(message: Message, text: str) -> None:
+    async def _edit_status_message(
+        message: Message,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None | object = _REPLY_MARKUP_UNSET,
+    ) -> None:
         """Try to edit a transient status message without creating extra chat noise."""
-        await edit_status_message(message, text)
+        if reply_markup is _REPLY_MARKUP_UNSET:
+            await edit_status_message(message, text)
+        else:
+            await edit_status_message(message, text, reply_markup=reply_markup)
 
     @staticmethod
     async def _safe_edit_text(

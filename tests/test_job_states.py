@@ -46,3 +46,14 @@ def test_ambiguous_delivery_is_never_retryable():
 
     assert details.reason is FailureReason.DELIVERY_AMBIGUOUS
     assert details.retryable is False
+
+
+def test_definitely_failed_delivery_is_retryable():
+    details = classify_failure(
+        NetworkError("connection rejected before send"),
+        stage=FailureStage.DELIVERY,
+        ambiguous_delivery=False,
+    )
+
+    assert details.reason is FailureReason.TELEGRAM_DELIVERY
+    assert details.retryable is True

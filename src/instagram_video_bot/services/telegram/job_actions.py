@@ -73,5 +73,11 @@ def _single_button_keyboard(
     request_id: str,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(label, callback_data=build_job_action_data(action, request_id))]]
+        [
+            [
+                InlineKeyboardButton(
+                    label, callback_data=build_job_action_data(action, request_id)
+                )
+            ]
+        ]
     )

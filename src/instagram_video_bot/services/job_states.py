@@ -111,7 +111,7 @@ def classify_failure(
     if stage is FailureStage.DELIVERY:
         return FailureDetails(
             FailureReason.TELEGRAM_DELIVERY,
-            retryable=not isinstance(error, NetworkError),
+            retryable=True,
         )
 
     if isinstance(error, NetworkError) or _contains_any(

@@ -1,3 +1,5 @@
+import sqlite3
+
 from src.instagram_video_bot.services.state_store import StateStore
 
 
@@ -51,3 +53,31 @@ def test_get_request_for_action_returns_none_for_unknown_request(tmp_path):
     store = StateStore(tmp_path / "state.db")
 
     assert store.get_request_for_action("missing") is None
+
+
+def test_request_action_columns_are_added_to_legacy_database(tmp_path):
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE request_events (
+                request_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_label TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                cache_hit INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """)
+
+    store = StateStore(db_path)
+    columns = {
+        row[1]
+        for row in store._conn.execute("PRAGMA table_info(request_events)").fetchall()
+    }
+
+    assert {"failure_reason", "retryable", "retry_of_request_id"} <= columns
