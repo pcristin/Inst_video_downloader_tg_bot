@@ -32,6 +32,7 @@ class InstagramProviderRuntime:
         max_workers: int,
     ) -> SubmittedInstagramOperation[T]:
         limit = max(1, int(max_workers))
+        stale: ThreadPoolExecutor | None = None
         with self._lock:
             if self._executor is None or self._max_workers != limit:
                 stale = self._executor
@@ -40,10 +41,10 @@ class InstagramProviderRuntime:
                     thread_name_prefix="instagram-provider",
                 )
                 self._max_workers = limit
-                if stale is not None:
-                    stale.shutdown(wait=False, cancel_futures=True)
             executor = self._executor
             future = executor.submit(operation)
+        if stale is not None:
+            stale.shutdown(wait=False, cancel_futures=True)
         return SubmittedInstagramOperation(executor=executor, future=future)
 
     def retire(self, stale_executor: ThreadPoolExecutor) -> bool:

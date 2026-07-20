@@ -1,8 +1,55 @@
+import multiprocessing
 import threading
 
 from src.instagram_video_bot.services.instagram_provider_runtime import (
     InstagramProviderRuntime,
 )
+
+
+def _change_generation_with_reentrant_cancel_callback():
+    runtime = InstagramProviderRuntime()
+    running_started = threading.Event()
+    release_running = threading.Event()
+    callback_finished = threading.Event()
+
+    def block_worker():
+        running_started.set()
+        return release_running.wait(timeout=2)
+
+    try:
+        runtime.submit(block_worker, max_workers=1)
+        assert running_started.wait(timeout=1) is True
+        queued = runtime.submit(lambda: "old", max_workers=1)
+
+        def reenter_runtime(_future):
+            reentered = runtime.submit(lambda: "reentered", max_workers=2)
+            assert reentered.future.result(timeout=1) == "reentered"
+            callback_finished.set()
+
+        queued.future.add_done_callback(reenter_runtime)
+
+        runtime.submit(lambda: "fresh", max_workers=2)
+
+        assert queued.future.cancelled() is True
+        assert callback_finished.wait(timeout=1) is True
+    finally:
+        release_running.set()
+        runtime.shutdown()
+
+
+def test_worker_limit_change_allows_cancel_callback_to_reenter_runtime():
+    process = multiprocessing.get_context("spawn").Process(
+        target=_change_generation_with_reentrant_cancel_callback
+    )
+    process.start()
+    process.join(timeout=3)
+    finished = not process.is_alive()
+    if not finished:
+        process.terminate()
+        process.join(timeout=1)
+
+    assert finished is True
+    assert process.exitcode == 0
 
 
 def test_retire_cancels_queued_work_and_creates_fresh_generation():
