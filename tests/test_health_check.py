@@ -61,6 +61,90 @@ def test_check_health_accepts_multi_account_mode_without_single_account_credenti
     assert health_check.check_health() is True
 
 
+def test_check_health_accepts_bot_without_instagram_credentials(
+    monkeypatch, tmp_path
+):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    (tmp_path / "sessions").mkdir()
+    fake_settings = SimpleNamespace(
+        TEMP_DIR=temp_dir,
+        BASE_DIR=tmp_path,
+        BOT_TOKEN="token",
+        IG_USERNAME="",
+        IG_PASSWORD="",
+    )
+    monkeypatch.setattr(health_check, "settings", fake_settings)
+
+    assert health_check.check_health() is True
+
+
+def test_check_health_fails_without_bot_token(monkeypatch, tmp_path):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    (tmp_path / "sessions").mkdir()
+    monkeypatch.setattr(
+        health_check,
+        "settings",
+        SimpleNamespace(
+            TEMP_DIR=temp_dir,
+            BASE_DIR=tmp_path,
+            BOT_TOKEN="",
+            IG_USERNAME="",
+            IG_PASSWORD="",
+        ),
+    )
+
+    assert health_check.check_health() is False
+
+
+def test_check_health_fails_when_temp_storage_is_not_writable(
+    monkeypatch, tmp_path
+):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    (tmp_path / "sessions").mkdir()
+    monkeypatch.setattr(
+        health_check,
+        "settings",
+        SimpleNamespace(
+            TEMP_DIR=temp_dir,
+            BASE_DIR=tmp_path,
+            BOT_TOKEN="token",
+        ),
+    )
+    monkeypatch.setattr(
+        health_check.Path,
+        "touch",
+        lambda _self: (_ for _ in ()).throw(PermissionError("read only")),
+    )
+
+    assert health_check.check_health() is False
+
+
+def test_check_health_fails_when_state_path_is_not_a_database(
+    monkeypatch, tmp_path
+):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    (tmp_path / "sessions").mkdir()
+    invalid_db_path = tmp_path / "state-directory"
+    invalid_db_path.mkdir()
+    monkeypatch.setattr(
+        health_check,
+        "settings",
+        SimpleNamespace(
+            TEMP_DIR=temp_dir,
+            BASE_DIR=tmp_path,
+            BOT_TOKEN="token",
+            STATE_DB_PATH=invalid_db_path,
+            INSTAGRAM_PROVIDER_TIMEOUT_SECONDS=180,
+        ),
+    )
+
+    assert health_check.check_health() is False
+
+
 def test_check_health_fails_when_state_db_has_stale_active_jobs(monkeypatch, tmp_path):
     temp_dir = tmp_path / "temp"
     temp_dir.mkdir()
