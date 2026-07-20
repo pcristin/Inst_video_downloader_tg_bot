@@ -103,6 +103,20 @@ make up
 make accounts-setup
 ```
 
+### Account state directory migration
+
+Before the first deployment that uses the directory-level account-state mount:
+
+```bash
+mkdir -p account-state
+if [ -f accounts_state.json ]; then
+  cp -p accounts_state.json account-state/accounts_state.json
+fi
+```
+
+Keep the old file until the bot has started successfully and `make accounts-status`
+shows the expected quarantines and failure counters.
+
 ### Option 2: Local Installation
 
 ```bash

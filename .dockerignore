@@ -47,6 +47,7 @@ accounts.txt
 instmanager_accounts.txt
 raw_accounts.txt
 accounts_state.json
+account-state/
 sessions/
 cookies/
 secrets/

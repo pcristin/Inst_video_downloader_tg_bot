@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     TEMP_DIR: Path = Path(os.getenv('TEMP_DIR', BASE_DIR / "temp"))
     CACHE_DIR: Path = Path(os.getenv('CACHE_DIR', TEMP_DIR / "result_cache"))
     STATE_DB_PATH: Path = Path(os.getenv('STATE_DB_PATH', TEMP_DIR / "bot_state.sqlite3"))
+    ACCOUNT_STATE_FILE: Path = Path(
+        os.getenv("ACCOUNT_STATE_FILE", BASE_DIR / "accounts_state.json")
+    )
     
     # Note: No longer need COOKIES_FILE - instagrapi uses session files
     
@@ -130,6 +133,7 @@ class Settings(BaseSettings):
         # Create sessions directory
         (self.BASE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
         self.STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.ACCOUNT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     
     def get_proxy_list(self) -> List[str]:
         """Get list of proxies from PROXIES setting."""

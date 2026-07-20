@@ -14,8 +14,8 @@ services:
       - ./logs:/app/logs
       # Mount accounts file for multi-account support
       - ./accounts.txt:/app/accounts.txt
-      # Mount accounts state file to persist banned/usage status
-      - ./accounts_state.json:/app/accounts_state.json
+      # Mount accounts state directory to persist banned/usage status
+      - ./account-state:/app/account-state
     secrets:
       - source: instagram_auth
         target: instagram_auth.json
@@ -25,6 +25,7 @@ services:
     environment:
       # Override paths to use container paths
       - TEMP_DIR=/app/temp
+      - ACCOUNT_STATE_FILE=/app/account-state/accounts_state.json
       # Optional, when the read-only mount above is enabled:
       - IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
       # Additional environment variables for container

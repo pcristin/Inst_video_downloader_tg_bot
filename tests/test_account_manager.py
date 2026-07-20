@@ -22,6 +22,77 @@ def test_get_account_manager_ignores_directory_placeholder(monkeypatch, tmp_path
     assert manager is None
 
 
+def test_get_account_manager_uses_configured_state_file(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    _write_accounts(tmp_path / "accounts.txt", "first")
+    configured_state = tmp_path / "state" / "accounts.json"
+    monkeypatch.setattr(
+        account_manager_module.settings,
+        "ACCOUNT_STATE_FILE",
+        configured_state,
+    )
+    monkeypatch.setattr(account_manager_module, "_account_manager", None)
+
+    manager = account_manager_module.get_account_manager()
+
+    assert manager is not None
+    assert manager.state_file == configured_state
+
+
+def test_save_state_preserves_previous_file_when_replace_fails(
+    monkeypatch, tmp_path
+):
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+    state_file.write_text('{"version": "previous"}\n')
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    monkeypatch.setattr(
+        account_manager_module.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+    manager._save_state()
+
+    assert json.loads(state_file.read_text()) == {"version": "previous"}
+    assert list(tmp_path.glob(".accounts_state.json.*.tmp")) == []
+
+
+def test_save_state_atomically_replaces_with_valid_json(tmp_path):
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "nested" / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    manager._save_state()
+
+    payload = json.loads(state_file.read_text())
+    assert payload["accounts"][0]["username"] == "first"
+    assert list(state_file.parent.glob(".accounts_state.json.*.tmp")) == []
+
+
+def test_save_state_fsyncs_file_and_parent_directory(monkeypatch, tmp_path):
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    fsync_calls = []
+    real_fsync = account_manager_module.os.fsync
+
+    def recording_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(account_manager_module.os, "fsync", recording_fsync)
+
+    manager._save_state()
+
+    assert len(fsync_calls) == 2
+
+
 def test_load_accounts_redacts_proxy_credentials_in_logs(monkeypatch, tmp_path: Path, caplog):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(

@@ -1,7 +1,9 @@
 """Account manager for handling multiple Instagram accounts."""
 import json
 import logging
+import os
 import random
+import tempfile
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
@@ -234,17 +236,38 @@ class AccountManager:
                 self.state_file,
             )
             return
+        temporary_path: Path | None = None
         try:
             state = {
                 'accounts': [acc.to_dict() for acc in self.accounts],
                 'last_updated': datetime.now().isoformat()
             }
-            
-            with open(self.state_file, 'w') as f:
-                json.dump(state, f, indent=2)
-                
-        except Exception as e:
-            logger.error(f"Failed to save state: {e}")
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_file.parent,
+                prefix=f".{self.state_file.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(state, temporary, indent=2)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, self.state_file)
+            temporary_path = None
+            directory_fd = os.open(self.state_file.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception as error:
+            logger.error("Failed to save state: %s", error)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
     
     def get_available_accounts(self) -> List[Account]:
         """Get list of available (non-banned) accounts."""
@@ -672,7 +695,10 @@ def get_account_manager() -> Optional[AccountManager]:
         accounts_file = Path('accounts.txt')
         
         if accounts_file.is_file():
-            _account_manager = AccountManager(accounts_file=accounts_file)
+            _account_manager = AccountManager(
+                accounts_file=accounts_file,
+                state_file=settings.ACCOUNT_STATE_FILE,
+            )
             logger.info("Using multi-account mode with instagrapi")
         else:
             logger.info("No accounts file found - using single account mode")
