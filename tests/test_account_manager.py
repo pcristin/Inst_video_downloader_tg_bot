@@ -3,6 +3,8 @@ import logging
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from src.instagram_video_bot.utils import account_manager as account_manager_module
 from src.instagram_video_bot.utils.account_manager import AccountManager
 
@@ -79,18 +81,121 @@ def test_save_state_fsyncs_file_and_parent_directory(monkeypatch, tmp_path):
     state_file = tmp_path / "accounts_state.json"
     _write_accounts(accounts_file, "first")
     manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
-    fsync_calls = []
+    events = []
+    directory_fds = []
     real_fsync = account_manager_module.os.fsync
+    real_replace = account_manager_module.os.replace
+    real_open = account_manager_module.os.open
+    real_close = account_manager_module.os.close
 
     def recording_fsync(fd):
-        fsync_calls.append(fd)
+        events.append(("fsync", fd))
         return real_fsync(fd)
 
+    def recording_replace(source, destination):
+        events.append(("replace", Path(source), Path(destination)))
+        return real_replace(source, destination)
+
+    def recording_open(path, flags, mode=0o777):
+        fd = real_open(path, flags, mode)
+        if (
+            Path(path) == state_file.parent
+            and flags == account_manager_module.os.O_RDONLY
+        ):
+            directory_fds.append(fd)
+            events.append(("open_directory", Path(path), flags, fd))
+        return fd
+
+    def recording_close(fd):
+        if directory_fds and fd == directory_fds[-1]:
+            events.append(("close", fd))
+        return real_close(fd)
+
     monkeypatch.setattr(account_manager_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(account_manager_module.os, "replace", recording_replace)
+    monkeypatch.setattr(account_manager_module.os, "open", recording_open)
+    monkeypatch.setattr(account_manager_module.os, "close", recording_close)
 
     manager._save_state()
 
-    assert len(fsync_calls) == 2
+    fsync_indexes = [
+        index for index, event in enumerate(events) if event[0] == "fsync"
+    ]
+    replace_index = next(
+        index for index, event in enumerate(events) if event[0] == "replace"
+    )
+    open_index = next(
+        index for index, event in enumerate(events) if event[0] == "open_directory"
+    )
+    close_index = next(
+        index for index, event in enumerate(events) if event[0] == "close"
+    )
+    directory_fd = events[open_index][3]
+
+    assert len(fsync_indexes) == 2
+    assert (
+        fsync_indexes[0]
+        < replace_index
+        < open_index
+        < fsync_indexes[1]
+        < close_index
+    )
+    assert events[open_index][1:3] == (
+        state_file.parent,
+        account_manager_module.os.O_RDONLY,
+    )
+    assert events[fsync_indexes[1]][1] == directory_fd
+    assert events[close_index][1] == directory_fd
+
+
+def test_save_state_closes_parent_directory_when_directory_fsync_fails(
+    monkeypatch, tmp_path
+):
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+    events = []
+    directory_fds = []
+    real_fsync = account_manager_module.os.fsync
+    real_open = account_manager_module.os.open
+    real_close = account_manager_module.os.close
+
+    def failing_directory_fsync(fd):
+        if directory_fds and fd == directory_fds[-1]:
+            events.append(("directory_fsync_failed", fd))
+            raise OSError("directory fsync failed")
+        events.append(("temporary_fsync", fd))
+        return real_fsync(fd)
+
+    def recording_open(path, flags, mode=0o777):
+        fd = real_open(path, flags, mode)
+        if (
+            Path(path) == state_file.parent
+            and flags == account_manager_module.os.O_RDONLY
+        ):
+            directory_fds.append(fd)
+            events.append(("open_directory", Path(path), flags, fd))
+        return fd
+
+    def recording_close(fd):
+        if directory_fds and fd == directory_fds[-1]:
+            events.append(("close", fd))
+        return real_close(fd)
+
+    monkeypatch.setattr(account_manager_module.os, "fsync", failing_directory_fsync)
+    monkeypatch.setattr(account_manager_module.os, "open", recording_open)
+    monkeypatch.setattr(account_manager_module.os, "close", recording_close)
+
+    manager._save_state()
+
+    directory_fd = directory_fds[0]
+    assert ("directory_fsync_failed", directory_fd) in events
+    assert ("close", directory_fd) in events
+    with pytest.raises(OSError):
+        account_manager_module.os.fstat(directory_fd)
+    assert json.loads(state_file.read_text())["accounts"][0]["username"] == "first"
+    assert list(tmp_path.glob(".accounts_state.json.*.tmp")) == []
 
 
 def test_load_accounts_redacts_proxy_credentials_in_logs(monkeypatch, tmp_path: Path, caplog):

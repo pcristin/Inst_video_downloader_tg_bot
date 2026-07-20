@@ -93,25 +93,24 @@ cp .env.example .env
 # 3. Configure your credentials in .env
 nano .env  # Add BOT_TOKEN, IG_USERNAME, IG_PASSWORD
 
-# 4. Build and start the bot
+# 4. Prepare writable account-state storage (fresh installs and upgrades)
+sudo install -d -o 1000 -g 1000 -m 0750 account-state
+if [ -f accounts_state.json ] \
+  && [ ! -e account-state/accounts_state.json ] \
+  && [ ! -L account-state/accounts_state.json ]; then
+  sudo cp -p accounts_state.json account-state/accounts_state.json
+fi
+sudo chown -R 1000:1000 account-state
+sudo chmod -R u+rwX account-state
+
+# 5. Build and start the bot
 make build
 make up
 
-# 5. Optional multi-account setup
+# 6. Optional multi-account setup
 # Create accounts.txt if you want rotation support, then initialize sessions
 # Each managed account needs password + non-empty totp_secret
 make accounts-setup
-```
-
-### Account state directory migration
-
-Before the first deployment that uses the directory-level account-state mount:
-
-```bash
-mkdir -p account-state
-if [ -f accounts_state.json ]; then
-  cp -p accounts_state.json account-state/accounts_state.json
-fi
 ```
 
 Keep the old file until the bot has started successfully and `make accounts-status`
