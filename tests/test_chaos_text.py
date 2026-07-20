@@ -1,4 +1,8 @@
 from src.instagram_video_bot.services.chaos_text import ChaosText, TextContext
+from src.instagram_video_bot.services.job_states import (
+    FailureDetails,
+    FailureReason,
+)
 
 
 def test_normal_submission_text_is_russian():
@@ -69,3 +73,29 @@ def test_unsupported_error_text_does_not_echo_raw_exception():
 
     assert text == "Эта ссылка не поддерживается."
     assert "https://x.com" not in text
+
+
+def test_preparing_and_sending_text_are_stage_specific_in_english():
+    context = TextContext(provider_label="Instagram", language_code="en")
+
+    assert ChaosText.preparing(context) == "Instagram: preparing media."
+    assert ChaosText.sending(context) == "Instagram: sending to Telegram."
+
+
+def test_retryable_typed_failure_invites_retry_without_raw_error():
+    text = ChaosText.failure(
+        FailureDetails(FailureReason.PROVIDER_TIMEOUT, retryable=True),
+        language_code="en",
+    )
+
+    assert text == "The download took too long. You can retry."
+
+
+def test_ambiguous_delivery_warns_about_duplicates_without_retry_prompt():
+    text = ChaosText.failure(
+        FailureDetails(FailureReason.DELIVERY_AMBIGUOUS, retryable=False),
+        language_code="en",
+    )
+
+    assert "may have delivered" in text
+    assert "avoid a duplicate" in text

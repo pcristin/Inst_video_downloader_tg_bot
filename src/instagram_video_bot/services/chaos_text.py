@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .job_states import FailureDetails, FailureReason
+
 
 @dataclass(frozen=True)
 class TextContext:
@@ -194,6 +196,18 @@ class ChaosText:
         return f"{context.provider_label}: скачиваю."
 
     @staticmethod
+    def preparing(context: TextContext) -> str:
+        if context.language_code == "en":
+            return f"{context.provider_label}: preparing media."
+        return f"{context.provider_label}: подготавливаю медиа."
+
+    @staticmethod
+    def sending(context: TextContext) -> str:
+        if context.language_code == "en":
+            return f"{context.provider_label}: sending to Telegram."
+        return f"{context.provider_label}: отправляю в Telegram."
+
+    @staticmethod
     def cancelled(chaos_enabled: bool, language_code: str = "ru") -> str:
         if language_code == "en":
             if chaos_enabled:
@@ -256,6 +270,72 @@ class ChaosText:
         if "timed out" in error_lower:
             return "Скачивание не уложилось по времени. Попробуй еще раз."
         return "Не смог скачать медиа. Попробуй позже."
+
+    @staticmethod
+    def failure(
+        details: FailureDetails,
+        *,
+        chaos_enabled: bool = False,
+        language_code: str = "ru",
+    ) -> str:
+        """Render a typed failure without exposing provider exception text."""
+
+        if language_code == "en":
+            messages = {
+                FailureReason.UNSUPPORTED_URL: "This link is not supported.",
+                FailureReason.AUTHENTICATION_REQUIRED: (
+                    "Instagram access needs maintenance. Try another link for now."
+                ),
+                FailureReason.MEDIA_UNAVAILABLE: (
+                    "This media is private, removed, or unavailable."
+                ),
+                FailureReason.FILE_TOO_LARGE: "This file is too large for Telegram.",
+                FailureReason.PROVIDER_RATE_LIMITED: (
+                    "The provider is rate-limited. You can retry later."
+                ),
+                FailureReason.PROVIDER_TIMEOUT: (
+                    "The download took too long. You can retry."
+                ),
+                FailureReason.PROVIDER_UNAVAILABLE: (
+                    "The provider is temporarily unavailable. You can retry."
+                ),
+                FailureReason.TELEGRAM_DELIVERY: (
+                    "Telegram could not receive the media. You can retry."
+                ),
+                FailureReason.DELIVERY_AMBIGUOUS: (
+                    "Telegram may have delivered the media. I will not retry to avoid a duplicate."
+                ),
+                FailureReason.UNKNOWN: "Could not download media. You can retry.",
+            }
+            return messages[details.reason]
+
+        messages = {
+            FailureReason.UNSUPPORTED_URL: "Эта ссылка не поддерживается.",
+            FailureReason.AUTHENTICATION_REQUIRED: (
+                "Instagram требует обновить доступ. Пока попробуй другую ссылку."
+            ),
+            FailureReason.MEDIA_UNAVAILABLE: (
+                "Это медиа закрыто, удалено или недоступно."
+            ),
+            FailureReason.FILE_TOO_LARGE: "Этот файл слишком большой для Telegram.",
+            FailureReason.PROVIDER_RATE_LIMITED: (
+                "Провайдер ограничил запросы. Можно повторить позже."
+            ),
+            FailureReason.PROVIDER_TIMEOUT: (
+                "Скачивание не уложилось по времени. Можно повторить."
+            ),
+            FailureReason.PROVIDER_UNAVAILABLE: (
+                "Провайдер временно недоступен. Можно повторить."
+            ),
+            FailureReason.TELEGRAM_DELIVERY: (
+                "Telegram не принял медиа. Можно повторить."
+            ),
+            FailureReason.DELIVERY_AMBIGUOUS: (
+                "Telegram мог уже доставить медиа. Не повторяю, чтобы не создать дубликат."
+            ),
+            FailureReason.UNKNOWN: "Не удалось скачать медиа. Можно повторить.",
+        }
+        return messages[details.reason]
 
     @staticmethod
     def stats_disabled(language_code: str = "ru") -> str:
