@@ -1,4 +1,5 @@
 import builtins
+import logging
 import sys
 import types
 from pathlib import Path
@@ -255,9 +256,149 @@ def test_public_ytdlp_source_pairs_highest_quality_video_with_best_audio():
     assert InstagramClient._public_ytdlp_source(entry) == PublicYtdlpSource(
         visual_url="https://cdn.example/video-1080.mp4",
         extension="mp4",
+        is_video=True,
         audio_url="https://cdn.example/audio-high.m4a",
         audio_extension="m4a",
     )
+
+
+def test_public_video_with_missing_acodec_is_validated(monkeypatch, tmp_path):
+    source = InstagramClient._public_ytdlp_source(
+        {
+            "formats": [
+                {
+                    "url": "https://cdn.example/video.mp4",
+                    "ext": "mp4",
+                    "vcodec": "h264",
+                    "height": 1080,
+                }
+            ]
+        }
+    )
+    output = tmp_path / "public_1.mp4"
+    probed_paths = []
+
+    assert source is not None
+    assert source.is_video is True
+    assert source.audio_url is None
+
+    monkeypatch.setattr(
+        InstagramClient,
+        "_download_url_to_path",
+        staticmethod(lambda _url, path: path.write_bytes(b"combined-av")),
+    )
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda path: probed_paths.append(path) or True),
+    )
+
+    assert InstagramClient._download_public_source(source, output) is True
+    assert probed_paths == [output]
+    assert output.read_bytes() == b"combined-av"
+
+
+def test_public_video_claiming_combined_av_is_rejected_when_probe_has_no_audio(
+    monkeypatch, tmp_path
+):
+    source = InstagramClient._public_ytdlp_source(
+        {
+            "formats": [
+                {
+                    "url": "https://cdn.example/video.mp4",
+                    "ext": "mp4",
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "height": 1080,
+                }
+            ]
+        }
+    )
+    output = tmp_path / "public_1.mp4"
+
+    assert source is not None
+    assert source.is_video is True
+
+    monkeypatch.setattr(
+        InstagramClient,
+        "_download_url_to_path",
+        staticmethod(lambda _url, path: path.write_bytes(b"actually-video-only")),
+    )
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: False),
+    )
+
+    assert InstagramClient._download_public_source(source, output) is False
+    assert not output.exists()
+
+
+def test_public_video_with_combined_av_is_accepted_after_probe(monkeypatch, tmp_path):
+    source = InstagramClient._public_ytdlp_source(
+        {
+            "formats": [
+                {
+                    "url": "https://cdn.example/video.mp4",
+                    "ext": "mp4",
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "height": 1080,
+                }
+            ]
+        }
+    )
+    output = tmp_path / "public_1.mp4"
+
+    assert source is not None
+    assert source.is_video is True
+
+    monkeypatch.setattr(
+        InstagramClient,
+        "_download_url_to_path",
+        staticmethod(lambda _url, path: path.write_bytes(b"combined-av")),
+    )
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: True),
+    )
+
+    assert InstagramClient._download_public_source(source, output) is True
+    assert output.read_bytes() == b"combined-av"
+
+
+def test_public_thumbnail_bypasses_av_probe(monkeypatch, tmp_path):
+    source = InstagramClient._public_ytdlp_source(
+        {
+            "thumbnails": [
+                {
+                    "url": "https://cdn.example/photo.jpg",
+                    "ext": "jpg",
+                    "width": 1080,
+                    "height": 1080,
+                }
+            ]
+        }
+    )
+    output = tmp_path / "public_1.jpg"
+
+    assert source is not None
+    assert source.is_video is False
+
+    monkeypatch.setattr(
+        InstagramClient,
+        "_download_url_to_path",
+        staticmethod(lambda _url, path: path.write_bytes(b"photo")),
+    )
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: pytest.fail("photos must not be probed for A/V")),
+    )
+
+    assert InstagramClient._download_public_source(source, output) is True
+    assert output.read_bytes() == b"photo"
 
 
 def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, tmp_path):
@@ -326,6 +467,11 @@ def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, t
     monkeypatch.setattr(
         "src.instagram_video_bot.services.instagram_client.requests.get", _get
     )
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: True),
+    )
     client = InstagramClient(username="u", password="p", proxy="http://private-proxy")
 
     result = client._download_public_ytdlp_media(
@@ -371,8 +517,8 @@ def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, 
                 "title": "Reel with separate tracks",
                 "formats": [
                     {
-                        "url": "https://cdn.example/video.mp4",
-                        "ext": "mp4",
+                        "url": "https://cdn.example/video.webm",
+                        "ext": "webm",
                         "vcodec": "vp9",
                         "acodec": "none",
                         "width": 1080,
@@ -427,10 +573,12 @@ def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, 
     assert result.file_paths == [tmp_path / "public_1.mp4"]
     assert result.file_paths[0].read_bytes() == b"muxed-av"
     assert requested_urls == [
-        ("https://cdn.example/video.mp4", 15.0),
+        ("https://cdn.example/video.webm", 15.0),
         ("https://cdn.example/audio.m4a", 15.0),
     ]
     assert ffmpeg_commands[0][0:2] == ["ffmpeg", "-v"]
+    assert Path(ffmpeg_commands[0][5]).suffix == ".webm"
+    assert Path(ffmpeg_commands[0][-1]).suffix == ".mp4"
     assert ffmpeg_commands[0][-9:-1] == [
         "-map",
         "0:v:0",
@@ -449,6 +597,7 @@ def test_public_source_rejects_merged_file_without_audio(monkeypatch, tmp_path):
     source = PublicYtdlpSource(
         visual_url="https://cdn.example/video.mp4",
         extension="mp4",
+        is_video=True,
         audio_url="https://cdn.example/audio.m4a",
         audio_extension="m4a",
     )
@@ -513,3 +662,43 @@ def test_public_ytdlp_media_rejects_video_only_source_without_audio(monkeypatch,
 
     assert result is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_public_ytdlp_extraction_error_logs_only_fixed_structured_fields(
+    monkeypatch, tmp_path, caplog
+):
+    media_url = "https://cdn.example/private/media.mp4"
+
+    class _YoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            raise RuntimeError(f"extractor failed for {media_url}")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YoutubeDL))
+    caplog.set_level(
+        logging.INFO,
+        logger="src.instagram_video_bot.services.instagram_client",
+    )
+
+    result = InstagramClient.download_public_ytdlp_media(
+        "https://www.instagram.com/reel/example/", tmp_path
+    )
+
+    records = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "Public yt-dlp extraction failed"
+    ]
+    assert result is None
+    assert len(records) == 1
+    assert records[0].error_class == "RuntimeError"
+    assert media_url not in caplog.text

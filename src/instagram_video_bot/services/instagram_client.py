@@ -53,6 +53,7 @@ class PublicYtdlpSource:
 
     visual_url: str
     extension: str
+    is_video: bool
     audio_url: str | None = None
     audio_extension: str | None = None
 
@@ -231,7 +232,8 @@ class InstagramClient:
                 if not source:
                     continue
 
-                file_path = output_dir / f"public_{index}.{source.extension}"
+                output_extension = "mp4" if source.audio_url else source.extension
+                file_path = output_dir / f"public_{index}.{output_extension}"
                 try:
                     if InstagramClient._download_public_source(source, file_path):
                         file_paths.append(file_path)
@@ -255,7 +257,10 @@ class InstagramClient:
                 metadata_reused=True,
             )
         except Exception as error:
-            logger.info("Public yt-dlp extraction failed: %s", error)
+            logger.info(
+                "Public yt-dlp extraction failed",
+                extra={"error_class": error.__class__.__name__},
+            )
             return None
 
     @staticmethod
@@ -312,8 +317,17 @@ class InstagramClient:
         output_path: Path,
     ) -> bool:
         if source.audio_url is None:
-            InstagramClient._download_url_to_path(source.visual_url, output_path)
-            return True
+            succeeded = False
+            try:
+                InstagramClient._download_url_to_path(source.visual_url, output_path)
+                succeeded = (
+                    not source.is_video
+                    or InstagramClient._public_output_has_av_streams(output_path)
+                )
+                return succeeded
+            finally:
+                if not succeeded:
+                    output_path.unlink(missing_ok=True)
 
         video_path = output_path.with_name(
             f".{output_path.stem}.video.{source.extension}"
@@ -443,6 +457,7 @@ class InstagramClient:
         return PublicYtdlpSource(
             visual_url=visual_url,
             extension=extension or "bin",
+            is_video=bool(video_formats),
             audio_url=audio_url,
             audio_extension=audio_extension,
         )
