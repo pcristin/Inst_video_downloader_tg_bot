@@ -93,6 +93,13 @@ from .video_downloader import DownloadError, MediaItem, VideoDownloader, VideoIn
 
 logger = logging.getLogger(__name__)
 _REPLY_MARKUP_UNSET = object()
+_INSTAGRAM_INLINE_MEDIA_CACHE_VERSION = "av2"
+
+
+def _inline_media_cache_key(provider: str, normalized_url: str) -> str:
+    if provider == "instagram":
+        return f"{provider}:{_INSTAGRAM_INLINE_MEDIA_CACHE_VERSION}:{normalized_url}"
+    return f"{provider}:{normalized_url}"
 
 
 class TelegramBot:
@@ -1179,7 +1186,10 @@ class TelegramBot:
                 )
                 return
 
-            cache_key = f"{session['provider']}:{session['normalized_url']}"
+            cache_key = _inline_media_cache_key(
+                str(session["provider"]),
+                str(session["normalized_url"]),
+            )
             cached = self.state_store.get_inline_cached_media(cache_key)
             if cached:
                 media_item = cached["media_items"][0]

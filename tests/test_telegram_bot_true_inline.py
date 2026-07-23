@@ -18,7 +18,7 @@ from src.instagram_video_bot.services.inline_access import (
 )
 from src.instagram_video_bot.services.inline_delivery import InlineCachedMediaItem
 from src.instagram_video_bot.services.state_store import StateStore
-from src.instagram_video_bot.services.telegram_bot import TelegramBot
+from src.instagram_video_bot.services.telegram_bot import TelegramBot, _inline_media_cache_key
 from src.instagram_video_bot.services.video_downloader import InstagramProviderTimeoutError
 
 
@@ -127,6 +127,18 @@ class _FakeTelegramBot:
 class _FailingRefundTelegramBot:
     async def refund_star_payment(self, *, user_id: int, telegram_payment_charge_id: str):
         raise TelegramError("refund failed")
+
+
+def test_inline_media_cache_key_versions_only_instagram_media():
+    instagram_url = "https://www.instagram.com/reel/abc/"
+    twitter_url = "https://x.com/example/status/1"
+
+    assert _inline_media_cache_key("instagram", instagram_url) == (
+        "instagram:av2:https://www.instagram.com/reel/abc/"
+    )
+    assert _inline_media_cache_key("twitter", twitter_url) == (
+        "twitter:https://x.com/example/status/1"
+    )
 
 
 class _FakeInvoiceLinkBot:
@@ -924,7 +936,9 @@ async def test_inline_delivery_caches_and_edits_video_portrait_metadata(monkeypa
         one_time_payment_id=None,
     )
 
-    cached = store.get_inline_cached_media("instagram:https://www.instagram.com/reel/abc/")
+    cached = store.get_inline_cached_media(
+        _inline_media_cache_key("instagram", "https://www.instagram.com/reel/abc/")
+    )
     assert cached["media_items"][0]["width"] == 720
     assert cached["media_items"][0]["height"] == 1280
     assert cached["media_items"][0]["duration"] == 11.6
@@ -933,6 +947,74 @@ async def test_inline_delivery_caches_and_edits_video_portrait_metadata(monkeypa
     assert media.width == 720
     assert media.height == 1280
     assert media._duration == timedelta(seconds=12)
+
+
+@pytest.mark.asyncio
+async def test_inline_delivery_bypasses_pre_audio_fix_instagram_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    url = "https://www.instagram.com/reel/abc/"
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url=url,
+        normalized_url=url,
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    store.save_inline_cached_media(
+        cache_key=f"instagram:{url}",
+        provider="instagram",
+        normalized_url=url,
+        media_items=[{"media_type": "video", "file_id": "silent-file-id"}],
+    )
+    download_calls = []
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            download_calls.append(original_url)
+            media_file = target_dir / "video-with-audio.mp4"
+            media_file.write_bytes(b"video-with-audio")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            )
+
+    async def fake_upload(*_args, **_kwargs):
+        return InlineCachedMediaItem(
+            media_type="video",
+            file_id="audio-fixed-file-id",
+        )
+
+    edited = []
+
+    async def edit_message_media(**kwargs):
+        edited.append(kwargs)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage",
+        fake_upload,
+    )
+
+    bot = TelegramBot(state_store=store)
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_media=edit_message_media)),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    assert download_calls == [url]
+    corrected = store.get_inline_cached_media(_inline_media_cache_key("instagram", url))
+    assert corrected["media_items"][0]["file_id"] == "audio-fixed-file-id"
+    assert edited
 
 
 @pytest.mark.asyncio
@@ -1003,7 +1085,9 @@ async def test_inline_delivery_records_inline_edit_failure_metadata(monkeypatch,
     )
     store.attach_inline_message("s1", inline_message_id="inline-msg")
     store.save_inline_cached_media(
-        cache_key="instagram:https://www.instagram.com/reel/abc/",
+        cache_key=_inline_media_cache_key(
+            "instagram", "https://www.instagram.com/reel/abc/"
+        ),
         provider="instagram",
         normalized_url="https://www.instagram.com/reel/abc/",
         media_items=[
@@ -1110,7 +1194,9 @@ async def test_inline_edit_failure_after_storage_upload_preserves_cache_for_late
         one_time_payment_id=None,
     )
 
-    cache_key = "instagram:https://www.instagram.com/reel/abc/"
+    cache_key = _inline_media_cache_key(
+        "instagram", "https://www.instagram.com/reel/abc/"
+    )
     cached = store.get_inline_cached_media(cache_key)
     failed_session = store.get_inline_session("s1")
     assert cached["media_items"][0]["file_id"] == "stored-video-file-id"
