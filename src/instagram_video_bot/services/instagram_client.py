@@ -45,6 +45,16 @@ class InstagramDownloadResult:
     metadata_reused: bool = False
 
 
+@dataclass(frozen=True)
+class PublicYtdlpSource:
+    """Selected public visual source and its optional separate audio track."""
+
+    visual_url: str
+    extension: str
+    audio_url: str | None = None
+    audio_extension: str | None = None
+
+
 class InstagramClient:
     """Instagram client wrapper using instagrapi."""
 
@@ -219,7 +229,8 @@ class InstagramClient:
                 if not source:
                     continue
 
-                source_url, extension = source
+                source_url = source.visual_url
+                extension = source.extension
                 try:
                     response = requests.get(
                         source_url,
@@ -254,18 +265,21 @@ class InstagramClient:
         return InstagramClient.download_public_ytdlp_media(url, output_dir)
 
     @staticmethod
-    def _public_ytdlp_source(entry: dict) -> Optional[tuple[str, str]]:
-        """Return the best public video format or largest thumbnail source."""
+    def _public_ytdlp_source(entry: dict) -> Optional[PublicYtdlpSource]:
+        """Select the best visual source and pair separate audio when required."""
         formats = [
             media_format
             for media_format in entry.get("formats") or []
-            if isinstance(media_format, dict)
-            and media_format.get("url")
-            and media_format.get("vcodec") != "none"
+            if isinstance(media_format, dict) and media_format.get("url")
         ]
-        if formats:
+        video_formats = [
+            media_format
+            for media_format in formats
+            if media_format.get("vcodec") != "none"
+        ]
+        if video_formats:
             selected = max(
-                formats,
+                video_formats,
                 key=lambda media_format: (
                     media_format.get("height") or 0,
                     media_format.get("width") or 0,
@@ -273,6 +287,25 @@ class InstagramClient:
                     media_format.get("tbr") or 0,
                 ),
             )
+            audio_url = None
+            audio_extension = None
+            if selected.get("acodec") == "none":
+                audio_formats = [
+                    media_format
+                    for media_format in formats
+                    if media_format.get("vcodec") == "none"
+                    and media_format.get("acodec") not in (None, "none")
+                ]
+                if audio_formats:
+                    selected_audio = max(
+                        audio_formats,
+                        key=lambda media_format: (
+                            media_format.get("abr") or media_format.get("tbr") or 0,
+                            media_format.get("filesize") or 0,
+                        ),
+                    )
+                    audio_url = str(selected_audio["url"])
+                    audio_extension = selected_audio.get("ext") or "m4a"
         else:
             thumbnails = [
                 thumbnail
@@ -289,10 +322,17 @@ class InstagramClient:
                     thumbnail.get("height") or 0,
                 ),
             )
+            audio_url = None
+            audio_extension = None
 
-        source_url = selected["url"]
-        extension = selected.get("ext") or Path(urlparse(source_url).path).suffix.lstrip(".")
-        return source_url, extension or "bin"
+        visual_url = str(selected["url"])
+        extension = selected.get("ext") or Path(urlparse(visual_url).path).suffix.lstrip(".")
+        return PublicYtdlpSource(
+            visual_url=visual_url,
+            extension=extension or "bin",
+            audio_url=audio_url,
+            audio_extension=audio_extension,
+        )
 
     def _download_post_media(
         self, url: str, output_dir: Path

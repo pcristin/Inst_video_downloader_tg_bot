@@ -8,6 +8,7 @@ from src.instagram_video_bot.services.instagram_client import (
     InstagramAuthError,
     InstagramClient,
     InstagramDownloadResult,
+    PublicYtdlpSource,
 )
 
 
@@ -210,6 +211,52 @@ def test_download_media_uses_account_path_when_public_ytdlp_is_unavailable(
     monkeypatch.setattr(builtins, "__import__", _missing_ytdlp)
 
     assert client.download_media("https://www.instagram.com/p/example/", tmp_path) is expected
+
+
+def test_public_ytdlp_source_pairs_highest_quality_video_with_best_audio():
+    entry = {
+        "formats": [
+            {
+                "url": "https://cdn.example/video-720.mp4",
+                "ext": "mp4",
+                "vcodec": "vp9",
+                "acodec": "none",
+                "width": 720,
+                "height": 1280,
+                "tbr": 900,
+            },
+            {
+                "url": "https://cdn.example/video-1080.mp4",
+                "ext": "mp4",
+                "vcodec": "vp9",
+                "acodec": "none",
+                "width": 1080,
+                "height": 1920,
+                "tbr": 1500,
+            },
+            {
+                "url": "https://cdn.example/audio-low.m4a",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "aac",
+                "abr": 48,
+            },
+            {
+                "url": "https://cdn.example/audio-high.m4a",
+                "ext": "m4a",
+                "vcodec": "none",
+                "acodec": "aac",
+                "abr": 96,
+            },
+        ]
+    }
+
+    assert InstagramClient._public_ytdlp_source(entry) == PublicYtdlpSource(
+        visual_url="https://cdn.example/video-1080.mp4",
+        extension="mp4",
+        audio_url="https://cdn.example/audio-high.m4a",
+        audio_extension="m4a",
+    )
 
 
 def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, tmp_path):
