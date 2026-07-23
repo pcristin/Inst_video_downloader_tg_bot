@@ -472,3 +472,44 @@ def test_public_source_rejects_merged_file_without_audio(monkeypatch, tmp_path):
     assert InstagramClient._download_public_source(source, output) is False
     assert not output.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_public_ytdlp_media_rejects_video_only_source_without_audio(monkeypatch, tmp_path):
+    class _YoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            return {
+                "title": "Silent reel",
+                "formats": [
+                    {
+                        "url": "https://cdn.example/video.mp4",
+                        "ext": "mp4",
+                        "vcodec": "vp9",
+                        "acodec": "none",
+                        "width": 1080,
+                        "height": 1920,
+                    }
+                ],
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YoutubeDL))
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get",
+        lambda *_args, **_kwargs: pytest.fail("silent source must not be downloaded"),
+    )
+
+    result = InstagramClient.download_public_ytdlp_media(
+        "https://www.instagram.com/reel/silent/", tmp_path
+    )
+
+    assert result is None
+    assert list(tmp_path.iterdir()) == []

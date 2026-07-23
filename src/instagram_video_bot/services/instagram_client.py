@@ -417,6 +417,8 @@ class InstagramClient:
                     )
                     audio_url = str(selected_audio["url"])
                     audio_extension = selected_audio.get("ext") or "m4a"
+                else:
+                    return None
         else:
             thumbnails = [
                 thumbnail
