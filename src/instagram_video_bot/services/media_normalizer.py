@@ -96,6 +96,9 @@ def _normalize_video_item(item: MediaItem) -> MediaItem:
             raise RuntimeError("ffmpeg produced an empty output")
 
         candidate_probe = _probe_video(candidate)
+        if source_probe.audio_codecs and not candidate_probe.audio_codecs:
+            reason = "output_audio_missing"
+            raise RuntimeError("normalized output lost source audio")
         if not candidate_probe.is_ios_compatible:
             raise RuntimeError("normalized output is not iOS compatible")
         if not _decode_is_valid(candidate):

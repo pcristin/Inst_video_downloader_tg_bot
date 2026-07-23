@@ -121,6 +121,38 @@ def test_incompatible_video_is_transcoded(monkeypatch, tmp_path):
     assert result.file_path.name == "source.ios.mp4"
 
 
+def test_normalization_rejects_output_that_loses_source_audio(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source-with-audio")
+    info = _video_info(source)
+
+    def fake_probe(path: Path) -> VideoProbe:
+        if path == source:
+            return _probe(video_codec="vp9", audio_codecs=("aac",))
+        return _probe(video_codec="h264", audio_codecs=())
+
+    def fake_run(_command: list[str], output_path: Path) -> bool:
+        output_path.write_bytes(b"normalized-without-audio")
+        return True
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.media_normalizer._probe_video", fake_probe
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.media_normalizer._decode_is_valid",
+        lambda _path: True,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.media_normalizer._run_ffmpeg", fake_run
+    )
+
+    result = normalize_instagram_media(info)
+
+    assert result is info
+    assert result.file_path == source
+    assert not (tmp_path / "source.ios.mp4").exists()
+
+
 def test_normalization_failure_preserves_original_and_removes_candidate(
     monkeypatch, tmp_path
 ):
