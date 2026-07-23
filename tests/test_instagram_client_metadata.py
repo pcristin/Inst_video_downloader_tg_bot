@@ -1,6 +1,7 @@
 import builtins
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -351,3 +352,123 @@ def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, t
         "ignore_no_formats_error": True,
         "noplaylist": False,
     }
+
+
+def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, tmp_path):
+    class _YoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download=False):
+            assert download is False
+            return {
+                "title": "Reel with separate tracks",
+                "formats": [
+                    {
+                        "url": "https://cdn.example/video.mp4",
+                        "ext": "mp4",
+                        "vcodec": "vp9",
+                        "acodec": "none",
+                        "width": 1080,
+                        "height": 1920,
+                    },
+                    {
+                        "url": "https://cdn.example/audio.m4a",
+                        "ext": "m4a",
+                        "vcodec": "none",
+                        "acodec": "aac",
+                        "abr": 96,
+                    },
+                ],
+            }
+
+    class _Response:
+        def __init__(self, content):
+            self.content = content
+
+        def raise_for_status(self):
+            return None
+
+    requested_urls = []
+    ffmpeg_commands = []
+
+    def _get(url, timeout):
+        requested_urls.append((url, timeout))
+        return _Response(url.encode())
+
+    def _run(command, **_kwargs):
+        ffmpeg_commands.append(command)
+        Path(command[-1]).write_bytes(b"muxed-av")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YoutubeDL))
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get", _get
+    )
+    monkeypatch.setattr("subprocess.run", _run)
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: True),
+        raising=False,
+    )
+
+    result = InstagramClient.download_public_ytdlp_media(
+        "https://www.instagram.com/reel/example/", tmp_path
+    )
+
+    assert result is not None
+    assert result.file_paths == [tmp_path / "public_1.mp4"]
+    assert result.file_paths[0].read_bytes() == b"muxed-av"
+    assert requested_urls == [
+        ("https://cdn.example/video.mp4", 15.0),
+        ("https://cdn.example/audio.m4a", 15.0),
+    ]
+    assert ffmpeg_commands[0][0:2] == ["ffmpeg", "-v"]
+    assert ffmpeg_commands[0][-9:-1] == [
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+    ]
+    assert list(tmp_path.glob(".*.video.*")) == []
+    assert list(tmp_path.glob(".*.audio.*")) == []
+
+
+def test_public_source_rejects_merged_file_without_audio(monkeypatch, tmp_path):
+    source = PublicYtdlpSource(
+        visual_url="https://cdn.example/video.mp4",
+        extension="mp4",
+        audio_url="https://cdn.example/audio.m4a",
+        audio_extension="m4a",
+    )
+    output = tmp_path / "public_1.mp4"
+
+    def _download(_url, path):
+        path.write_bytes(b"track")
+
+    def _merge(_video, _audio, path):
+        path.write_bytes(b"video-only-output")
+        return True
+
+    monkeypatch.setattr(InstagramClient, "_download_url_to_path", staticmethod(_download))
+    monkeypatch.setattr(InstagramClient, "_merge_public_tracks", staticmethod(_merge))
+    monkeypatch.setattr(
+        InstagramClient,
+        "_public_output_has_av_streams",
+        staticmethod(lambda _path: False),
+    )
+
+    assert InstagramClient._download_public_source(source, output) is False
+    assert not output.exists()
+    assert list(tmp_path.iterdir()) == []

@@ -1,5 +1,7 @@
 """Instagram client using instagrapi."""
+import json
 import logging
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -229,20 +231,19 @@ class InstagramClient:
                 if not source:
                     continue
 
-                source_url = source.visual_url
-                extension = source.extension
+                file_path = output_dir / f"public_{index}.{source.extension}"
                 try:
-                    response = requests.get(
-                        source_url,
-                        timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
-                    )
-                    response.raise_for_status()
-                    file_path = output_dir / f"public_{index}.{extension}"
-                    file_path.write_bytes(response.content)
-                    if file_path.stat().st_size > 0:
+                    if InstagramClient._download_public_source(source, file_path):
                         file_paths.append(file_path)
                 except Exception as error:
-                    logger.info("Public yt-dlp media fetch failed: %s", error)
+                    file_path.unlink(missing_ok=True)
+                    logger.info(
+                        "Public yt-dlp media fetch or merge failed",
+                        extra={
+                            "entry_index": index,
+                            "error_class": error.__class__.__name__,
+                        },
+                    )
 
             if not file_paths:
                 return None
@@ -256,6 +257,116 @@ class InstagramClient:
         except Exception as error:
             logger.info("Public yt-dlp extraction failed: %s", error)
             return None
+
+    @staticmethod
+    def _download_url_to_path(url: str, path: Path) -> None:
+        response = requests.get(
+            url,
+            timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        path.write_bytes(response.content)
+        if not path.exists() or path.stat().st_size <= 0:
+            raise RuntimeError("public media download produced an empty file")
+
+    @staticmethod
+    def _merge_public_tracks(
+        video_path: Path,
+        audio_path: Path,
+        output_path: Path,
+    ) -> bool:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(video_path),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+            check=False,
+        )
+        return (
+            result.returncode == 0
+            and output_path.exists()
+            and output_path.stat().st_size > 0
+        )
+
+    @staticmethod
+    def _download_public_source(
+        source: PublicYtdlpSource,
+        output_path: Path,
+    ) -> bool:
+        if source.audio_url is None:
+            InstagramClient._download_url_to_path(source.visual_url, output_path)
+            return True
+
+        video_path = output_path.with_name(
+            f".{output_path.stem}.video.{source.extension}"
+        )
+        audio_path = output_path.with_name(
+            f".{output_path.stem}.audio.{source.audio_extension or 'm4a'}"
+        )
+        succeeded = False
+        try:
+            InstagramClient._download_url_to_path(source.visual_url, video_path)
+            InstagramClient._download_url_to_path(source.audio_url, audio_path)
+            succeeded = InstagramClient._merge_public_tracks(
+                video_path,
+                audio_path,
+                output_path,
+            ) and InstagramClient._public_output_has_av_streams(output_path)
+            return succeeded
+        finally:
+            video_path.unlink(missing_ok=True)
+            audio_path.unlink(missing_ok=True)
+            if not succeeded:
+                output_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _public_output_has_av_streams(path: Path) -> bool:
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if result.returncode != 0:
+                return False
+            payload = json.loads(result.stdout)
+            stream_types = {
+                stream.get("codec_type")
+                for stream in payload.get("streams") or []
+                if isinstance(stream, dict)
+            }
+            return {"video", "audio"}.issubset(stream_types)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            return False
 
     @staticmethod
     def _download_public_ytdlp_media(
