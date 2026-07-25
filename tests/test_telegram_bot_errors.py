@@ -80,6 +80,7 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
         ("inline_query_handler", "InlineQueryHandler"),
         ("chosen_inline_result_handler", "ChosenInlineResultHandler"),
         ("inline_callback_handler", "CallbackQueryHandler"),
+        ("inline_action_callback_handler", "CallbackQueryHandler"),
         ("pre_checkout_handler", "PreCheckoutQueryHandler"),
         ("successful_payment_handler", "MessageHandler"),
         ("inline_whitelist_command", "CommandHandler"),
@@ -118,6 +119,10 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
     assert (
         handlers_by_callback_name["inline_callback_handler"].pattern.pattern
         == r"^inline(?:_once)?:[A-Za-z0-9_-]+$"
+    )
+    assert (
+        handlers_by_callback_name["inline_action_callback_handler"].pattern.pattern
+        == r"^inline-action:(?:cancel|retry):[A-Za-z0-9_-]+$"
     )
     assert (
         type(handlers_by_callback_name["successful_payment_handler"].filters).__name__

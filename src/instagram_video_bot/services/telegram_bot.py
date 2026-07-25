@@ -55,6 +55,12 @@ from .telegram.job_actions import (
     parse_job_action_data,
     retry_keyboard,
 )
+from .telegram.inline_actions import (
+    InlineAction,
+    inline_cancel_keyboard,
+    inline_retry_keyboard,
+    parse_inline_action_data,
+)
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
 from .telegram_cache import purge_expired_cache_files, video_info_from_cache
@@ -93,6 +99,7 @@ from .video_downloader import DownloadError, MediaItem, VideoDownloader, VideoIn
 
 logger = logging.getLogger(__name__)
 _REPLY_MARKUP_UNSET = object()
+_REPLY_MARKUP_UNSET = object()
 _INSTAGRAM_INLINE_MEDIA_CACHE_VERSION = "av2"
 
 
@@ -125,6 +132,7 @@ class TelegramBot:
         self.request_intake = TelegramRequestIntake(self)
         self.command_handlers = TelegramCommandHandlers(self)
         self._inline_delivery_session_tokens: set[str] = set()
+        self.inline_delivery_tasks: dict[str, asyncio.Task[None]] = {}
         self.started_at = time.time()
         self._purge_expired_cache()
 
@@ -868,6 +876,112 @@ class TelegramBot:
             one_time_payment_id=one_time_payment_id,
         )
 
+    async def inline_action_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Apply an owner-authorized action to a persisted inline session."""
+
+        query = update.callback_query
+        if (
+            not query
+            or not query.data
+            or not query.from_user
+            or not query.inline_message_id
+        ):
+            return
+        parsed = parse_inline_action_data(query.data)
+        if parsed is None:
+            await query.answer("This action is no longer available.", show_alert=True)
+            return
+        action, session_token = parsed
+        session = self.state_store.get_inline_session(session_token)
+        if session is None:
+            await query.answer("This inline request expired.", show_alert=True)
+            return
+        if int(session["user_id"]) != query.from_user.id:
+            await query.answer(
+                "Only the person who started this request can use this action.",
+                show_alert=True,
+            )
+            return
+
+        language_code = self._language_for_update(update)
+        if action is InlineAction.CANCEL:
+            result = self.state_store.cancel_inline_delivery(
+                session_token,
+                user_id=query.from_user.id,
+                inline_message_id=query.inline_message_id,
+            )
+            if result == "unsafe":
+                await query.answer(
+                    "Delivery may already be completing and cannot be cancelled safely.",
+                    show_alert=True,
+                )
+                return
+            if result != "cancelled":
+                await query.answer("This action was already handled.")
+                return
+            task = self.inline_delivery_tasks.pop(session_token, None)
+            if task is not None:
+                task.cancel()
+            self._inline_delivery_session_tokens.discard(session_token)
+            payment = self.state_store.get_claimed_inline_one_time_payment(
+                session_token
+            )
+            if payment is not None:
+                await self._refund_one_time_payment(
+                    context,
+                    payment_id=str(payment["payment_id"]),
+                    user_id=query.from_user.id,
+                    reason="user_cancelled",
+                )
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=query.inline_message_id,
+                text=ChaosText.inline_delivery_cancelled(language_code),
+                reply_markup=None,
+            )
+            await query.answer("Cancelled.")
+            return
+
+        payment_id = None
+        if session.get("access_kind") == "one_time":
+            payment = self.state_store.get_claimed_inline_one_time_payment(
+                session_token
+            )
+            if payment is None:
+                await query.answer(
+                    "This paid delivery is no longer available.", show_alert=True
+                )
+                return
+            payment_id = str(payment["payment_id"])
+        result = self.state_store.claim_inline_retry(
+            session_token,
+            user_id=query.from_user.id,
+            inline_message_id=query.inline_message_id,
+        )
+        if result == "expired":
+            await query.answer("This inline request expired.", show_alert=True)
+            return
+        if result != "claimed":
+            await query.answer("This action was already handled.")
+            return
+        self._inline_delivery_session_tokens.add(session_token)
+        await self._safe_edit_inline_text(
+            context,
+            inline_message_id=query.inline_message_id,
+            text=ChaosText.inline_preparing(str(session["provider_label"])),
+            reply_markup=inline_cancel_keyboard(
+                session_token, language_code=language_code
+            ),
+        )
+        self._schedule_inline_delivery(
+            context,
+            session_token=session_token,
+            one_time_payment_id=payment_id,
+        )
+        await query.answer("Retry started.")
+
     async def _answer_paid_inline_options(
         self,
         context: ContextTypes.DEFAULT_TYPE,
@@ -1074,21 +1188,14 @@ class TelegramBot:
         user_id: int,
         inline_message_id: str,
     ) -> str:
-        session = self.state_store.get_inline_session(session_token, user_id=user_id)
-        if session is None or self._inline_session_is_expired(session):
-            return "expired"
-        if (
-            session.get("inline_message_id")
-            or session.get("status") != "created"
-            or session_token in self._inline_delivery_session_tokens
-        ):
-            return "duplicate"
-        self._inline_delivery_session_tokens.add(session_token)
-        self.state_store.attach_inline_message(
-            session_token, inline_message_id=inline_message_id
+        result = self.state_store.claim_inline_delivery(
+            session_token,
+            user_id=user_id,
+            inline_message_id=inline_message_id,
         )
-        self.state_store.mark_inline_session_status(session_token, "delivering")
-        return "claimed"
+        if result == "claimed":
+            self._inline_delivery_session_tokens.add(session_token)
+        return result
 
     def _claim_one_time_payment_for_session(
         self, session_token: str, *, user_id: int
@@ -1142,12 +1249,18 @@ class TelegramBot:
                 one_time_payment_id=one_time_payment_id,
             )
         )
+        if hasattr(task, "cancel"):
+            self.inline_delivery_tasks[session_token] = task
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(
-                lambda _task, token=session_token: self._inline_delivery_session_tokens.discard(
+                lambda _task, token=session_token: self._cleanup_inline_delivery_task(
                     token
                 )
             )
+
+    def _cleanup_inline_delivery_task(self, session_token: str) -> None:
+        self.inline_delivery_tasks.pop(session_token, None)
+        self._inline_delivery_session_tokens.discard(session_token)
 
     async def _deliver_inline_session(
         self,
@@ -1161,28 +1274,62 @@ class TelegramBot:
         inline_message_id = None
         failure_stage = "preflight"
         try:
+            if one_time_payment_id is None:
+                claimed_payment = (
+                    self.state_store.get_claimed_inline_one_time_payment(session_token)
+                )
+                if claimed_payment is not None:
+                    one_time_payment_id = str(claimed_payment["payment_id"])
+
             session = self.state_store.get_inline_session(session_token)
             if session is None or not session.get("inline_message_id"):
                 return
             inline_message_id = session["inline_message_id"]
+            if session["status"] == "chosen":
+                self.state_store.mark_inline_session_status(
+                    session_token, "delivering"
+                )
+                self.state_store.advance_inline_delivery_stage(
+                    session_token, "preflight"
+                )
+                session = self.state_store.get_inline_session(session_token)
+            if session is None or session["status"] != "delivering":
+                return
+
+            await self._safe_edit_inline_text(
+                context,
+                inline_message_id=inline_message_id,
+                text=ChaosText.inline_preparing(str(session["provider_label"])),
+                reply_markup=inline_cancel_keyboard(
+                    session_token, language_code="en"
+                ),
+            )
             if settings.INLINE_STORAGE_CHAT_ID is None:
-                self._mark_inline_session_failed_and_record_access(
+                transitioned = self.state_store.finish_inline_delivery(
                     session_token,
+                    status="failed",
                     failure_class="inline_storage_missing",
                     failure_stage="preflight",
                     error_class=None,
+                    retryable=False,
                 )
-                if one_time_payment_id:
+                if not transitioned:
+                    return
+                failed_session = self.state_store.get_inline_session(session_token)
+                if failed_session is not None:
+                    self._record_failed_inline_access(failed_session)
+                if one_time_payment_id and failed_session is not None:
                     await self._refund_one_time_payment(
                         context,
                         payment_id=one_time_payment_id,
-                        user_id=int(session["user_id"]),
+                        user_id=int(failed_session["user_id"]),
                         reason="inline_storage_missing",
                     )
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=inline_message_id,
                     text=ChaosText.inline_storage_missing(),
+                    reply_markup=None,
                 )
                 return
 
@@ -1210,10 +1357,18 @@ class TelegramBot:
                     ):
                         output_dir.mkdir(parents=True, exist_ok=True)
                         failure_stage = "download"
+                        if not self.state_store.advance_inline_delivery_stage(
+                            session_token, failure_stage
+                        ):
+                            return
                         video_info = await self._download_inline_video_with_retries(
                             parsed_link, output_dir
                         )
                         failure_stage = "storage_upload"
+                        if not self.state_store.advance_inline_delivery_stage(
+                            session_token, failure_stage
+                        ):
+                            return
                         inline_item = await upload_first_media_to_storage(
                             context.bot,
                             storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
@@ -1237,41 +1392,95 @@ class TelegramBot:
                 )
 
             failure_stage = "inline_edit"
+            if not self.state_store.advance_inline_delivery_stage(
+                session_token, failure_stage
+            ):
+                return
             input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
             await context.bot.edit_message_media(
-                inline_message_id=inline_message_id, media=input_media
+                inline_message_id=inline_message_id,
+                media=input_media,
+                reply_markup=None,
             )
-            self.state_store.mark_inline_session_status(session_token, "delivered")
-            self._record_successful_inline_access(session)
+            if not self.state_store.finish_inline_delivery(
+                session_token, status="delivered"
+            ):
+                return
+            delivered_session = self.state_store.get_inline_session(session_token)
+            if delivered_session is not None:
+                self._record_successful_inline_access(delivered_session)
             if one_time_payment_id:
                 self.state_store.mark_inline_one_time_payment_delivered(
                     one_time_payment_id,
                     request_id=f"inline:{session_token}",
                 )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.exception("Inline delivery failed for session %s", session_token)
-            failed_session = self._mark_inline_session_failed_and_record_access(
+            failure_class = self._classify_inline_delivery_failure(
+                exc,
+                failure_stage=failure_stage,
+            )
+            delivery_unknown = failure_stage == "inline_edit" and isinstance(
+                exc, NetworkError
+            )
+            retryable = (
+                failure_stage == "storage_upload" and isinstance(exc, NetworkError)
+            ) or (
+                failure_stage == "download"
+                and isinstance(exc, DownloadError)
+                and self._should_retry_inline_download(exc)
+            )
+            transitioned = self.state_store.finish_inline_delivery(
                 session_token,
-                failure_class=self._classify_inline_delivery_failure(
-                    exc,
-                    failure_stage=failure_stage,
-                ),
+                status="delivery_unknown" if delivery_unknown else "failed",
+                failure_class=failure_class,
                 failure_stage=failure_stage,
                 error_class=exc.__class__.__name__,
+                retryable=retryable,
             )
-            if one_time_payment_id:
-                user_id = int(failed_session["user_id"]) if failed_session else 0
+            if not transitioned:
+                return
+            failed_session = self.state_store.get_inline_session(session_token)
+
+            if delivery_unknown:
+                if inline_message_id is not None:
+                    await self._safe_edit_inline_text(
+                        context,
+                        inline_message_id=inline_message_id,
+                        text=ChaosText.inline_delivery_unknown("en"),
+                        reply_markup=None,
+                    )
+                return
+
+            if retryable:
+                if inline_message_id is not None:
+                    await self._safe_edit_inline_text(
+                        context,
+                        inline_message_id=inline_message_id,
+                        text=ChaosText.inline_delivery_retryable("en"),
+                        reply_markup=inline_retry_keyboard(
+                            session_token, language_code="en"
+                        ),
+                    )
+                return
+
+            if failed_session is not None:
+                self._record_failed_inline_access(failed_session)
+            if one_time_payment_id and failed_session is not None:
                 await self._refund_one_time_payment(
                     context,
                     payment_id=one_time_payment_id,
-                    user_id=user_id,
-                    reason="download_failed",
+                    user_id=int(failed_session["user_id"]),
+                    reason=failure_class,
                 )
             if inline_message_id is not None:
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=inline_message_id,
                     text=ChaosText.inline_delivery_failed(),
+                    reply_markup=None,
                 )
         finally:
             self._inline_delivery_session_tokens.discard(session_token)
@@ -1455,11 +1664,16 @@ class TelegramBot:
         *,
         inline_message_id: str,
         text: str,
+        reply_markup: InlineKeyboardMarkup | None | object = _REPLY_MARKUP_UNSET,
     ) -> None:
         try:
-            await context.bot.edit_message_text(
-                inline_message_id=inline_message_id, text=text
-            )
+            kwargs: dict[str, Any] = {
+                "inline_message_id": inline_message_id,
+                "text": text,
+            }
+            if reply_markup is not _REPLY_MARKUP_UNSET:
+                kwargs["reply_markup"] = reply_markup
+            await context.bot.edit_message_text(**kwargs)
         except Exception:
             logger.debug("Failed to edit inline placeholder text", exc_info=True)
 

@@ -129,6 +129,141 @@ class _FailingRefundTelegramBot:
         raise TelegramError("refund failed")
 
 
+class _InlineActionTelegramBot(_FakeTelegramBot):
+    def __init__(self, *, media_error=None):
+        super().__init__()
+        self.media_error = media_error
+        self.edited_text = []
+        self.edited_media = []
+
+    async def edit_message_text(self, **kwargs):
+        self.edited_text.append(kwargs)
+
+    async def edit_message_media(self, **kwargs):
+        self.edited_media.append(kwargs)
+        if self.media_error is not None:
+            raise self.media_error
+
+
+def _create_claimed_inline_session(
+    store: StateStore,
+    *,
+    access_kind: str = "subscription",
+) -> None:
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        access_kind=access_kind,
+    )
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-msg"
+        )
+        == "claimed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_inline_cancel_action_rejects_non_owner(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    _create_claimed_inline_session(store)
+    bot = TelegramBot(state_store=store)
+    query = _FakeCallbackQuery(
+        "inline-action:cancel:s1", "inline-msg", user_id=2002
+    )
+
+    await bot.inline_action_callback_handler(
+        _FakeUpdate(callback_query=query),
+        SimpleNamespace(bot=_InlineActionTelegramBot()),
+    )
+
+    assert store.get_inline_session("s1")["status"] == "delivering"
+    assert query.answers == [
+        {
+            "text": "Only the person who started this request can use this action.",
+            "show_alert": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inline_cancel_action_refunds_one_time_payment_once(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    _create_claimed_inline_session(store, access_kind="one_time")
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=5,
+    )
+    assert store.claim_inline_one_time_payment(payment_id, request_id="inline:s1")
+    bot = TelegramBot(state_store=store)
+    fake_bot = _InlineActionTelegramBot()
+    first = _FakeCallbackQuery("inline-action:cancel:s1", "inline-msg")
+    second = _FakeCallbackQuery("inline-action:cancel:s1", "inline-msg")
+
+    await bot.inline_action_callback_handler(
+        _FakeUpdate(callback_query=first), SimpleNamespace(bot=fake_bot)
+    )
+    await bot.inline_action_callback_handler(
+        _FakeUpdate(callback_query=second), SimpleNamespace(bot=fake_bot)
+    )
+
+    assert store.get_inline_session("s1")["status"] == "cancelled"
+    assert store.get_inline_one_time_payment(payment_id)["status"] == "refunded"
+    assert fake_bot.refunds == [
+        {"user_id": 1001, "telegram_payment_charge_id": "tg-charge"}
+    ]
+    assert fake_bot.edited_text[-1]["reply_markup"] is None
+
+
+@pytest.mark.asyncio
+async def test_inline_retry_action_reuses_claimed_payment(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    _create_claimed_inline_session(store, access_kind="one_time")
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=5,
+    )
+    assert store.claim_inline_one_time_payment(payment_id, request_id="inline:s1")
+    assert store.finish_inline_delivery(
+        "s1",
+        status="failed",
+        failure_class="download_failed",
+        failure_stage="download",
+        error_class="DownloadError",
+        retryable=True,
+    )
+    bot = TelegramBot(state_store=store)
+    scheduled = []
+    monkeypatch.setattr(
+        bot,
+        "_schedule_inline_delivery",
+        lambda context, *, session_token, one_time_payment_id: scheduled.append(
+            (session_token, one_time_payment_id)
+        ),
+    )
+    query = _FakeCallbackQuery("inline-action:retry:s1", "inline-msg")
+
+    await bot.inline_action_callback_handler(
+        _FakeUpdate(callback_query=query),
+        SimpleNamespace(bot=_InlineActionTelegramBot()),
+    )
+
+    payment = store.get_inline_one_time_payment(payment_id)
+    assert payment["status"] == "paid"
+    assert payment["request_id"] == "inline:s1"
+    assert store.get_inline_session("s1")["status"] == "delivering"
+    assert scheduled == [("s1", payment_id)]
+
+
 def test_inline_media_cache_key_versions_only_instagram_media():
     instagram_url = "https://www.instagram.com/reel/abc/"
     twitter_url = "https://x.com/example/status/1"
@@ -555,6 +690,7 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(monkeypat
     assert fake_telegram_bot.edited_text == {
         "inline_message_id": "inline-msg",
         "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.",
+        "reply_markup": None,
     }
     assert store.get_subscription_delivery_stats(
         user_id=1001,
@@ -1067,11 +1203,18 @@ async def test_inline_delivery_records_storage_upload_failure_metadata(monkeypat
     assert session["failure_stage"] == "storage_upload"
     assert session["error_class"] == "NetworkError"
     assert session["failure_class"] == "telegram_network"
-    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+    assert session["failure_retryable"] == 1
+    assert edits[-1]["text"] == "Inline delivery failed. You can retry safely."
+    assert (
+        edits[-1]["reply_markup"].inline_keyboard[0][0].callback_data
+        == "inline-action:retry:s1"
+    )
 
 
 @pytest.mark.asyncio
-async def test_inline_delivery_records_inline_edit_failure_metadata(monkeypatch, tmp_path):
+async def test_inline_edit_network_failure_is_unknown_without_retry_or_refund(
+    monkeypatch, tmp_path
+):
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     store = StateStore(tmp_path / "state.db")
     store.create_inline_session(
@@ -1082,8 +1225,21 @@ async def test_inline_delivery_records_inline_edit_failure_metadata(monkeypatch,
         provider="instagram",
         provider_label="Instagram",
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        access_kind="one_time",
     )
-    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-msg"
+        )
+        == "claimed"
+    )
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=5,
+    )
+    assert store.claim_inline_one_time_payment(payment_id, request_id="inline:s1")
     store.save_inline_cached_media(
         cache_key=_inline_media_cache_key(
             "instagram", "https://www.instagram.com/reel/abc/"
@@ -1095,32 +1251,32 @@ async def test_inline_delivery_records_inline_edit_failure_metadata(monkeypatch,
         ],
     )
     bot = TelegramBot(state_store=store)
-
-    async def edit_message_media(**kwargs):
-        raise NetworkError("httpx.WriteError: ")
-
-    edits = []
-
-    async def edit_message_text(**kwargs):
-        edits.append(kwargs)
+    fake_bot = _InlineActionTelegramBot(
+        media_error=NetworkError("httpx.WriteError: ")
+    )
 
     await bot._deliver_inline_session(
-        SimpleNamespace(
-            bot=SimpleNamespace(
-                edit_message_media=edit_message_media,
-                edit_message_text=edit_message_text,
-            )
-        ),
+        SimpleNamespace(bot=fake_bot),
         session_token="s1",
         one_time_payment_id=None,
     )
 
     session = store.get_inline_session("s1")
-    assert session["status"] == "failed"
+    assert session["status"] == "delivery_unknown"
     assert session["failure_stage"] == "inline_edit"
     assert session["error_class"] == "NetworkError"
     assert session["failure_class"] == "telegram_network"
-    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+    assert session["failure_retryable"] == 0
+    assert store.get_inline_one_time_payment(payment_id)["status"] == "paid"
+    assert fake_bot.refunds == []
+    assert fake_bot.edited_text[-1] == {
+        "inline_message_id": "inline-msg",
+        "text": (
+            "Telegram may have delivered this media. Retry is disabled to prevent "
+            "duplicates."
+        ),
+        "reply_markup": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1356,7 @@ async def test_inline_edit_failure_after_storage_upload_preserves_cache_for_late
     cached = store.get_inline_cached_media(cache_key)
     failed_session = store.get_inline_session("s1")
     assert cached["media_items"][0]["file_id"] == "stored-video-file-id"
-    assert failed_session["status"] == "failed"
+    assert failed_session["status"] == "delivery_unknown"
     assert failed_session["failure_stage"] == "inline_edit"
     assert failed_session["error_class"] == "NetworkError"
     assert failed_session["failure_class"] == "telegram_network"
@@ -1389,7 +1545,7 @@ async def test_subscription_inline_delivery_records_failure_event(monkeypatch, t
     )
     assert stats["success"] == 0
     assert stats["failed"] == 1
-    assert edits[0]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
+    assert edits[-1]["text"] == "Inline delivery failed. If this was a one-time payment, it was refunded."
 
 
 @pytest.mark.asyncio

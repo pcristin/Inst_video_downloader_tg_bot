@@ -118,6 +118,12 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
             pattern=r"^inline(?:_once)?:[A-Za-z0-9_-]+$",
         )
     )
+    application.add_handler(
+        CallbackQueryHandler(
+            bot.inline_action_callback_handler,
+            pattern=r"^inline-action:(?:cancel|retry):[A-Za-z0-9_-]+$",
+        )
+    )
     application.add_handler(PreCheckoutQueryHandler(bot.pre_checkout_handler))
     application.add_handler(
         MessageHandler(filters.SUCCESSFUL_PAYMENT, bot.successful_payment_handler)

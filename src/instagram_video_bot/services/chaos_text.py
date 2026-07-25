@@ -529,6 +529,30 @@ class ChaosText:
         )
 
     @staticmethod
+    def inline_delivery_retryable(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Inline delivery failed. You can retry safely."
+        return "Не удалось доставить медиа. Можно безопасно повторить."
+
+    @staticmethod
+    def inline_delivery_cancelled(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return "Inline delivery cancelled."
+        return "Inline-доставка отменена."
+
+    @staticmethod
+    def inline_delivery_unknown(language_code: str = "ru") -> str:
+        if language_code == "en":
+            return (
+                "Telegram may have delivered this media. Retry is disabled to prevent "
+                "duplicates."
+            )
+        return (
+            "Telegram мог уже доставить это медиа. Повтор отключён, чтобы избежать "
+            "дубликатов."
+        )
+
+    @staticmethod
     def rate_limited(retry_after_seconds: int, language_code: str = "ru") -> str:
         minutes = max(1, (retry_after_seconds + 59) // 60)
         if language_code == "en":
