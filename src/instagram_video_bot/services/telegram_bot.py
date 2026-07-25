@@ -42,25 +42,17 @@ from .inline_delivery import (
     upload_first_media_to_storage,
 )
 from .job_manager import JobManager, SharedJob
-from .job_states import (
-    FailureDetails,
-    FailureStage,
-    classify_failure,
-)
+from .job_states import FailureDetails, FailureStage, classify_failure
 from .request_parser import ParsedRequestLink, RequestParser
 from .state_store import CachedMediaEntry, StateStore
 from .telegram.command_handlers import TelegramCommandHandlers
-from .telegram.job_actions import (
-    JobAction,
-    parse_job_action_data,
-    retry_keyboard,
-)
 from .telegram.inline_actions import (
     InlineAction,
     inline_cancel_keyboard,
     inline_retry_keyboard,
     parse_inline_action_data,
 )
+from .telegram.job_actions import JobAction, parse_job_action_data, retry_keyboard
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
 from .telegram_cache import purge_expired_cache_files, video_info_from_cache
@@ -1275,8 +1267,8 @@ class TelegramBot:
         failure_stage = "preflight"
         try:
             if one_time_payment_id is None:
-                claimed_payment = (
-                    self.state_store.get_claimed_inline_one_time_payment(session_token)
+                claimed_payment = self.state_store.get_claimed_inline_one_time_payment(
+                    session_token
                 )
                 if claimed_payment is not None:
                     one_time_payment_id = str(claimed_payment["payment_id"])
@@ -1286,9 +1278,7 @@ class TelegramBot:
                 return
             inline_message_id = session["inline_message_id"]
             if session["status"] == "chosen":
-                self.state_store.mark_inline_session_status(
-                    session_token, "delivering"
-                )
+                self.state_store.mark_inline_session_status(session_token, "delivering")
                 self.state_store.advance_inline_delivery_stage(
                     session_token, "preflight"
                 )
@@ -1300,9 +1290,7 @@ class TelegramBot:
                 context,
                 inline_message_id=inline_message_id,
                 text=ChaosText.inline_preparing(str(session["provider_label"])),
-                reply_markup=inline_cancel_keyboard(
-                    session_token, language_code="en"
-                ),
+                reply_markup=inline_cancel_keyboard(session_token, language_code="en"),
             )
             if settings.INLINE_STORAGE_CHAT_ID is None:
                 transitioned = self.state_store.finish_inline_delivery(
