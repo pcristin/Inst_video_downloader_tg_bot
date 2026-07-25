@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -20,6 +21,25 @@ from telegram.ext import (
 from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+async def _diagnose_group_privacy(telegram_bot: Any) -> None:
+    """Warn when Telegram privacy mode hides ordinary group URL messages."""
+
+    get_me = getattr(telegram_bot, "get_me", None)
+    if get_me is None:
+        logger.warning("Unable to check Telegram group privacy mode")
+        return
+    try:
+        bot_user = await get_me()
+    except TelegramError:
+        logger.warning("Unable to check Telegram group privacy mode", exc_info=True)
+        return
+    if getattr(bot_user, "can_read_all_group_messages", None) is False:
+        logger.warning(
+            "Telegram privacy mode is enabled; ordinary URL messages in groups "
+            "will not reach the bot. Disable privacy mode for this bot in BotFather."
+        )
 
 
 def build_telegram_application(bot: Any) -> tuple[Application, str]:
@@ -51,9 +71,6 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
         settings.INLINE_MODE_ENABLED and settings.INLINE_STORAGE_CHAT_ID is not None
     )
     has_migration_post_init = bool(settings.BOT_MIGRATION_TARGET_USERNAME)
-    if not (has_inline_post_init or has_migration_post_init):
-        return builder
-
     from .post_deploy_notifications import (
         send_bot_migration_announcement_once,
         send_inline_mode_announcement_once,
@@ -61,7 +78,9 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
     )
 
     async def _post_init(application: Application) -> None:
-        application.create_task(_run_post_deploy_tasks(application))
+        await _diagnose_group_privacy(application.bot)
+        if has_inline_post_init or has_migration_post_init:
+            application.create_task(_run_post_deploy_tasks(application))
 
     async def _run_post_deploy_tasks(application: Application) -> None:
         if has_inline_post_init:
@@ -144,7 +163,7 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
     )
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
             bot.handle_message,
         )
     )

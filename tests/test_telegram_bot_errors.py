@@ -1,12 +1,32 @@
 import asyncio
+import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from telegram import Chat, Message, Update, User
 from telegram.error import NetworkError
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
+from src.instagram_video_bot.services.telegram_wiring import _diagnose_group_privacy
+
+
+def _message_update(
+    *, chat_type: str, text: str | None = None, caption: str | None = None
+) -> Update:
+    return Update(
+        update_id=1,
+        message=Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=-1001, type=chat_type),
+            from_user=User(id=1001, first_name="User", is_bot=False),
+            text=text,
+            caption=caption,
+        ),
+    )
 
 
 @pytest.fixture
@@ -148,9 +168,35 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
         {"language"}
     )
     assert "handle_message" in callback_names
+    message_handler = handlers_by_callback_name["handle_message"]
+    supported_url = "https://www.instagram.com/reel/abc/"
+    assert message_handler.check_update(
+        _message_update(chat_type="group", text=supported_url)
+    )
+    assert message_handler.check_update(
+        _message_update(chat_type="supergroup", text=supported_url)
+    )
+    assert message_handler.check_update(
+        _message_update(chat_type="supergroup", caption=supported_url)
+    )
     assert registered["error_handler"] == bot._global_error_handler
     assert registered["post_init"] is not None
     assert registered["ran"] is True
+
+
+@pytest.mark.asyncio
+async def test_group_privacy_diagnostic_warns_when_plain_group_messages_are_hidden(
+    caplog,
+):
+    class PrivacyBot:
+        async def get_me(self):
+            return SimpleNamespace(can_read_all_group_messages=False)
+
+    with caplog.at_level(logging.WARNING):
+        await _diagnose_group_privacy(PrivacyBot())
+
+    assert "privacy mode" in caplog.text.lower()
+    assert "botfather" in caplog.text.lower()
 
 
 @pytest.mark.asyncio
@@ -288,7 +334,7 @@ def test_legacy_redirect_mode_registers_only_redirect_handlers(
     assert registered["ran"] is True
 
 
-def test_inline_announcement_post_init_is_not_registered_without_storage(
+def test_group_privacy_post_init_is_registered_without_inline_storage(
     monkeypatch, telegram_bot_factory
 ):
     registered = {"post_init": None}
@@ -334,7 +380,7 @@ def test_inline_announcement_post_init_is_not_registered_without_storage(
     bot = telegram_bot_factory()
     bot.run()
 
-    assert registered["post_init"] is None
+    assert registered["post_init"] is not None
 
 
 @pytest.mark.asyncio
