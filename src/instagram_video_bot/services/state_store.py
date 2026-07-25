@@ -845,9 +845,12 @@ class StateStore:
                     provider_label = excluded.provider_label,
                     access_kind = excluded.access_kind,
                     status = excluded.status,
+                    delivery_stage = NULL,
                     failure_class = NULL,
                     failure_stage = NULL,
                     error_class = NULL,
+                    failure_retryable = 0,
+                    attempt_count = 0,
                     expires_at = excluded.expires_at,
                     updated_at = excluded.updated_at
                 """,
@@ -888,6 +891,206 @@ class StateStore:
                     (session_token, user_id),
                 ).fetchone()
         return dict(row) if row is not None else None
+
+    def claim_inline_delivery(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> str:
+        """Atomically bind and start a newly selected inline session."""
+
+        now = _utc_now()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM inline_sessions WHERE session_token = ?",
+                (session_token,),
+            ).fetchone()
+            if row is None:
+                return "expired"
+            if int(row["user_id"]) != user_id:
+                return "unauthorized"
+            expires_at = self._normalize_utc_datetime(
+                datetime.fromisoformat(str(row["expires_at"]))
+            )
+            if expires_at <= now:
+                return "expired"
+            if row["status"] != "created" or row["inline_message_id"]:
+                return "duplicate"
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET inline_message_id = ?,
+                    status = 'delivering',
+                    delivery_stage = 'preflight',
+                    failure_class = NULL,
+                    failure_stage = NULL,
+                    error_class = NULL,
+                    failure_retryable = 0,
+                    attempt_count = attempt_count + 1,
+                    updated_at = ?
+                WHERE session_token = ?
+                  AND user_id = ?
+                  AND status = 'created'
+                  AND inline_message_id IS NULL
+                """,
+                (inline_message_id, now.isoformat(), session_token, user_id),
+            )
+        return "claimed" if cursor.rowcount == 1 else "duplicate"
+
+    def advance_inline_delivery_stage(self, session_token: str, stage: str) -> bool:
+        """Persist a live delivery boundary unless the session already ended."""
+
+        if stage not in {"preflight", "download", "storage_upload", "inline_edit"}:
+            raise ValueError(f"Unsupported inline delivery stage: {stage}")
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET delivery_stage = ?,
+                    updated_at = ?
+                WHERE session_token = ? AND status = 'delivering'
+                """,
+                (stage, now, session_token),
+            )
+        return cursor.rowcount == 1
+
+    def claim_inline_retry(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> str:
+        """Atomically claim one new attempt for a safely retryable session."""
+
+        now = _utc_now()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM inline_sessions WHERE session_token = ?",
+                (session_token,),
+            ).fetchone()
+            if row is None:
+                return "expired"
+            if int(row["user_id"]) != user_id:
+                return "unauthorized"
+            if row["inline_message_id"] != inline_message_id:
+                return "message_mismatch"
+            expires_at = self._normalize_utc_datetime(
+                datetime.fromisoformat(str(row["expires_at"]))
+            )
+            if expires_at <= now:
+                return "expired"
+            if row["status"] == "delivering":
+                return "duplicate"
+            if row["status"] != "failed":
+                return "terminal"
+            if not bool(row["failure_retryable"]):
+                return "not_retryable"
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET status = 'delivering',
+                    delivery_stage = 'preflight',
+                    failure_class = NULL,
+                    failure_stage = NULL,
+                    error_class = NULL,
+                    failure_retryable = 0,
+                    attempt_count = attempt_count + 1,
+                    updated_at = ?
+                WHERE session_token = ?
+                  AND user_id = ?
+                  AND inline_message_id = ?
+                  AND status = 'failed'
+                  AND failure_retryable = 1
+                """,
+                (now.isoformat(), session_token, user_id, inline_message_id),
+            )
+        return "claimed" if cursor.rowcount == 1 else "duplicate"
+
+    def cancel_inline_delivery(
+        self,
+        session_token: str,
+        *,
+        user_id: int,
+        inline_message_id: str,
+    ) -> str:
+        """Cancel a claimed session only before the final Telegram edit."""
+
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM inline_sessions WHERE session_token = ?",
+                (session_token,),
+            ).fetchone()
+            if row is None:
+                return "expired"
+            if int(row["user_id"]) != user_id:
+                return "unauthorized"
+            if row["inline_message_id"] != inline_message_id:
+                return "message_mismatch"
+            if row["status"] != "delivering":
+                return "terminal"
+            if row["delivery_stage"] == "inline_edit":
+                return "unsafe"
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET status = 'cancelled',
+                    failure_retryable = 0,
+                    updated_at = ?
+                WHERE session_token = ?
+                  AND user_id = ?
+                  AND inline_message_id = ?
+                  AND status = 'delivering'
+                  AND delivery_stage IN ('preflight', 'download', 'storage_upload')
+                """,
+                (now, session_token, user_id, inline_message_id),
+            )
+        return "cancelled" if cursor.rowcount == 1 else "unsafe"
+
+    def finish_inline_delivery(
+        self,
+        session_token: str,
+        *,
+        status: str,
+        failure_class: str | None = None,
+        failure_stage: str | None = None,
+        error_class: str | None = None,
+        retryable: bool = False,
+    ) -> bool:
+        """Atomically finalize the active inline attempt."""
+
+        if status not in {"delivered", "failed", "delivery_unknown"}:
+            raise ValueError(f"Unsupported inline delivery outcome: {status}")
+        if status != "failed" and retryable:
+            raise ValueError("Only failed inline deliveries may be retryable")
+        now = _utc_now().isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """
+                UPDATE inline_sessions
+                SET status = ?,
+                    failure_class = ?,
+                    failure_stage = ?,
+                    error_class = ?,
+                    failure_retryable = ?,
+                    updated_at = ?
+                WHERE session_token = ? AND status = 'delivering'
+                """,
+                (
+                    status,
+                    failure_class,
+                    failure_stage,
+                    error_class,
+                    int(retryable),
+                    now,
+                    session_token,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def attach_inline_message(
         self, session_token: str, *, inline_message_id: str
@@ -932,13 +1135,16 @@ class StateStore:
                 """
                 UPDATE inline_sessions
                 SET status = 'failed',
+                    delivery_stage = ?,
                     failure_class = ?,
                     failure_stage = ?,
                     error_class = ?,
+                    failure_retryable = 0,
                     updated_at = ?
                 WHERE session_token = ?
                 """,
                 (
+                    failure_stage,
                     failure_class,
                     failure_stage,
                     error_class,
@@ -1404,6 +1610,24 @@ class StateStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_claimed_inline_one_time_payment(
+        self, session_token: str
+    ) -> dict[str, Any] | None:
+        """Return the paid entitlement currently bound to an inline session."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT *
+                FROM inline_one_time_payments
+                WHERE status = 'paid' AND request_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (f"inline:{session_token}",),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def get_available_inline_one_time_payment(
         self,
         *,
@@ -1471,8 +1695,10 @@ class StateStore:
                     SELECT 1
                     FROM inline_sessions s
                     WHERE s.session_token = substr(inline_one_time_payments.request_id, length('inline:') + 1)
-                      AND s.status = 'delivering'
-                      AND s.updated_at > ?
+                      AND (
+                        (s.status = 'delivering' AND s.updated_at > ?)
+                        OR s.status = 'delivery_unknown'
+                      )
                   )
                 """,
                 (now, cutoff, cutoff),

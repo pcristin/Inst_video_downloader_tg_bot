@@ -89,6 +89,9 @@ def test_inline_session_migration_exposes_null_failure_metadata(tmp_path):
         assert session["failure_class"] is None
         assert session["failure_stage"] is None
         assert session["error_class"] is None
+        assert session["delivery_stage"] is None
+        assert session["failure_retryable"] == 0
+        assert session["attempt_count"] == 0
 
 
 def test_mark_inline_session_failed_records_failure_metadata(tmp_path):
@@ -115,6 +118,183 @@ def test_mark_inline_session_failed_records_failure_metadata(tmp_path):
     assert session["failure_class"] == "telegram_network"
     assert session["failure_stage"] == "storage_upload"
     assert session["error_class"] == "NetworkError"
+
+
+def test_inline_session_action_state_defaults_are_persisted(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+
+    session = store.get_inline_session("s1")
+
+    assert session["delivery_stage"] is None
+    assert session["failure_retryable"] == 0
+    assert session["attempt_count"] == 0
+
+
+def test_claim_inline_delivery_is_owner_bound_and_atomic(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=2002, inline_message_id="inline-1"
+        )
+        == "unauthorized"
+    )
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "claimed"
+    )
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "duplicate"
+    )
+    session = store.get_inline_session("s1")
+    assert session["status"] == "delivering"
+    assert session["delivery_stage"] == "preflight"
+    assert session["attempt_count"] == 1
+
+
+def test_retry_claim_is_atomic_and_clears_failure_metadata(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    assert (
+        store.claim_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "claimed"
+    )
+    assert store.finish_inline_delivery(
+        "s1",
+        status="failed",
+        failure_class="download_failed",
+        failure_stage="download",
+        error_class="DownloadError",
+        retryable=True,
+    )
+
+    assert (
+        store.claim_inline_retry(
+            "s1", user_id=1001, inline_message_id="different"
+        )
+        == "message_mismatch"
+    )
+    assert (
+        store.claim_inline_retry(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "claimed"
+    )
+    assert (
+        store.claim_inline_retry(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "duplicate"
+    )
+    session = store.get_inline_session("s1")
+    assert session["status"] == "delivering"
+    assert session["delivery_stage"] == "preflight"
+    assert session["attempt_count"] == 2
+    assert session["failure_class"] is None
+    assert session["failure_retryable"] == 0
+
+
+def test_cancel_inline_delivery_rejects_final_edit_boundary(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.claim_inline_delivery("s1", user_id=1001, inline_message_id="inline-1")
+    assert store.advance_inline_delivery_stage("s1", "inline_edit") is True
+
+    assert (
+        store.cancel_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "unsafe"
+    )
+    assert store.get_inline_session("s1")["status"] == "delivering"
+
+
+def test_cancel_inline_delivery_before_final_edit_is_terminal(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://x.com/example/status/1",
+        normalized_url="https://x.com/example/status/1",
+        provider="twitter",
+        provider_label="Twitter/X",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.claim_inline_delivery("s1", user_id=1001, inline_message_id="inline-1")
+    assert store.advance_inline_delivery_stage("s1", "storage_upload") is True
+
+    assert (
+        store.cancel_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "cancelled"
+    )
+    assert (
+        store.cancel_inline_delivery(
+            "s1", user_id=1001, inline_message_id="inline-1"
+        )
+        == "terminal"
+    )
+    assert store.get_inline_session("s1")["status"] == "cancelled"
+
+
+def test_claimed_one_time_payment_is_resolved_by_delivery_session(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    payment_id = store.record_inline_one_time_payment(
+        user_id=1001,
+        session_token="invoice-session",
+        telegram_payment_charge_id="tg-charge",
+        total_amount=2,
+    )
+    assert store.claim_inline_one_time_payment(
+        payment_id, request_id="inline:delivery-session"
+    )
+
+    payment = store.get_claimed_inline_one_time_payment("delivery-session")
+
+    assert payment["payment_id"] == payment_id
+    assert store.get_claimed_inline_one_time_payment("other-session") is None
 
 
 def test_whitelist_grants_inline_access(tmp_path):
