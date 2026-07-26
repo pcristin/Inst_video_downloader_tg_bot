@@ -52,7 +52,12 @@ from .telegram.inline_actions import (
     inline_retry_keyboard,
     parse_inline_action_data,
 )
-from .telegram.job_actions import JobAction, parse_job_action_data, retry_keyboard
+from .telegram.job_actions import (
+    JobAction,
+    cancel_keyboard,
+    parse_job_action_data,
+    retry_keyboard,
+)
 from .telegram.request_context import RequestContext
 from .telegram.request_intake import TelegramRequestIntake
 from .telegram_cache import purge_expired_cache_files, video_info_from_cache
@@ -1691,6 +1696,10 @@ class TelegramBot:
                                     language_code=request_context.language_code,
                                 )
                             ),
+                            reply_markup=cancel_keyboard(
+                                request_context.request_id,
+                                language_code=request_context.language_code,
+                            ),
                         )
                     staging_started_at = time.perf_counter()
                     staging_required = self.media_stager is not None and any(
@@ -2038,7 +2047,14 @@ class TelegramBot:
                         language_code=request_context.language_code,
                     )
                 )
-                await self._edit_status_message(request_context.status_message, text)
+                await self._edit_status_message(
+                    request_context.status_message,
+                    text,
+                    reply_markup=cancel_keyboard(
+                        request_id,
+                        language_code=request_context.language_code,
+                    ),
+                )
             elif job.state == "cancelled":
                 text = ChaosText.cancelled(
                     request_context.chaos_enabled, request_context.language_code

@@ -2086,6 +2086,48 @@ async def test_admin_help_rejects_non_owner(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_running_status_keeps_cancel_keyboard(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    status_message = _FakeStatusMessage()
+    request_context = RequestContext(
+        request_id="req-1",
+        chat_id=77,
+        user_id=1001,
+        provider_label="Instagram",
+        normalized_url="https://www.instagram.com/reel/a/",
+        original_url="https://www.instagram.com/reel/a/",
+        original_message_id=10,
+        status_message=status_message,
+        quiet_mode=False,
+        joined_existing=False,
+        language_code="en",
+    )
+    telegram_bot.request_contexts["req-1"] = request_context
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=77,
+        submitter_user_id=1001,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="running",
+        requesters={
+            "req-1": RequestRecord(
+                request_id="req-1", chat_id=77, user_id=1001, user_label="alice"
+            )
+        },
+    )
+
+    await telegram_bot._on_job_state_change(job)
+
+    markup = status_message.edit_kwargs[0]["reply_markup"]
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "Cancel"
+    assert button.callback_data == "job:cancel:req-1"
+
+
+@pytest.mark.asyncio
 async def test_quiet_mode_skips_running_status_updates(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     status_message = _FakeStatusMessage()

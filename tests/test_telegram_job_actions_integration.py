@@ -370,6 +370,9 @@ async def test_successful_request_updates_one_status_through_delivery_stages(
         "Twitter/X: preparing media.",
         "Twitter/X: sending to Telegram.",
     ]
+    for _text, kwargs in status.edits[:2]:
+        markup = kwargs["reply_markup"]
+        assert markup.inline_keyboard[0][0].callback_data.startswith("job:cancel:")
     assert status.edits[-1][1] == {"reply_markup": None}
     assert status.deleted is True
 
