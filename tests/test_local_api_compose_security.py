@@ -1,8 +1,10 @@
+import subprocess
 from pathlib import Path
 
 
 COMPOSE_FILE = Path(__file__).parents[1] / "docker-compose.local-api.yml"
 BASE_COMPOSE_FILE = Path(__file__).parents[1] / "docker-compose.yml"
+MAKEFILE = Path(__file__).parents[1] / "Makefile"
 
 
 def test_local_api_has_separate_egress_network() -> None:
@@ -70,4 +72,31 @@ def test_services_use_explicit_numeric_users_and_hardened_tmpfs() -> None:
     assert (
         "/tmp/telegram-bot-api:size=1g,mode=1770,uid=10001,gid=10001,noexec,nosuid,nodev"
         in api_service
+    )
+
+
+def test_local_api_has_read_only_access_through_bot_media_group() -> None:
+    compose = COMPOSE_FILE.read_text()
+    api_service = compose.split("  telegram-bot-api:\n", 1)[1].split(
+        "\n  instagram-video-bot:", 1
+    )[0]
+
+    assert '    user: "10001:10001"' in api_service
+    assert '      - "1000"\n' in api_service.split("    group_add:\n", 1)[1]
+    assert "      - ./temp:/app/temp:ro\n" in api_service
+
+
+def test_local_stack_prepares_private_group_readable_media_directory() -> None:
+    result = subprocess.run(
+        ["make", "-n", "-f", str(MAKEFILE), "local-up"],
+        cwd=MAKEFILE.parent,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    commands = result.stdout.splitlines()
+    assert commands[0] == "install -d -o 1000 -g 1000 -m 0750 temp"
+    assert commands[-1].endswith(
+        "docker-compose.local-api.yml up -d"
     )

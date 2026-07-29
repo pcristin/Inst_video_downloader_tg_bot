@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
+.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
 
 help: ## Show this help message
 	@echo 'Instagram Video Downloader Bot - uv-native workflow'
@@ -54,13 +54,16 @@ restart: ## Restart the bot
 logs: ## View bot logs (follow mode)
 	docker compose logs -f
 
-local-config: ## Validate the Local Telegram Bot API stack
+local-prepare: ## Prepare least-privilege shared media access for Local Bot API
+	install -d -o 1000 -g 1000 -m 0750 temp
+
+local-config: local-prepare ## Validate the Local Telegram Bot API stack
 	docker compose -f docker-compose.yml -f docker-compose.local-api.yml config --quiet
 
-local-build: ## Build the bot and Local Telegram Bot API images
+local-build: local-prepare ## Build the bot and Local Telegram Bot API images
 	docker compose -f docker-compose.yml -f docker-compose.local-api.yml build
 
-local-up: ## Start the bot through the Local Telegram Bot API
+local-up: local-prepare ## Start the bot through the Local Telegram Bot API
 	docker compose -f docker-compose.yml -f docker-compose.local-api.yml up -d
 
 local-down: ## Stop the Local Telegram Bot API stack

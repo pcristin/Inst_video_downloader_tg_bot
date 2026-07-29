@@ -62,9 +62,11 @@ static int read_secret(const char *path, char *buffer, size_t capacity) {
 int main(int argc, char **argv) {
     char api_id[MAX_SECRET_BYTES + 1] = {0};
     char api_hash[MAX_SECRET_BYTES + 1] = {0};
+    struct stat media_metadata;
     const char *api_id_file = getenv("TELEGRAM_API_ID_FILE");
     const char *api_hash_file = getenv("TELEGRAM_API_HASH_FILE");
     const char *api_binary = getenv("TELEGRAM_BOT_API_BINARY");
+    const char *media_dir = getenv("TELEGRAM_MEDIA_DIR");
     char **child_argv;
     int index;
 
@@ -76,6 +78,15 @@ int main(int argc, char **argv) {
     }
     if (api_binary == NULL || *api_binary == '\0') {
         api_binary = "telegram-bot-api";
+    }
+    if (media_dir == NULL || *media_dir == '\0') {
+        media_dir = "/app/temp";
+    }
+
+    if (stat(media_dir, &media_metadata) != 0 ||
+        !S_ISDIR(media_metadata.st_mode) || access(media_dir, R_OK | X_OK) != 0) {
+        fputs("Unable to access shared media directory\n", stderr);
+        return 1;
     }
 
     if (read_secret(api_id_file, api_id, sizeof(api_id)) < 0 ||
