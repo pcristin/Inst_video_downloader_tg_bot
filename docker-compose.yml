@@ -3,6 +3,7 @@ services:
     build: .
     container_name: instagram-video-bot
     restart: unless-stopped
+    user: "1000:1000"
     read_only: true
     cap_drop:
       - ALL
@@ -42,7 +43,7 @@ services:
       - HOME=/tmp
       - UV_CACHE_DIR=/tmp/uv-cache
     tmpfs:
-      - /tmp:size=256m,mode=1770,uid=1000,gid=1000
+      - /tmp:size=256m,mode=1770,uid=1000,gid=1000,noexec,nosuid,nodev
     logging:
       driver: json-file
       options:
@@ -50,7 +51,7 @@ services:
         max-file: "3"
     # Health check
     healthcheck:
-      test: ["CMD", "uv", "run", "--no-sync", "python", "-m", "src.instagram_video_bot.utils.health_check"]
+      test: ["CMD", "/app/.venv/bin/python", "-m", "src.instagram_video_bot.utils.health_check"]
       interval: 30s
       timeout: 10s
       retries: 3

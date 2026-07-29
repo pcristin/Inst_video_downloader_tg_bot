@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim AS builder
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS builder
 
 ARG TELEGRAM_BOT_API_REF=adfd7f6a8e990272851777eeb3ae0def4216f161
 
@@ -25,12 +25,22 @@ RUN cmake -S . -B build \
         -DCMAKE_INSTALL_PREFIX=/opt/telegram-bot-api \
     && cmake --build build --target install --parallel 2
 
+COPY scripts/telegram_bot_api_entrypoint.c scripts/http_healthcheck.c /src/runtime-helpers/
+RUN mkdir -p /opt/runtime/bin \
+    && cc -std=c11 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+        -Wformat -Werror=format-security -fPIE -pie -Wall -Wextra -Werror \
+        /src/runtime-helpers/telegram_bot_api_entrypoint.c \
+        -o /opt/runtime/bin/telegram-bot-api-entrypoint \
+    && cc -std=c11 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+        -Wformat -Werror=format-security -fPIE -pie -Wall -Wextra -Werror \
+        /src/runtime-helpers/http_healthcheck.c \
+        -o /opt/runtime/bin/http-healthcheck
 
-FROM debian:bookworm-slim
+
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     libssl3 \
     zlib1g \
     && rm -rf /var/lib/apt/lists/* \
@@ -40,17 +50,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R 10001:10001 /var/lib/telegram-bot-api /tmp/telegram-bot-api
 
 COPY --from=builder /opt/telegram-bot-api/ /usr/local/
-COPY --chmod=0555 scripts/telegram_bot_api_entrypoint.sh /usr/local/bin/telegram-bot-api-entrypoint
+COPY --from=builder /opt/runtime/bin/ /usr/local/bin/
+
+RUN chmod 0555 /usr/local/bin/telegram-bot-api-entrypoint \
+        /usr/local/bin/http-healthcheck \
+    && rm -f /bin/sh /bin/dash /usr/bin/apt* /usr/bin/dpkg* /usr/sbin/dpkg*
 
 ENV TELEGRAM_API_ID_FILE=/run/secrets/telegram_api_id \
     TELEGRAM_API_HASH_FILE=/run/secrets/telegram_api_hash
 
-USER telegram-bot-api
+USER 10001:10001
 
 EXPOSE 8081
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=12 \
-    CMD curl --silent --show-error --output /dev/null http://127.0.0.1:8081/ || exit 1
+    CMD ["/usr/local/bin/http-healthcheck", "127.0.0.1", "8081"]
 
 ENTRYPOINT ["/usr/local/bin/telegram-bot-api-entrypoint"]
 CMD ["--local", "--dir=/var/lib/telegram-bot-api", "--temp-dir=/tmp/telegram-bot-api", "--http-ip-address=0.0.0.0", "--http-port=8081"]

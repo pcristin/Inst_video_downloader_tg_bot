@@ -7,6 +7,7 @@ services:
         TELEGRAM_BOT_API_REF: adfd7f6a8e990272851777eeb3ae0def4216f161
     container_name: telegram-bot-api
     restart: unless-stopped
+    user: "10001:10001"
     read_only: true
     cap_drop:
       - ALL
@@ -22,7 +23,7 @@ services:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
       - ./temp:/app/temp:ro
     tmpfs:
-      - /tmp/telegram-bot-api:size=1g,mode=1770,uid=10001,gid=10001
+      - /tmp/telegram-bot-api:size=1g,mode=1770,uid=10001,gid=10001,noexec,nosuid,nodev
     logging:
       driver: json-file
       options:

@@ -122,15 +122,13 @@ make build
 make up
 ```
 
-### Run commands inside container:
-```bash
-docker compose exec instagram-video-bot /bin/bash
-```
+The runtime image intentionally has no shell, package-manager commands, `pip`,
+or `uv`. Run only explicit application binaries with an exec-form command.
 
 ### Run Python commands inside the container:
 ```bash
-docker compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
-docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
+docker compose exec instagram-video-bot /app/.venv/bin/python -m src.instagram_video_bot.utils.health_check
+docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py status
 ```
 
 ## Volume Mounts
@@ -153,7 +151,7 @@ docker compose logs instagram-video-bot
 1. Verify your `.env` credentials or `accounts.txt` entries.
 2. Re-initialize sessions:
    ```bash
-   docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
+   docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py setup
    ```
 3. Restart the bot:
    ```bash
