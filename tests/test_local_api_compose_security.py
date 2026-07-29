@@ -61,6 +61,7 @@ def test_services_use_explicit_numeric_users_and_hardened_tmpfs() -> None:
     )[0]
 
     assert '    user: "1000:1000"' in bot_service
+    assert "UV_CACHE_DIR" not in bot_service
     assert '    user: "10001:10001"' in api_service
     assert (
         "/tmp:size=256m,mode=1770,uid=1000,gid=1000,noexec,nosuid,nodev"

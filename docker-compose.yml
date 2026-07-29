@@ -41,7 +41,6 @@ services:
       # Additional environment variables for container
       - TZ=UTC
       - HOME=/tmp
-      - UV_CACHE_DIR=/tmp/uv-cache
     tmpfs:
       - /tmp:size=256m,mode=1770,uid=1000,gid=1000,noexec,nosuid,nodev
     logging:
