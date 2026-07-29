@@ -50,8 +50,8 @@ workflows.
 - Remove Instagram usernames and proxy endpoints from routine log records.
 - Log only stable failure categories and aggregate counts for challenged,
   replacement-required, reset, and available accounts.
-- Preserve detailed account status only in explicitly authorized owner-facing
-  Telegram commands, not container logs.
+- Preserve detailed account status only in the explicitly invoked local
+  administrative CLI, not container logs.
 - Add tests that inject unique usernames, passwords, TOTP values, and proxy
   endpoints and prove none enter captured logs.
 
