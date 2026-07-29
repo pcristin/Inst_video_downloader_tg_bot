@@ -271,6 +271,31 @@ def _make_request_context(status_message: _FakeStatusMessage) -> RequestContext:
     )
 
 
+@pytest.fixture(autouse=True)
+def _disable_direct_media_staging_by_default(monkeypatch):
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", None)
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", None)
+
+
+def test_direct_media_stager_reuses_inline_storage_chat(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -1002)
+
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+
+    assert telegram_bot.media_stager is not None
+    assert telegram_bot.media_stager.storage_chat_id == -1002
+
+
+def test_direct_media_stager_prefers_explicit_storage_chat(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", -1001)
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -1002)
+
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+
+    assert telegram_bot.media_stager is not None
+    assert telegram_bot.media_stager.storage_chat_id == -1001
+
+
 @pytest.mark.asyncio
 async def test_handle_message_delegates_to_request_intake(tmp_path):
     telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))

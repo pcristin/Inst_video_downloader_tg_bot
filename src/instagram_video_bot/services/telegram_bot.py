@@ -117,9 +117,12 @@ class TelegramBot:
         self.application: Optional[Application] = None
         self.state_store = state_store or StateStore()
         self.media_sender = TelegramMediaSender(self.state_store)
+        media_storage_chat_id = settings.TELEGRAM_MEDIA_STORAGE_CHAT_ID
+        if media_storage_chat_id is None:
+            media_storage_chat_id = settings.INLINE_STORAGE_CHAT_ID
         self.media_stager = (
-            TelegramMediaStager(settings.TELEGRAM_MEDIA_STORAGE_CHAT_ID)
-            if settings.TELEGRAM_MEDIA_STORAGE_CHAT_ID is not None
+            TelegramMediaStager(media_storage_chat_id)
+            if media_storage_chat_id is not None
             else None
         )
         self.job_manager = JobManager(self.state_store)
