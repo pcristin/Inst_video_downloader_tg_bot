@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
+.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
 
 help: ## Show this help message
 	@echo 'Instagram Video Downloader Bot - uv-native workflow'
@@ -13,6 +13,11 @@ help: ## Show this help message
 	@echo '  logs             View bot logs'
 	@echo '  shell            Open shell in container'
 	@echo '  clean            Clean up files and sessions'
+	@echo '  local-config     Validate the Local Telegram Bot API stack'
+	@echo '  local-build      Build the bot and Local Telegram Bot API'
+	@echo '  local-up         Start the Local Telegram Bot API stack'
+	@echo '  local-down       Stop the Local Telegram Bot API stack'
+	@echo '  local-logs       Follow Local Telegram Bot API stack logs'
 	@echo ''
 	@echo '🔧 Testing:'
 	@echo '  test-health      Test the health check'
@@ -48,6 +53,21 @@ restart: ## Restart the bot
 
 logs: ## View bot logs (follow mode)
 	docker compose logs -f
+
+local-config: ## Validate the Local Telegram Bot API stack
+	docker compose -f docker-compose.yml -f docker-compose.local-api.yml config --quiet
+
+local-build: ## Build the bot and Local Telegram Bot API images
+	docker compose -f docker-compose.yml -f docker-compose.local-api.yml build
+
+local-up: ## Start the bot through the Local Telegram Bot API
+	docker compose -f docker-compose.yml -f docker-compose.local-api.yml up -d
+
+local-down: ## Stop the Local Telegram Bot API stack
+	docker compose -f docker-compose.yml -f docker-compose.local-api.yml down
+
+local-logs: ## Follow Local Telegram Bot API stack logs
+	docker compose -f docker-compose.yml -f docker-compose.local-api.yml logs -f
 
 shell: ## Open a shell in the running container
 	docker compose exec instagram-video-bot /bin/bash

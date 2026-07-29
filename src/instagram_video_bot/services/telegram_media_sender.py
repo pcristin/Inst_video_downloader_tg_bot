@@ -13,9 +13,15 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from ..config.settings import settings
-from .download_models import MediaItem, VideoDownloadError, VideoInfo
+from .download_models import MediaItem, VideoInfo
 from .rich_text import RichText, media_caption_rich_text
 from .state_store import StateStore
+from .telegram_media_files import (
+    cleanup_large_staged_files,
+    effective_upload_limit_bytes,
+    media_input,
+    validate_media_path,
+)
 from .telegram_media_retry import (build_telegram_timeout_kwargs,
                                    call_telegram_with_retries)
 
@@ -68,7 +74,9 @@ class TelegramMediaSender:
                     fallback_to_local_on_rejected_file_id,
                 )
             )
-            self._persist_telegram_file_ids(request_context, telegram_file_ids)
+            self._persist_telegram_file_ids(
+                request_context, media_items, telegram_file_ids
+            )
             return
 
         self.validate_media_files(
@@ -107,16 +115,19 @@ class TelegramMediaSender:
                 if offset:
                     setattr(error, "telegram_user_send_ambiguous", True)
                 raise
-        self._persist_telegram_file_ids(request_context, telegram_file_ids)
+        self._persist_telegram_file_ids(request_context, media_items, telegram_file_ids)
 
     @staticmethod
     def validate_media_files(files: list[Path]) -> None:
         """Validate that all files exist and are non-empty."""
         for file_path in files:
-            if not file_path.exists():
-                raise VideoDownloadError(f"Media file not found at {file_path}")
-            if file_path.stat().st_size == 0:
-                raise VideoDownloadError(f"Media file is empty: {file_path}")
+            validate_media_path(
+                file_path,
+                max_upload_bytes=effective_upload_limit_bytes(
+                    settings.TELEGRAM_LOCAL_MODE,
+                    settings.TELEGRAM_MAX_UPLOAD_BYTES,
+                ),
+            )
 
     async def _send_single_media_item(
         self,
@@ -153,7 +164,14 @@ class TelegramMediaSender:
         self.validate_media_files([media_item.file_path])
 
         async def upload_local_media(**timeout_kwargs: float) -> Message:
-            with open(media_item.file_path, "rb") as media_file:
+            with media_input(
+                media_item.file_path,
+                local_mode=settings.TELEGRAM_LOCAL_MODE,
+                max_upload_bytes=effective_upload_limit_bytes(
+                    settings.TELEGRAM_LOCAL_MODE,
+                    settings.TELEGRAM_MAX_UPLOAD_BYTES,
+                ),
+            ) as media_file:
                 return await self._send_single_media_value(
                     context,
                     request_context,
@@ -316,7 +334,16 @@ class TelegramMediaSender:
                 )
                 if not media_value:
                     self.validate_media_files([media_item.file_path])
-                    media_value = stack.enter_context(open(media_item.file_path, "rb"))
+                    media_value = stack.enter_context(
+                        media_input(
+                            media_item.file_path,
+                            local_mode=settings.TELEGRAM_LOCAL_MODE,
+                            max_upload_bytes=effective_upload_limit_bytes(
+                                settings.TELEGRAM_LOCAL_MODE,
+                                settings.TELEGRAM_MAX_UPLOAD_BYTES,
+                            ),
+                        )
+                    )
                 item_caption = caption if index == 0 else None
                 item_caption_text = (
                     item_caption.text if item_caption is not None else None
@@ -365,6 +392,7 @@ class TelegramMediaSender:
     def _persist_telegram_file_ids(
         self,
         request_context: MediaRequestContext,
+        media_items: list[MediaItem],
         telegram_file_ids: list[str | None],
     ) -> None:
         if not telegram_file_ids or not any(telegram_file_ids):
@@ -373,6 +401,27 @@ class TelegramMediaSender:
             request_context.chat_id,
             request_context.normalized_url,
             telegram_file_ids,
+        )
+        staged_items = [
+            MediaItem(
+                file_path=item.file_path,
+                media_type=item.media_type,
+                caption=item.caption,
+                duration=item.duration,
+                width=item.width,
+                height=item.height,
+                telegram_file_id=file_id,
+            )
+            for item, file_id in zip(media_items, telegram_file_ids)
+        ]
+        self.cleanup_large_staged_files(staged_items)
+
+    @staticmethod
+    def cleanup_large_staged_files(media_items: list[MediaItem]) -> list[Path]:
+        """Remove staged local payloads above the configured cache threshold."""
+        return cleanup_large_staged_files(
+            media_items,
+            threshold_bytes=settings.TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES,
         )
 
     @staticmethod

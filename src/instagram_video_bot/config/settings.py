@@ -4,8 +4,10 @@ import logging
 import os
 from pathlib import Path
 from typing import List, Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from dotenv import load_dotenv
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
 
@@ -20,6 +22,13 @@ class Settings(BaseSettings):
     BOT_OWNER_USER_ID: Optional[int] = None
     BOT_MIGRATION_TARGET_USERNAME: Optional[str] = None
     BOT_LEGACY_REDIRECT_MODE: bool = False
+    TELEGRAM_API_ID: Optional[int] = None
+    TELEGRAM_API_HASH: Optional[SecretStr] = None
+    TELEGRAM_LOCAL_MODE: bool = False
+    TELEGRAM_BOT_API_BASE_URL: str = "http://telegram-bot-api:8081/bot"
+    TELEGRAM_BOT_API_BASE_FILE_URL: str = "http://telegram-bot-api:8081/file/bot"
+    TELEGRAM_MAX_UPLOAD_BYTES: int = 500 * 1024 * 1024
+    TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES: int = 50 * 1024 * 1024
     ACCOUNT_FAILURE_THRESHOLD: int = 2
     ACCOUNT_LOW_WATERMARK: int = 3
     ACCOUNT_ALERT_COOLDOWN_SECONDS: int = 60 * 60

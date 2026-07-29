@@ -45,13 +45,7 @@ async def _diagnose_group_privacy(telegram_bot: Any) -> None:
 def build_telegram_application(bot: Any) -> tuple[Application, str]:
     """Build and wire a Telegram application for the configured bot mode."""
 
-    builder = (
-        ApplicationBuilder()
-        .token(settings.BOT_TOKEN)
-        .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
-        .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
-        .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
-    )
+    builder = _build_application_builder()
     builder = _configure_post_init(builder, bot)
     application = builder.build()
 
@@ -64,6 +58,24 @@ def build_telegram_application(bot: Any) -> tuple[Application, str]:
 
     application.add_error_handler(bot._global_error_handler)
     return application, mode
+
+
+def _build_application_builder() -> ApplicationBuilder:
+    """Create an application builder for the configured Telegram API endpoint."""
+    builder = (
+        ApplicationBuilder()
+        .token(settings.BOT_TOKEN)
+        .concurrent_updates(settings.TELEGRAM_CONCURRENT_UPDATES)
+        .connection_pool_size(settings.TELEGRAM_CONNECTION_POOL_SIZE)
+        .media_write_timeout(settings.TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS)
+    )
+    if settings.TELEGRAM_LOCAL_MODE:
+        builder = (
+            builder.base_url(settings.TELEGRAM_BOT_API_BASE_URL)
+            .base_file_url(settings.TELEGRAM_BOT_API_BASE_FILE_URL)
+            .local_mode(True)
+        )
+    return builder
 
 
 def _configure_post_init(builder: Any, bot: Any) -> Any:

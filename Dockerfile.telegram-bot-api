@@ -1,0 +1,52 @@
+FROM debian:bookworm-slim AS builder
+
+ARG TELEGRAM_BOT_API_REF=adfd7f6a8e990272851777eeb3ae0def4216f161
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    git \
+    gperf \
+    libssl-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/telegram-bot-api
+
+RUN git init \
+    && git remote add origin https://github.com/tdlib/telegram-bot-api.git \
+    && git fetch --depth 1 origin "${TELEGRAM_BOT_API_REF}" \
+    && git checkout --detach FETCH_HEAD \
+    && git submodule update --init --recursive --depth 1
+
+RUN cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/telegram-bot-api \
+    && cmake --build build --target install --parallel 2
+
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libssl3 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 telegram-bot-api \
+    && useradd --uid 10001 --gid 10001 --no-create-home telegram-bot-api \
+    && mkdir -p /var/lib/telegram-bot-api /tmp/telegram-bot-api \
+    && chown -R 10001:10001 /var/lib/telegram-bot-api /tmp/telegram-bot-api
+
+COPY --from=builder /opt/telegram-bot-api/ /usr/local/
+
+USER telegram-bot-api
+
+EXPOSE 8081
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=12 \
+    CMD curl --silent --show-error --output /dev/null http://127.0.0.1:8081/ || exit 1
+
+ENTRYPOINT ["telegram-bot-api"]
+CMD ["--local", "--dir=/var/lib/telegram-bot-api", "--temp-dir=/tmp/telegram-bot-api", "--http-ip-address=0.0.0.0", "--http-port=8081"]

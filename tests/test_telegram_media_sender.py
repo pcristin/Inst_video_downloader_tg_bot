@@ -155,6 +155,58 @@ async def test_media_sender_sends_video_and_persists_telegram_file_id(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_media_sender_removes_large_file_after_persisting_file_id(
+    monkeypatch, tmp_path
+):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    media_file = tmp_path / "large-video.mp4"
+    media_file.write_bytes(b"video")
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_media_sender.settings."
+        "TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES",
+        4,
+    )
+    store.save_cached_result(
+        chat_id=request_context.chat_id,
+        normalized_url=request_context.normalized_url,
+        provider="instagram",
+        title="Large sender",
+        media_items=[
+            {
+                "file_path": str(media_file),
+                "media_type": "video",
+                "caption": None,
+                "duration": None,
+                "width": None,
+                "height": None,
+            }
+        ],
+        ttl_seconds=3600,
+    )
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=media_file,
+            title="Large sender",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        ),
+    )
+
+    cached = store.get_cached_result(
+        request_context.chat_id, request_context.normalized_url
+    )
+    assert cached is not None
+    assert cached.media_items[0]["telegram_file_id"] == "standalone-video-file-id"
+    assert media_file.exists() is False
+
+
+@pytest.mark.asyncio
 async def test_media_sender_adds_caption_entities_to_single_video(tmp_path):
     store = StateStore(tmp_path / "state.db")
     sender = TelegramMediaSender(store)
@@ -183,6 +235,34 @@ async def test_media_sender_adds_caption_entities_to_single_video(tmp_path):
         (MessageEntity.BOLD, 0, len("Медиа:")),
     ]
     assert "parse_mode" not in call
+
+
+@pytest.mark.asyncio
+async def test_media_sender_passes_path_to_local_bot_api(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    sender = TelegramMediaSender(store)
+    fake_bot = _FakeBot()
+    request_context = _request_context()
+    media_file = tmp_path / "video.mp4"
+    media_file.write_bytes(b"video")
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_media_sender.settings."
+        "TELEGRAM_LOCAL_MODE",
+        True,
+    )
+
+    await sender.send_media(
+        _FakeContext(fake_bot),
+        request_context,
+        VideoInfo(
+            file_path=media_file,
+            title="Local sender",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+            primary_media_type="video",
+        ),
+    )
+
+    assert fake_bot.video_calls[0]["video"] == media_file.resolve()
 
 
 @pytest.mark.asyncio

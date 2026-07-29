@@ -22,6 +22,16 @@ def test_check_environment_allows_missing_instagram_credentials(monkeypatch):
     main_module.check_environment()
 
 
+def test_check_environment_requires_local_bot_api_credentials(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "BOT_TOKEN", "test-bot-token", raising=False)
+    monkeypatch.setattr(main_module.settings, "TELEGRAM_LOCAL_MODE", True, raising=False)
+    monkeypatch.setattr(main_module.settings, "TELEGRAM_API_ID", None, raising=False)
+    monkeypatch.setattr(main_module.settings, "TELEGRAM_API_HASH", None, raising=False)
+
+    with pytest.raises(ValueError, match="TELEGRAM_API_ID, TELEGRAM_API_HASH"):
+        main_module.check_environment()
+
+
 def test_setup_logging_suppresses_noisy_request_loggers(monkeypatch):
     monkeypatch.setattr(main_module.settings, "LOG_LEVEL", "INFO", raising=False)
 

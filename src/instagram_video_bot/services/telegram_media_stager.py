@@ -7,7 +7,12 @@ from dataclasses import replace
 from typing import Any
 
 from ..config.settings import settings
-from .download_models import MediaItem, VideoDownloadError
+from .download_models import MediaItem
+from .telegram_media_files import (
+    effective_upload_limit_bytes,
+    media_input,
+    validate_media_path,
+)
 from .telegram_media_retry import (build_telegram_timeout_kwargs,
                                    call_telegram_with_retries)
 
@@ -30,7 +35,14 @@ class TelegramMediaStager:
         self._validate_local_media(media_item)
 
         async def upload_with_fresh_file(**timeout_kwargs: float):
-            with media_item.file_path.open("rb") as media_file:
+            with media_input(
+                media_item.file_path,
+                local_mode=settings.TELEGRAM_LOCAL_MODE,
+                max_upload_bytes=effective_upload_limit_bytes(
+                    settings.TELEGRAM_LOCAL_MODE,
+                    settings.TELEGRAM_MAX_UPLOAD_BYTES,
+                ),
+            ) as media_file:
                 if media_item.media_type == "video":
                     return await bot.send_video(
                         chat_id=self.storage_chat_id,
@@ -58,10 +70,13 @@ class TelegramMediaStager:
 
     @staticmethod
     def _validate_local_media(media_item: MediaItem) -> None:
-        if not media_item.file_path.exists():
-            raise VideoDownloadError(f"Media file not found at {media_item.file_path}")
-        if media_item.file_path.stat().st_size == 0:
-            raise VideoDownloadError(f"Media file is empty: {media_item.file_path}")
+        validate_media_path(
+            media_item.file_path,
+            max_upload_bytes=effective_upload_limit_bytes(
+                settings.TELEGRAM_LOCAL_MODE,
+                settings.TELEGRAM_MAX_UPLOAD_BYTES,
+            ),
+        )
 
     @staticmethod
     def _extract_file_id(message: Any, media_type: str) -> str:

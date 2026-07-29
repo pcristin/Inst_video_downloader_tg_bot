@@ -10,6 +10,7 @@ from src.instagram_video_bot.services.telegram_media_retry import (
     build_telegram_timeout_kwargs,
     call_telegram_with_retries,
     classify_telegram_delivery_error,
+    is_retriable_telegram_delivery_error,
 )
 
 
@@ -45,6 +46,13 @@ def test_classify_telegram_delivery_error_marks_network_read_error_transient():
 
 def test_classify_telegram_delivery_error_marks_timeout_transient():
     assert classify_telegram_delivery_error(TimedOut("timed out")) == "telegram_timeout"
+
+
+def test_entity_too_large_is_permanent_and_not_retried():
+    error = NetworkError("Request Entity Too Large")
+
+    assert classify_telegram_delivery_error(error) == "telegram_file_too_large"
+    assert is_retriable_telegram_delivery_error(error) is False
 
 
 def test_build_telegram_timeout_kwargs_uses_configured_values():

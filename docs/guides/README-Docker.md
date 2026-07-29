@@ -59,6 +59,31 @@ If your Instagram account has 2FA enabled:
 
 ## Docker Commands
 
+### Local Telegram Bot API
+
+The optional local stack supports uploads up to the application's 500 MiB
+ceiling. Add `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` to `.env`, then validate
+and build the stack without migrating the bot yet:
+
+```bash
+make local-config
+make local-build
+```
+
+The Local Bot API service is reachable only from the Compose network. It shares
+`./temp` read-only, uses a 1 GiB `tmpfs` for transient server files, and rotates
+its container logs. Do not run `make local-up` until the bot has been logged out
+once from the cloud Bot API; running both sessions can make update delivery
+unreliable.
+
+After migration, use:
+
+```bash
+make local-up
+make local-logs
+make local-down
+```
+
 ### Start the bot:
 ```bash
 make up

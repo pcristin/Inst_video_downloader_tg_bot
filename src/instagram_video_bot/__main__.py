@@ -32,6 +32,12 @@ def check_environment() -> None:
     # Always require BOT_TOKEN
     if not getattr(settings, "BOT_TOKEN"):
         missing_vars.append("BOT_TOKEN")
+
+    if settings.TELEGRAM_LOCAL_MODE:
+        if not settings.TELEGRAM_API_ID:
+            missing_vars.append("TELEGRAM_API_ID")
+        if not settings.TELEGRAM_API_HASH:
+            missing_vars.append("TELEGRAM_API_HASH")
     
     # Instagram credentials are optional at startup.
     # This allows Twitter/X-only operation without IG_USERNAME/IG_PASSWORD.

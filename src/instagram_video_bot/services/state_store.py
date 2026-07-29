@@ -1796,7 +1796,10 @@ class StateStore:
 
         media_items = json.loads(row["media_json"])
         for media_item in media_items:
-            if not Path(media_item["file_path"]).exists():
+            if (
+                not Path(media_item["file_path"]).exists()
+                and not media_item.get("telegram_file_id")
+            ):
                 return None
         return CachedMediaEntry(
             title=row["title"],

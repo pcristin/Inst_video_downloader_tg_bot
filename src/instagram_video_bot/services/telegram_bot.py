@@ -2142,6 +2142,7 @@ class TelegramBot:
                 request_context.normalized_url,
                 [item.telegram_file_id for item in staged_items],
             )
+            self.media_sender.cleanup_large_staged_files(staged_items)
             delivery_info = replace(video_info, media_items=staged_items)
         return delivery_info
 

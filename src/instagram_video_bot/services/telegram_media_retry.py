@@ -40,6 +40,8 @@ def build_telegram_timeout_kwargs(
 
 
 def classify_telegram_delivery_error(error: Exception) -> str:
+    if _is_file_too_large_error(error):
+        return "telegram_file_too_large"
     if isinstance(error, TimedOut):
         return "telegram_timeout"
     if isinstance(error, RetryAfter):
@@ -57,11 +59,18 @@ def classify_telegram_delivery_error(error: Exception) -> str:
 def is_retriable_telegram_delivery_error(
     error: Exception, *, retry_network_errors: bool = True
 ) -> bool:
+    if _is_file_too_large_error(error):
+        return False
     if isinstance(error, RetryAfter):
         return True
     if retry_network_errors and isinstance(error, (NetworkError, TimedOut)):
         return True
     return False
+
+
+def _is_file_too_large_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return "entity too large" in text or "file is too large" in text
 
 
 def _safe_log_context(context: dict[str, Any] | None) -> dict[str, Any]:
