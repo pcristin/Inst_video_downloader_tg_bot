@@ -18,20 +18,18 @@ REPLACEMENT_REQUIRED_PREFIX = "replacement_required:"
 LEGACY_HARD_FAILURE_PREFIX = "hard_failure:"
 
 
-def _redact_proxy(proxy: Optional[str]) -> str:
-    """Return proxy value with credentials removed for logs."""
-    if not proxy:
-        return "None"
-    if "@" not in proxy:
-        return proxy
-    scheme_sep = "://"
-    if scheme_sep in proxy:
-        scheme, remainder = proxy.split(scheme_sep, 1)
-        if "@" in remainder:
-            _, host_part = remainder.split("@", 1)
-            return f"{scheme}://***@{host_part}"
-    _, host_part = proxy.split("@", 1)
-    return f"***@{host_part}"
+def _failure_category(reason: Optional[str]) -> str:
+    """Return a stable, non-sensitive failure category for service logs."""
+    text = (reason or "").lower()
+    if text.startswith(REPLACEMENT_REQUIRED_PREFIX):
+        return "replacement_required"
+    if "rate" in text or "limit" in text or "please wait" in text:
+        return "rate_limit"
+    if any(token in text for token in ("challenge", "checkpoint", "verification")):
+        return "challenge"
+    if any(token in text for token in ("auth", "login", "credential", "unauthorized")):
+        return "authentication"
+    return "other"
 
 @dataclass
 class Account:
@@ -178,12 +176,15 @@ class AccountManager:
                             session_file=session_file
                         )
                         self.accounts.append(account)
-                        logger.info(f"Loaded account: {username} with proxy: {_redact_proxy(proxy)}")
                     else:
                         logger.warning(f"Invalid format on line {line_num}: Expected username|password|totp_secret")
                         
-                except Exception as e:
-                    logger.error(f"Error parsing line {line_num}: {e}")
+                except Exception as error:
+                    logger.error(
+                        "Error parsing account line %d (type=%s)",
+                        line_num,
+                        type(error).__name__,
+                    )
         
         logger.info(f"Loaded {len(self.accounts)} accounts total")
     
@@ -223,8 +224,8 @@ class AccountManager:
                             account.proxy = saved_account['proxy']
                         break
                         
-        except Exception as e:
-            logger.error(f"Failed to load state: {e}")
+        except Exception as error:
+            logger.error("Failed to load state (type=%s)", type(error).__name__)
             # Fallback to loading accounts from file
             self._load_accounts()
     
@@ -264,7 +265,7 @@ class AccountManager:
             finally:
                 os.close(directory_fd)
         except Exception as error:
-            logger.error("Failed to save state: %s", error)
+            logger.error("Failed to save state (type=%s)", type(error).__name__)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
@@ -464,7 +465,10 @@ class AccountManager:
             account.ban_reason = reason
             account.banned_at = datetime.now()
             self._leased_accounts.discard(account.username)
-            logger.warning(f"Account {account.username} marked as unavailable: {reason}")
+            logger.warning(
+                "Account marked unavailable (category=%s)",
+                _failure_category(reason),
+            )
             self._save_state()
 
     def should_alert_low_pool(self) -> bool:
@@ -489,7 +493,7 @@ class AccountManager:
     
     def setup_account(self, account: Account) -> bool:
         """Setup an account for use with instagrapi."""
-        logger.info(f"Setting up account: {account.username}")
+        logger.info("Setting up Instagram account")
         
         try:
             from ..services.instagram_client import InstagramClient
@@ -508,32 +512,35 @@ class AccountManager:
                 account.last_used = datetime.now()
                 self.current_account = account
                 self._save_state()
-                logger.info(
-                    f"Successfully logged in: {account.username} with proxy: {_redact_proxy(account.proxy)}"
-                )
+                logger.info("Instagram account login succeeded")
                 return True
             else:
-                logger.error(f"Failed to login: {account.username}")
+                logger.error("Instagram account login failed (category=authentication)")
                 # Mark account as temporarily unavailable due to login failure
                 self._mark_account_temporarily_unavailable(account, "login_failed")
                 return False
                     
-        except Exception as e:
-            error_str = str(e).lower()
-            logger.error(f"Error setting up account {account.username}: {e}")
+        except Exception as error:
+            error_str = str(error).lower()
+            category = _failure_category(error_str)
+            logger.error(
+                "Instagram account setup failed (category=%s, type=%s)",
+                category,
+                type(error).__name__,
+            )
             
             # Handle specific Instagram errors
             if 'challenge_required' in error_str:
-                logger.warning(f"Account {account.username} requires challenge - marking as temporarily unavailable")
+                logger.warning("Account requires challenge; marking unavailable")
                 self._mark_account_temporarily_unavailable(account, "challenge_required")
             elif 'login_required' in error_str or 'authentication' in error_str:
-                logger.warning(f"Account {account.username} has authentication issues - marking as temporarily unavailable")
+                logger.warning("Account authentication failed; marking unavailable")
                 self._mark_account_temporarily_unavailable(account, "auth_failed")
             elif 'rate' in error_str or 'limit' in error_str:
-                logger.warning(f"Account {account.username} is rate limited - marking as temporarily unavailable")
+                logger.warning("Account is rate limited; marking unavailable")
                 self._mark_account_temporarily_unavailable(account, "rate_limited")
             else:
-                logger.warning(f"Account {account.username} failed with unknown error - marking as temporarily unavailable")
+                logger.warning("Account setup failed; marking unavailable")
                 self._mark_account_temporarily_unavailable(account, "unknown_error")
             
             return False
@@ -562,14 +569,14 @@ class AccountManager:
                 logger.info("Already using the best available account")
                 return True
             
-            logger.info(f"Rotating from {self.current_account.username if self.current_account else 'None'} to {next_account.username} (attempt {attempts})")
+            logger.info("Rotating Instagram account (attempt=%d)", attempts)
             
             # Try to setup the account
             if self.setup_account(next_account):
-                logger.info(f"Successfully rotated to account: {next_account.username}")
+                logger.info("Instagram account rotation succeeded")
                 return True
             else:
-                logger.warning(f"Failed to setup account {next_account.username}, trying next account...")
+                logger.warning("Instagram account setup failed; trying next account")
                 # The account is already marked as unavailable by setup_account()
                 continue
         
@@ -578,7 +585,7 @@ class AccountManager:
     
     def mark_account_banned(self, account: Account) -> None:
         """Mark an account as banned and try to rotate."""
-        logger.warning(f"Marking account as banned: {account.username}")
+        logger.warning("Marking Instagram account as banned")
         account.is_banned = True
         self._leased_accounts.discard(account.username)
         self._save_state()
@@ -610,18 +617,14 @@ class AccountManager:
         """Reset accounts that have been banned for more than the specified hours."""
         with self._lock:
             reset_count = 0
+            replacement_required_count = 0
             cutoff_time = datetime.now() - timedelta(hours=hours)
 
             for account in self.accounts:
                 if account.is_banned and account.banned_at and account.banned_at < cutoff_time:
                     if self._is_replacement_required_ban_reason(account.ban_reason):
-                        logger.info(
-                            "Keeping account %s unavailable; replacement required for: %s",
-                            account.username,
-                            account.ban_reason,
-                        )
+                        replacement_required_count += 1
                         continue
-                    logger.info(f"Resetting account {account.username} (banned {hours}+ hours ago for: {account.ban_reason})")
                     account.is_banned = False
                     account.ban_reason = None
                     account.banned_at = None
@@ -635,6 +638,11 @@ class AccountManager:
                 logger.info(f"Reset {reset_count} accounts that were banned for more than {hours} hours")
             else:
                 logger.info(f"No accounts to reset (banned for more than {hours} hours)")
+            if replacement_required_count > 0:
+                logger.info(
+                    "Kept %d accounts unavailable because replacement is required",
+                    replacement_required_count,
+                )
     
     def get_status(self) -> Dict[str, Any]:
         """Get status of all accounts."""

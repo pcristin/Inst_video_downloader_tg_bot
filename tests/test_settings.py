@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -155,3 +156,25 @@ def test_bot_token_rejects_two_sources(monkeypatch, tmp_path):
             CACHE_DIR=tmp_path / "cache",
             STATE_DB_PATH=tmp_path / "state.db",
         )
+
+
+def test_invalid_proxy_definition_is_not_logged(monkeypatch, tmp_path, caplog):
+    raw_proxy = "SECRET_USER:SECRET_PASS:secret-proxy.example:not-a-port:extra"
+    monkeypatch.delenv("PROXIES", raising=False)
+
+    configured = Settings(
+        PROXIES=raw_proxy,
+        _env_file=None,
+        TEMP_DIR=tmp_path / "temp",
+        CACHE_DIR=tmp_path / "cache",
+        STATE_DB_PATH=tmp_path / "state.db",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert configured.get_proxy_list() == []
+
+    assert raw_proxy not in caplog.text
+    assert "SECRET_USER" not in caplog.text
+    assert "SECRET_PASS" not in caplog.text
+    assert "secret-proxy.example" not in caplog.text
+    assert "Skipping invalid proxy definition" in caplog.text

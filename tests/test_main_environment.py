@@ -95,7 +95,7 @@ def test_main_multi_account_startup_continues_without_available_accounts(
             return {"total_accounts": 3, "available_accounts": 0}
 
         def get_detailed_status(self):
-            return "all accounts unavailable"
+            raise AssertionError("startup must not log detailed account status")
 
     events = []
 

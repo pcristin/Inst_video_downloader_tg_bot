@@ -68,8 +68,6 @@ def main() -> None:
 
             if status["available_accounts"] <= 0:
                 logger.error("No available accounts!")
-                logger.info("Account status:")
-                logger.info(manager.get_detailed_status())
                 logger.warning(
                     "Starting bot with no available Instagram accounts; "
                     "public Instagram extraction remains available, but stories, "
@@ -83,9 +81,9 @@ def main() -> None:
         bot = TelegramBot()
         bot.run()
 
-    except Exception as e:
+    except Exception as error:
         logger = logging.getLogger(__name__)
-        logger.exception(f"Fatal error: {str(e)}")
+        logger.error("Fatal error (type=%s)", type(error).__name__)
         sys.exit(1)
 
 if __name__ == "__main__":

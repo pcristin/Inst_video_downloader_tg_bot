@@ -198,22 +198,86 @@ def test_save_state_closes_parent_directory_when_directory_fsync_fails(
     assert list(tmp_path.glob(".accounts_state.json.*.tmp")) == []
 
 
-def test_load_accounts_redacts_proxy_credentials_in_logs(monkeypatch, tmp_path: Path, caplog):
+def test_load_accounts_logs_only_aggregate_counts(monkeypatch, tmp_path: Path, caplog):
     monkeypatch.chdir(tmp_path)
+    username = "SECRET_ACCOUNT_USERNAME"
+    proxy = "proxy-user:proxy-pass@secret-proxy.example:1234"
     monkeypatch.setattr(
         account_manager_module.settings,
         "PROXIES",
-        "proxy-user:proxy-pass@proxy.example:1234",
+        proxy,
     )
     accounts_file = tmp_path / "accounts.txt"
     state_file = tmp_path / "accounts_state.json"
-    _write_accounts(accounts_file, "first")
+    _write_accounts(accounts_file, username)
 
     with caplog.at_level(logging.INFO):
         AccountManager(accounts_file=accounts_file, state_file=state_file)
 
-    assert "proxy-user:proxy-pass" not in caplog.text
-    assert "http://***@proxy.example:1234" in caplog.text
+    for secret in (
+        username,
+        proxy,
+        "proxy-user",
+        "proxy-pass",
+        "secret-proxy.example",
+    ):
+        assert secret not in caplog.text
+    assert "Loaded 1 accounts total" in caplog.text
+
+
+def test_account_operations_do_not_log_sensitive_metadata(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+):
+    monkeypatch.chdir(tmp_path)
+    username = "SECRET_PRIMARY_USERNAME"
+    second_username = "SECRET_SECONDARY_USERNAME"
+    proxy = "http://SECRET_USER:SECRET_PASS@secret-proxy.example:8123"
+    raw_reason = "SECRET_RAW_REASON"
+    exception_text = "SECRET_EXCEPTION_TEXT challenge_required"
+    monkeypatch.setattr(
+        type(account_manager_module.settings),
+        "get_proxy_list",
+        lambda _self: [proxy],
+    )
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, username, second_username)
+
+    class FailingInstagramClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def login(self):
+            raise RuntimeError(exception_text)
+
+    from src.instagram_video_bot.services import instagram_client as client_module
+
+    monkeypatch.setattr(client_module, "InstagramClient", FailingInstagramClient)
+
+    with caplog.at_level(logging.INFO):
+        manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+        primary = manager.accounts[0]
+        manager.setup_account(primary)
+        manager.mark_account_unavailable(primary, raw_reason)
+        primary.banned_at = account_manager_module.datetime.now() - timedelta(hours=7)
+        manager.reset_old_banned_accounts(hours=6)
+        manager.current_account = primary
+        monkeypatch.setattr(manager, "setup_account", lambda _account: False)
+        manager.rotate_account()
+
+    for secret in (
+        username,
+        second_username,
+        proxy,
+        "SECRET_USER",
+        "SECRET_PASS",
+        "secret-proxy.example",
+        raw_reason,
+        exception_text,
+    ):
+        assert secret not in caplog.text
 
 
 def test_account_failure_counter_quarantines_after_threshold(monkeypatch, tmp_path: Path):

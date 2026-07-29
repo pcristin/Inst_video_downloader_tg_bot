@@ -172,7 +172,7 @@ class Settings(BaseSettings):
                 proxies.append(normalized)
             else:
                 logging.getLogger(__name__).warning(
-                    "Skipping invalid proxy definition: %s", raw_proxy
+                    "Skipping invalid proxy definition"
                 )
         return proxies
     
