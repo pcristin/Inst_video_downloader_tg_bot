@@ -3,7 +3,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -66,6 +66,11 @@ def is_retriable_telegram_delivery_error(
     if retry_network_errors and isinstance(error, (NetworkError, TimedOut)):
         return True
     return False
+
+
+def is_ambiguous_telegram_delivery_error(error: Exception) -> bool:
+    """Return whether Telegram may have accepted a send before transport failed."""
+    return isinstance(error, NetworkError) and not isinstance(error, BadRequest)
 
 
 def _is_file_too_large_error(error: Exception) -> bool:

@@ -68,7 +68,10 @@ from .telegram_inline_sessions import (
     record_successful_inline_access,
     subscription_expires_at,
 )
-from .telegram_media_retry import classify_telegram_delivery_error
+from .telegram_media_retry import (
+    classify_telegram_delivery_error,
+    is_ambiguous_telegram_delivery_error,
+)
 from .telegram_media_sender import RejectedTelegramFileIdError, TelegramMediaSender
 from .telegram_media_stager import TelegramMediaStager
 from .telegram_performance import (
@@ -1794,7 +1797,10 @@ class TelegramBot:
                         )
                         delivery_status = (
                             "unknown"
-                            if (isinstance(error, NetworkError) or user_send_ambiguous)
+                            if (
+                                is_ambiguous_telegram_delivery_error(error)
+                                or user_send_ambiguous
+                            )
                             and not storage_upload_attempted
                             else "failed"
                         )

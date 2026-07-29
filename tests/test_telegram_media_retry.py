@@ -2,7 +2,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 
 from src.instagram_video_bot.config.settings import Settings
 from src.instagram_video_bot.services import telegram_media_retry
@@ -46,6 +46,20 @@ def test_classify_telegram_delivery_error_marks_network_read_error_transient():
 
 def test_classify_telegram_delivery_error_marks_timeout_transient():
     assert classify_telegram_delivery_error(TimedOut("timed out")) == "telegram_timeout"
+
+
+def test_bad_request_is_not_an_ambiguous_delivery_outcome():
+    error = BadRequest("Can't get stat about the file")
+
+    assert telegram_media_retry.is_ambiguous_telegram_delivery_error(error) is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimedOut("timed out"), NetworkError("httpx.ReadError")],
+)
+def test_transport_failure_is_an_ambiguous_delivery_outcome(error):
+    assert telegram_media_retry.is_ambiguous_telegram_delivery_error(error) is True
 
 
 def test_entity_too_large_is_permanent_and_not_retried():

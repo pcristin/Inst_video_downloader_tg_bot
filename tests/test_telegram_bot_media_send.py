@@ -117,6 +117,12 @@ class _TimeoutUserBot(_FakeBot):
         raise TimedOut("user delivery timed out")
 
 
+class _InaccessibleLocalMediaBot(_FakeBot):
+    async def send_video(self, **kwargs):
+        self.video_calls.append(kwargs)
+        raise BadRequest("Can't get stat about the file")
+
+
 class _RejectStaleFileIdTimeoutBot(_FakeBot):
     async def send_video(self, **kwargs):
         self.video_calls.append(kwargs)
@@ -562,6 +568,103 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
         "delivery_error_class": "TimedOut",
     }
     assert dict(persisted_job) == {"status": "completed", "error_class": None}
+
+
+@pytest.mark.asyncio
+async def test_bad_request_records_definite_user_send_failure(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(
+        VideoInfo(
+            file_path=video_file,
+            title="Video title",
+            media_items=[
+                MediaItem(
+                    file_path=video_file,
+                    media_type="video",
+                    telegram_file_id="cached-video-file-id",
+                )
+            ],
+            primary_media_type="video",
+        )
+    )
+    job = SharedJob(
+        job_id="job-bad-request",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_id=request_context.request_id,
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        user_id=request_context.user_id,
+        user_label="alice",
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+        status="completed",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+
+    await telegram_bot._await_request(
+        _FakeContext(_InaccessibleLocalMediaBot()), request_context, job
+    )
+
+    attempt = store.get_delivery_attempts(job.job_id)[0]
+    with store._lock:
+        request = store._conn.execute(
+            "SELECT status, failure_reason, retryable FROM request_events "
+            "WHERE request_id = ?",
+            (request_context.request_id,),
+        ).fetchone()
+        metrics = store._conn.execute(
+            "SELECT delivery_status, delivery_error_class FROM performance_metrics "
+            "WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+
+    assert dict(attempt)["status"] == "failed"
+    assert dict(request) == {
+        "status": "failed",
+        "failure_reason": "telegram_delivery",
+        "retryable": 1,
+    }
+    assert dict(metrics) == {
+        "delivery_status": "failed",
+        "delivery_error_class": "BadRequest",
+    }
 
 
 @pytest.mark.asyncio
