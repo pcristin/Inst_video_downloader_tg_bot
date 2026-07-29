@@ -38,6 +38,26 @@ class _CheckpointDownloadClient:
         )
 
 
+class _StreamingResponse:
+    def __init__(self, chunks, *, content_length=None):
+        self._chunks = list(chunks)
+        self.content = b"".join(self._chunks)
+        self.headers = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.closed = False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size):
+        assert chunk_size > 0
+        yield from self._chunks
+
+    def close(self):
+        self.closed = True
+
+
 class _MissingVideoDownloadClient:
     user_agent = "test-agent"
 
@@ -401,6 +421,66 @@ def test_public_thumbnail_bypasses_av_probe(monkeypatch, tmp_path):
     assert output.read_bytes() == b"photo"
 
 
+def test_public_download_rejects_oversized_content_length_before_writing(
+    monkeypatch, tmp_path
+):
+    response = _StreamingResponse([b"123456"], content_length=6)
+    output = tmp_path / "oversized.mp4"
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.settings.TELEGRAM_MAX_UPLOAD_BYTES",
+        5,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with pytest.raises(RuntimeError, match="exceeds the 5-byte download limit"):
+        InstagramClient._download_url_to_path("https://cdn.example/video.mp4", output)
+
+    assert not output.exists()
+    assert response.closed is True
+
+
+def test_public_download_stops_chunked_response_at_limit_and_removes_partial(
+    monkeypatch, tmp_path
+):
+    response = _StreamingResponse([b"123", b"456"])
+    output = tmp_path / "chunked.mp4"
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.settings.TELEGRAM_MAX_UPLOAD_BYTES",
+        5,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get",
+        lambda *_args, **_kwargs: response,
+    )
+
+    with pytest.raises(RuntimeError, match="exceeds the 5-byte download limit"):
+        InstagramClient._download_url_to_path("https://cdn.example/video.mp4", output)
+
+    assert not output.exists()
+    assert response.closed is True
+
+
+def test_public_download_streams_response_below_limit(monkeypatch, tmp_path):
+    response = _StreamingResponse([b"12", b"34"], content_length=4)
+    output = tmp_path / "public.mp4"
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.settings.TELEGRAM_MAX_UPLOAD_BYTES",
+        5,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.instagram_client.requests.get",
+        lambda *_args, **_kwargs: response,
+    )
+
+    InstagramClient._download_url_to_path("https://cdn.example/video.mp4", output)
+
+    assert output.read_bytes() == b"1234"
+    assert response.closed is True
+
+
 def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, tmp_path):
     captured = {}
 
@@ -450,18 +530,11 @@ def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, t
                 ],
             }
 
-    class _Response:
-        def __init__(self, content):
-            self.content = content
-
-        def raise_for_status(self):
-            return None
-
     requested_urls = []
 
-    def _get(url, timeout):
-        requested_urls.append((url, timeout))
-        return _Response(url.encode())
+    def _get(url, timeout, stream=False):
+        requested_urls.append((url, timeout, stream))
+        return _StreamingResponse([url.encode()])
 
     monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YoutubeDL))
     monkeypatch.setattr(
@@ -488,8 +561,8 @@ def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, t
         b"https://cdn.example.com/thumb-large.jpg",
     ]
     assert requested_urls == [
-        ("https://cdn.example.com/video-high.mp4", 15.0),
-        ("https://cdn.example.com/thumb-large.jpg", 15.0),
+        ("https://cdn.example.com/video-high.mp4", 15.0, True),
+        ("https://cdn.example.com/thumb-large.jpg", 15.0, True),
     ]
     assert captured["options"] == {
         "quiet": True,
@@ -534,19 +607,12 @@ def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, 
                 ],
             }
 
-    class _Response:
-        def __init__(self, content):
-            self.content = content
-
-        def raise_for_status(self):
-            return None
-
     requested_urls = []
     ffmpeg_commands = []
 
-    def _get(url, timeout):
-        requested_urls.append((url, timeout))
-        return _Response(url.encode())
+    def _get(url, timeout, stream=False):
+        requested_urls.append((url, timeout, stream))
+        return _StreamingResponse([url.encode()])
 
     def _run(command, **_kwargs):
         ffmpeg_commands.append(command)
@@ -573,8 +639,8 @@ def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, 
     assert result.file_paths == [tmp_path / "public_1.mp4"]
     assert result.file_paths[0].read_bytes() == b"muxed-av"
     assert requested_urls == [
-        ("https://cdn.example/video.webm", 15.0),
-        ("https://cdn.example/audio.m4a", 15.0),
+        ("https://cdn.example/video.webm", 15.0, True),
+        ("https://cdn.example/audio.m4a", 15.0, True),
     ]
     assert ffmpeg_commands[0][0:2] == ["ffmpeg", "-v"]
     assert Path(ffmpeg_commands[0][5]).suffix == ".webm"

@@ -3,6 +3,12 @@ services:
     build: .
     container_name: instagram-video-bot
     restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     env_file:
       - .env
     volumes:
@@ -13,7 +19,7 @@ services:
       # Mount logs directory (optional)
       - ./logs:/app/logs
       # Mount accounts file for multi-account support
-      - ./accounts.txt:/app/accounts.txt
+      - ./accounts.txt:/app/accounts.txt:ro
       # Mount accounts state directory to persist banned/usage status
       - ./account-state:/app/account-state
     secrets:
@@ -30,13 +36,22 @@ services:
       - IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
       # Additional environment variables for container
       - TZ=UTC
+      - HOME=/tmp
+      - UV_CACHE_DIR=/tmp/uv-cache
+    tmpfs:
+      - /tmp:size=256m,mode=1770,uid=1000,gid=1000
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # Health check
     healthcheck:
       test: ["CMD", "uv", "run", "--no-sync", "python", "-m", "src.instagram_video_bot.utils.health_check"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s 
+      start_period: 40s
 
 secrets:
   instagram_auth:

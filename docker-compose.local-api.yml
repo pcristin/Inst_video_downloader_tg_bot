@@ -7,9 +7,17 @@ services:
         TELEGRAM_BOT_API_REF: adfd7f6a8e990272851777eeb3ae0def4216f161
     container_name: telegram-bot-api
     restart: unless-stopped
-    environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID is required}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH is required}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    secrets:
+      - source: telegram_api_id
+        target: telegram_api_id
+      - source: telegram_api_hash
+        target: telegram_api_hash
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
       - ./temp:/app/temp:ro
@@ -20,6 +28,9 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+    networks:
+      - telegram-api
+      - api-egress
 
   instagram-video-bot:
     depends_on:
@@ -31,6 +42,21 @@ services:
       TELEGRAM_BOT_API_BASE_FILE_URL: http://telegram-bot-api:8081/file/bot
       TELEGRAM_MAX_UPLOAD_BYTES: "524288000"
       TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES: "52428800"
+    networks:
+      - telegram-api
+      - bot-egress
 
 volumes:
   telegram-bot-api-data:
+
+networks:
+  telegram-api:
+    internal: true
+  bot-egress:
+  api-egress:
+
+secrets:
+  telegram_api_id:
+    file: ./secrets/telegram_api_id
+  telegram_api_hash:
+    file: ./secrets/telegram_api_hash

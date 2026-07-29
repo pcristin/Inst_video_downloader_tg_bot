@@ -214,4 +214,5 @@ extract_cookies.txt
 .netrc
 /sessions
 .worktrees/
+.codebase-memory/
 docs/superpowers

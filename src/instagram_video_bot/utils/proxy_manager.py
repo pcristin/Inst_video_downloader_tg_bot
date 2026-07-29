@@ -59,8 +59,11 @@ class ProxyManager:
                     proxy = self._parse_proxy_line(line)
                     if proxy:
                         self.proxies.append(proxy)
-                except Exception as e:
-                    logger.warning(f"Failed to parse proxy line '{line}': {e}")
+                except Exception as error:
+                    logger.warning(
+                        "Failed to parse proxy entry from PROXY_LIST",
+                        extra={"error_class": error.__class__.__name__},
+                    )
         
         # Try numbered proxy format (PROXY_1, PROXY_2, etc.)
         for i in range(1, 21):  # Support up to 20 proxies
@@ -70,8 +73,14 @@ class ProxyManager:
                     proxy = self._parse_proxy_line(proxy_env)
                     if proxy:
                         self.proxies.append(proxy)
-                except Exception as e:
-                    logger.warning(f"Failed to parse PROXY_{i} '{proxy_env}': {e}")
+                except Exception as error:
+                    logger.warning(
+                        "Failed to parse proxy entry",
+                        extra={
+                            "source": f"PROXY_{i}",
+                            "error_class": error.__class__.__name__,
+                        },
+                    )
         
         if not self.proxies:
             logger.warning("No proxies loaded! Running without proxy.")

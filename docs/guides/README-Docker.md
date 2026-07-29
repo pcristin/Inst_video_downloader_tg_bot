@@ -62,8 +62,20 @@ If your Instagram account has 2FA enabled:
 ### Local Telegram Bot API
 
 The optional local stack supports uploads up to the application's 500 MiB
-ceiling. Add `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` to `.env`, then validate
-and build the stack without migrating the bot yet:
+ceiling. Store the Telegram application credentials below a root-only directory
+instead of `.env`, because `.env` is loaded by the bot container:
+
+```bash
+install -d -m 700 secrets
+install -m 444 /dev/null secrets/telegram_api_id
+install -m 444 /dev/null secrets/telegram_api_hash
+```
+
+Put only the numeric `api_id` in `secrets/telegram_api_id` and only the
+`api_hash` in `secrets/telegram_api_hash`. The files must be readable by the
+non-root API process, while the `0700` parent directory prevents other host
+users from traversing to them. Only the API service mounts these files. Then
+validate and build the stack without migrating the bot yet:
 
 ```bash
 make local-config

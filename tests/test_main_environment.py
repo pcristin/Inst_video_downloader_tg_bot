@@ -22,14 +22,13 @@ def test_check_environment_allows_missing_instagram_credentials(monkeypatch):
     main_module.check_environment()
 
 
-def test_check_environment_requires_local_bot_api_credentials(monkeypatch):
+def test_check_environment_allows_local_mode_without_api_credentials(monkeypatch):
     monkeypatch.setattr(main_module.settings, "BOT_TOKEN", "test-bot-token", raising=False)
     monkeypatch.setattr(main_module.settings, "TELEGRAM_LOCAL_MODE", True, raising=False)
     monkeypatch.setattr(main_module.settings, "TELEGRAM_API_ID", None, raising=False)
     monkeypatch.setattr(main_module.settings, "TELEGRAM_API_HASH", None, raising=False)
 
-    with pytest.raises(ValueError, match="TELEGRAM_API_ID, TELEGRAM_API_HASH"):
-        main_module.check_environment()
+    main_module.check_environment()
 
 
 def test_setup_logging_suppresses_noisy_request_loggers(monkeypatch):
@@ -86,7 +85,7 @@ def test_main_multi_account_startup_does_not_login_before_bot_run(monkeypatch, t
 
 
 def test_main_multi_account_startup_continues_without_available_accounts(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, caplog
 ):
     class FakeManager:
         def reset_old_banned_accounts(self, hours):
@@ -113,6 +112,9 @@ def test_main_multi_account_startup_continues_without_available_accounts(
     )
     monkeypatch.setattr(main_module, "TelegramBot", FakeTelegramBot)
 
-    main_module.main()
+    with caplog.at_level(logging.WARNING):
+        main_module.main()
 
     assert events == ["run"]
+    assert "public Instagram extraction remains available" in caplog.text
+    assert "Instagram downloads will fail" not in caplog.text

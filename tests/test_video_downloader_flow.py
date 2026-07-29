@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from concurrent.futures import Future
 from pathlib import Path
 import sys
@@ -523,6 +524,46 @@ def test_instagram_client_ytdlp_fallback_uses_active_python_module(
 
     assert result == output_file
     assert captured["command"][:3] == [sys.executable, "-m", "yt_dlp"]
+
+
+def test_instagram_client_ytdlp_fallback_verifies_tls_and_redacts_failure(
+    tmp_path, monkeypatch, caplog
+):
+    secret_cookie = "sessionid=SECRET_SESSION"
+    secret_proxy = "http://proxy-user:proxy-pass@proxy.example:8080"
+    captured = {}
+    client = InstagramClient.__new__(InstagramClient)
+    client.username = "acc_ytdlp"
+    client.proxy = secret_proxy
+    client.last_failure_class = None
+    client.last_failure_reason = None
+    client.client = SimpleNamespace(
+        user_agent="test-agent",
+        cookie_jar={"sessionid": "SECRET_SESSION"},
+    )
+
+    def fake_run(command, *, capture_output, text, timeout):
+        captured["command"] = command
+        return SimpleNamespace(
+            returncode=1,
+            stderr=f"request failed with {secret_cookie} through {secret_proxy}",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="src.instagram_video_bot.services.instagram_client",
+    ):
+        result = client._download_with_ytdlp_first(
+            "https://www.instagram.com/reel/example/", 123, tmp_path
+        )
+
+    assert result is None
+    assert "--no-check-certificate" not in captured["command"]
+    assert secret_cookie not in caplog.text
+    assert secret_proxy not in caplog.text
+    assert client.last_failure_reason == "yt-dlp download failed"
 
 
 def test_instagram_client_legacy_ytdlp_fallback_uses_active_python_module(

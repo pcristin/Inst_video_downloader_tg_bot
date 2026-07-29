@@ -268,11 +268,41 @@ class InstagramClient:
         response = requests.get(
             url,
             timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
+            stream=True,
         )
-        response.raise_for_status()
-        path.write_bytes(response.content)
-        if not path.exists() or path.stat().st_size <= 0:
-            raise RuntimeError("public media download produced an empty file")
+        max_bytes = settings.TELEGRAM_MAX_UPLOAD_BYTES
+        try:
+            response.raise_for_status()
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    declared_bytes = int(content_length)
+                except ValueError:
+                    declared_bytes = None
+                if declared_bytes is not None and declared_bytes > max_bytes:
+                    raise RuntimeError(
+                        f"public media exceeds the {max_bytes}-byte download limit"
+                    )
+
+            downloaded_bytes = 0
+            with path.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    downloaded_bytes += len(chunk)
+                    if downloaded_bytes > max_bytes:
+                        raise RuntimeError(
+                            f"public media exceeds the {max_bytes}-byte download limit"
+                        )
+                    output.write(chunk)
+
+            if downloaded_bytes <= 0:
+                raise RuntimeError("public media download produced an empty file")
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        finally:
+            response.close()
 
     @staticmethod
     def _merge_public_tracks(
@@ -1179,7 +1209,6 @@ class InstagramClient:
                 "--no-playlist",
                 "--format", "best[ext=mp4]/best",
                 "--quiet",
-                "--no-check-certificate",
                 "--user-agent", self.client.user_agent,
                 url
             ]
@@ -1206,8 +1235,11 @@ class InstagramClient:
                 return output_file
             else:
                 if result.stderr:
-                    self._record_failure(result.stderr)
-                    logger.warning(f"yt-dlp failed: {result.stderr}")
+                    self._record_failure("yt-dlp download failed")
+                    logger.warning(
+                        "yt-dlp download failed",
+                        extra={"return_code": result.returncode},
+                    )
                 if output_file.exists():
                     output_file.unlink()
                 return None
@@ -1262,7 +1294,10 @@ class InstagramClient:
                     logger.warning(f"Invalid video URL from yt-dlp: {type(video_url)}")
                     return None
             else:
-                logger.warning(f"yt-dlp failed: {result.stderr}")
+                logger.warning(
+                    "yt-dlp URL extraction failed",
+                    extra={"return_code": result.returncode},
+                )
                 return None
                 
         except subprocess.TimeoutExpired:

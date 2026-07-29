@@ -33,15 +33,9 @@ def check_environment() -> None:
     if not getattr(settings, "BOT_TOKEN"):
         missing_vars.append("BOT_TOKEN")
 
-    if settings.TELEGRAM_LOCAL_MODE:
-        if not settings.TELEGRAM_API_ID:
-            missing_vars.append("TELEGRAM_API_ID")
-        if not settings.TELEGRAM_API_HASH:
-            missing_vars.append("TELEGRAM_API_HASH")
-    
     # Instagram credentials are optional at startup.
-    # This allows Twitter/X-only operation without IG_USERNAME/IG_PASSWORD.
-    # Instagram downloads will still fail at request time if credentials are absent.
+    # Public posts and reels can use unauthenticated extraction; authenticated
+    # media still fails at request time when no usable account is available.
 
     if missing_vars:
         raise ValueError(
@@ -78,7 +72,9 @@ def main() -> None:
                 logger.info(manager.get_detailed_status())
                 logger.warning(
                     "Starting bot with no available Instagram accounts; "
-                    "Instagram downloads will fail until accounts recover or are replaced."
+                    "public Instagram extraction remains available, but stories, "
+                    "private or restricted media, and authenticated fallback will fail "
+                    "until accounts recover or are replaced."
                 )
         else:
             logger.info("Using single account mode")
