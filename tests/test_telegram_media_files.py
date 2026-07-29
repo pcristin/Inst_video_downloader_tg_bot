@@ -21,6 +21,57 @@ def test_local_upload_limit_uses_configured_500_mib():
     assert effective_upload_limit_bytes(True, 500 * 1024 * 1024) == 500 * 1024 * 1024
 
 
+@pytest.mark.parametrize(
+    "size_bytes",
+    [50 * 1024 * 1024 + 1, 500 * 1024 * 1024],
+)
+def test_local_mode_accepts_file_above_cloud_limit_through_500_mib(
+    tmp_path,
+    size_bytes,
+):
+    media_file = tmp_path / "large-video.mp4"
+    media_file.touch()
+    with media_file.open("r+b") as sparse_file:
+        sparse_file.truncate(size_bytes)
+
+    with media_input(
+        media_file,
+        local_mode=True,
+        max_upload_bytes=500 * 1024 * 1024,
+    ) as value:
+        assert value == media_file
+
+
+def test_local_mode_rejects_file_above_500_mib(tmp_path):
+    media_file = tmp_path / "too-large-video.mp4"
+    media_file.touch()
+    with media_file.open("r+b") as sparse_file:
+        sparse_file.truncate(500 * 1024 * 1024 + 1)
+
+    with pytest.raises(VideoDownloadError, match="file is too large"):
+        with media_input(
+            media_file,
+            local_mode=True,
+            max_upload_bytes=500 * 1024 * 1024,
+        ):
+            pass
+
+
+def test_cloud_mode_rejects_file_above_50_mib(tmp_path):
+    media_file = tmp_path / "cloud-too-large-video.mp4"
+    media_file.touch()
+    with media_file.open("r+b") as sparse_file:
+        sparse_file.truncate(50 * 1024 * 1024 + 1)
+
+    with pytest.raises(VideoDownloadError, match="file is too large"):
+        with media_input(
+            media_file,
+            local_mode=False,
+            max_upload_bytes=50 * 1024 * 1024,
+        ):
+            pass
+
+
 def test_media_input_returns_path_in_local_mode(tmp_path):
     media_file = tmp_path / "video.mp4"
     media_file.write_bytes(b"video")
