@@ -83,15 +83,31 @@ application credentials. Then validate and build the stack without migrating
 the bot yet:
 
 ```bash
+make local-prepare
 make local-config
 make local-build
 ```
+
+`local-prepare` creates or repairs `./temp` as `1000:1000` with mode `0750`.
+The bot keeps primary UID/GID `1000:1000`; Local Bot API keeps primary UID/GID
+`10001:10001` and receives only supplementary GID `1000`. This lets the API
+read bot-owned path uploads through its read-only `/app/temp` mount without
+making downloaded media world-accessible. The other `make local-*` startup
+targets run this preparation automatically.
 
 The Local Bot API service is reachable only from the Compose network. It shares
 `./temp` read-only, uses a 1 GiB `tmpfs` for transient server files, and rotates
 its container logs. Do not run `make local-up` until the bot has been logged out
 once from the cloud Bot API; running both sessions can make update delivery
 unreliable.
+
+For reliable direct delivery, the bot uploads local media to a private storage
+chat and sends the resulting Telegram `file_id` to the user. An explicit
+`TELEGRAM_MEDIA_STORAGE_CHAT_ID` takes precedence. When it is empty, the bot
+reuses `INLINE_STORAGE_CHAT_ID`, so an existing inline-storage deployment does
+not need a second chat setting. Path uploads still use Local Bot API and retain
+the application's one-file ceiling of `524288000` bytes (500 MiB); cloud mode
+remains capped at 50 MiB.
 
 After migration, use:
 
