@@ -16,12 +16,14 @@ This guide explains how to run the Instagram Video Downloader Bot using Docker.
    cd instagram-video-bot
    ```
 
-2. **Create environment file:**
+2. **Create environment and token files:**
    ```bash
    cp env.example .env
+   install -d -m 700 secrets
+   install -m 444 /dev/null secrets/telegram_bot_token
    ```
-   Edit `.env` and add your credentials:
-   - `BOT_TOKEN`: Your Telegram bot token
+   Put the Telegram bot token in `secrets/telegram_bot_token`. Edit `.env` and
+   leave `BOT_TOKEN` empty. Add any optional Instagram credentials there:
    - `IG_USERNAME`: Your Instagram username
    - `IG_PASSWORD`: Your Instagram password
 
@@ -67,15 +69,18 @@ instead of `.env`, because `.env` is loaded by the bot container:
 
 ```bash
 install -d -m 700 secrets
+install -m 444 /dev/null secrets/telegram_bot_token
 install -m 444 /dev/null secrets/telegram_api_id
 install -m 444 /dev/null secrets/telegram_api_hash
 ```
 
-Put only the numeric `api_id` in `secrets/telegram_api_id` and only the
-`api_hash` in `secrets/telegram_api_hash`. The files must be readable by the
-non-root API process, while the `0700` parent directory prevents other host
-users from traversing to them. Only the API service mounts these files. Then
-validate and build the stack without migrating the bot yet:
+Put only the bot token in `secrets/telegram_bot_token`, only the numeric
+`api_id` in `secrets/telegram_api_id`, and only the `api_hash` in
+`secrets/telegram_api_hash`. The files must be readable by their non-root
+service processes, while the `0700` parent directory prevents other host users
+from traversing to them. The bot mounts only its token; the API mounts only its
+application credentials. Then validate and build the stack without migrating
+the bot yet:
 
 ```bash
 make local-config

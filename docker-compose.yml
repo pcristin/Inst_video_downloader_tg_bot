@@ -23,6 +23,8 @@ services:
       # Mount accounts state directory to persist banned/usage status
       - ./account-state:/app/account-state
     secrets:
+      - source: telegram_bot_token
+        target: telegram_bot_token
       - source: instagram_auth
         target: instagram_auth.json
         uid: "1000"
@@ -34,6 +36,7 @@ services:
       - ACCOUNT_STATE_FILE=/app/account-state/accounts_state.json
       # Optional, when the read-only mount above is enabled:
       - IG_AUTH_COOKIES_FILE=/run/secrets/instagram_auth.json
+      - BOT_TOKEN_FILE=/run/secrets/telegram_bot_token
       # Additional environment variables for container
       - TZ=UTC
       - HOME=/tmp
@@ -54,5 +57,7 @@ services:
       start_period: 40s
 
 secrets:
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
   instagram_auth:
     file: ./secrets/instagram_auth.json

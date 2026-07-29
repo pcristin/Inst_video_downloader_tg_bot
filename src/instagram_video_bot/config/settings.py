@@ -5,11 +5,8 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from dotenv import load_dotenv
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-load_dotenv()
 
 class Settings(BaseSettings):
     """Application settings."""
@@ -19,6 +16,7 @@ class Settings(BaseSettings):
     
     # Bot settings
     BOT_TOKEN: str = ""
+    BOT_TOKEN_FILE: Optional[Path] = None
     BOT_OWNER_USER_ID: Optional[int] = None
     BOT_MIGRATION_TARGET_USERNAME: Optional[str] = None
     BOT_LEGACY_REDIRECT_MODE: bool = False
@@ -136,6 +134,20 @@ class Settings(BaseSettings):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        if self.BOT_TOKEN_FILE is not None:
+            if self.BOT_TOKEN:
+                raise ValueError(
+                    "Configure only one of BOT_TOKEN and BOT_TOKEN_FILE"
+                )
+            try:
+                token = self.BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            except OSError as error:
+                raise ValueError("BOT_TOKEN_FILE is not readable") from error
+            if not token or any(character.isspace() for character in token):
+                raise ValueError(
+                    "BOT_TOKEN_FILE must contain one non-empty token"
+                )
+            self.BOT_TOKEN = token
         # Ensure directories exist
         self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
         self.CACHE_DIR.mkdir(parents=True, exist_ok=True)
