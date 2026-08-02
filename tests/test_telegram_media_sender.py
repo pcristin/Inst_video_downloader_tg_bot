@@ -250,6 +250,10 @@ async def test_media_sender_passes_path_to_local_bot_api(monkeypatch, tmp_path):
         "TELEGRAM_LOCAL_MODE",
         True,
     )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_media_sender.settings.TEMP_DIR",
+        tmp_path,
+    )
 
     await sender.send_media(
         _FakeContext(fake_bot),

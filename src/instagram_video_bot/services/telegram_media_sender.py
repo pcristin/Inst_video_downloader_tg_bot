@@ -171,6 +171,7 @@ class TelegramMediaSender:
                     settings.TELEGRAM_LOCAL_MODE,
                     settings.TELEGRAM_MAX_UPLOAD_BYTES,
                 ),
+                shared_root=settings.TEMP_DIR,
             ) as media_file:
                 return await self._send_single_media_value(
                     context,
@@ -342,6 +343,7 @@ class TelegramMediaSender:
                                 settings.TELEGRAM_LOCAL_MODE,
                                 settings.TELEGRAM_MAX_UPLOAD_BYTES,
                             ),
+                            shared_root=settings.TEMP_DIR,
                         )
                     )
                 item_caption = caption if index == 0 else None

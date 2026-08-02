@@ -61,6 +61,8 @@ def is_retriable_telegram_delivery_error(
 ) -> bool:
     if _is_file_too_large_error(error):
         return False
+    if isinstance(error, BadRequest):
+        return False
     if isinstance(error, RetryAfter):
         return True
     if retry_network_errors and isinstance(error, (NetworkError, TimedOut)):

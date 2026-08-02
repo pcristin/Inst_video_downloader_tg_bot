@@ -54,6 +54,12 @@ def test_bad_request_is_not_an_ambiguous_delivery_outcome():
     assert telegram_media_retry.is_ambiguous_telegram_delivery_error(error) is False
 
 
+def test_bad_request_is_not_retried_as_a_transient_network_error():
+    error = BadRequest("Can't get stat about the file")
+
+    assert is_retriable_telegram_delivery_error(error) is False
+
+
 @pytest.mark.parametrize(
     "error",
     [TimedOut("timed out"), NetworkError("httpx.ReadError")],

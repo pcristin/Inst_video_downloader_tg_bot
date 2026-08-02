@@ -1,3 +1,4 @@
+import stat
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,37 @@ def test_media_input_returns_path_in_local_mode(tmp_path):
     with media_input(media_file, local_mode=True, max_upload_bytes=100) as value:
         assert value == media_file
         assert isinstance(value, Path)
+
+
+def test_local_media_input_grants_shared_group_access_to_nested_media(tmp_path):
+    shared_root = tmp_path / "shared"
+    provider_dir = shared_root / "result_cache" / "instagram"
+    provider_dir.mkdir(parents=True)
+    shared_root.chmod(0o750)
+    (shared_root / "result_cache").chmod(0o700)
+    provider_dir.chmod(0o700)
+    media_file = provider_dir / "video.mp4"
+    media_file.write_bytes(b"video")
+    media_file.chmod(0o600)
+
+    with media_input(
+        media_file,
+        local_mode=True,
+        max_upload_bytes=100,
+        shared_root=shared_root,
+    ) as value:
+        assert value == media_file.resolve()
+
+    assert (shared_root.stat().st_mode & stat.S_IRWXG) == (
+        stat.S_IRGRP | stat.S_IXGRP
+    )
+    assert ((shared_root / "result_cache").stat().st_mode & stat.S_IRWXG) == (
+        stat.S_IRGRP | stat.S_IXGRP
+    )
+    assert (provider_dir.stat().st_mode & stat.S_IRWXG) == (
+        stat.S_IRGRP | stat.S_IXGRP
+    )
+    assert media_file.stat().st_mode & stat.S_IRGRP
 
 
 def test_media_input_opens_binary_stream_in_cloud_mode(tmp_path):

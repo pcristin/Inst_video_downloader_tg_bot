@@ -42,6 +42,7 @@ class TelegramMediaStager:
                     settings.TELEGRAM_LOCAL_MODE,
                     settings.TELEGRAM_MAX_UPLOAD_BYTES,
                 ),
+                shared_root=settings.TEMP_DIR,
             ) as media_file:
                 if media_item.media_type == "video":
                     return await bot.send_video(
