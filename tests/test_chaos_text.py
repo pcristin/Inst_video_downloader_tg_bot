@@ -99,3 +99,14 @@ def test_ambiguous_delivery_warns_about_duplicates_without_retry_prompt():
 
     assert "may have delivered" in text
     assert "avoid a duplicate" in text
+
+
+def test_nonretryable_telegram_failure_does_not_invite_retry():
+    details = FailureDetails(FailureReason.TELEGRAM_DELIVERY, retryable=False)
+
+    assert ChaosText.failure(details, language_code="en") == (
+        "Telegram rejected the media. Retrying will not help."
+    )
+    assert ChaosText.failure(details, language_code="ru") == (
+        "Telegram отклонил медиа. Повтор не поможет."
+    )

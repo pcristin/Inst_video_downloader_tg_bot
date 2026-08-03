@@ -10,6 +10,7 @@ from telegram import InputMediaPhoto, InputMediaVideo
 
 from ..config.settings import settings
 from .download_models import VideoInfo
+from .telegram_media_files import effective_upload_limit_bytes, media_input
 from .telegram_media_retry import (
     build_telegram_timeout_kwargs,
     call_telegram_with_retries,
@@ -44,7 +45,15 @@ async def upload_first_media_to_storage(
     if first.media_type == "photo":
 
         async def send_photo_with_fresh_file(**telegram_timeout_kwargs):
-            with first.file_path.open("rb") as media_file:
+            with media_input(
+                first.file_path,
+                local_mode=settings.TELEGRAM_LOCAL_MODE,
+                max_upload_bytes=effective_upload_limit_bytes(
+                    settings.TELEGRAM_LOCAL_MODE,
+                    settings.TELEGRAM_MAX_UPLOAD_BYTES,
+                ),
+                shared_root=settings.TEMP_DIR,
+            ) as media_file:
                 return await bot.send_photo(
                     chat_id=storage_chat_id,
                     photo=media_file,
@@ -68,7 +77,15 @@ async def upload_first_media_to_storage(
         )
 
     async def send_video_with_fresh_file(**telegram_timeout_kwargs):
-        with first.file_path.open("rb") as media_file:
+        with media_input(
+            first.file_path,
+            local_mode=settings.TELEGRAM_LOCAL_MODE,
+            max_upload_bytes=effective_upload_limit_bytes(
+                settings.TELEGRAM_LOCAL_MODE,
+                settings.TELEGRAM_MAX_UPLOAD_BYTES,
+            ),
+            shared_root=settings.TEMP_DIR,
+        ) as media_file:
             return await bot.send_video(
                 chat_id=storage_chat_id,
                 video=media_file,

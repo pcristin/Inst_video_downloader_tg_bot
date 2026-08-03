@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import Chat, Message, Update, User
-from telegram.error import NetworkError
+from telegram.error import BadRequest, NetworkError
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.state_store import StateStore
@@ -43,6 +43,22 @@ async def test_global_error_handler_handles_network_error(telegram_bot_factory):
     context = SimpleNamespace(error=NetworkError("Bad Gateway"))
 
     await bot._global_error_handler(update=None, context=context)
+
+
+@pytest.mark.asyncio
+async def test_global_error_handler_logs_bad_request_as_api_rejection(
+    caplog, telegram_bot_factory
+):
+    bot = telegram_bot_factory()
+    context = SimpleNamespace(error=BadRequest("Can't get stat about the file"))
+
+    with caplog.at_level(logging.WARNING):
+        await bot._global_error_handler(update=None, context=context)
+
+    record = caplog.records[-1]
+    assert record.levelno == logging.ERROR
+    assert record.failure_class == "telegram_bad_request"
+    assert record.message == "Telegram API request rejected"
 
 
 def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):

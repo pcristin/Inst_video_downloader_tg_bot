@@ -21,7 +21,7 @@ from telegram import (
     Message,
     Update,
 )
-from telegram.error import NetworkError, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
@@ -71,6 +71,7 @@ from .telegram_inline_sessions import (
 from .telegram_media_retry import (
     classify_telegram_delivery_error,
     is_ambiguous_telegram_delivery_error,
+    is_retriable_telegram_delivery_error,
 )
 from .telegram_media_sender import RejectedTelegramFileIdError, TelegramMediaSender
 from .telegram_media_stager import TelegramMediaStager
@@ -1421,11 +1422,13 @@ class TelegramBot:
                 exc,
                 failure_stage=failure_stage,
             )
-            delivery_unknown = failure_stage == "inline_edit" and isinstance(
-                exc, NetworkError
+            delivery_unknown = (
+                failure_stage == "inline_edit"
+                and is_ambiguous_telegram_delivery_error(exc)
             )
             retryable = (
-                failure_stage == "storage_upload" and isinstance(exc, NetworkError)
+                failure_stage == "storage_upload"
+                and is_retriable_telegram_delivery_error(exc)
             ) or (
                 failure_stage == "download"
                 and isinstance(exc, DownloadError)
@@ -2102,6 +2105,15 @@ class TelegramBot:
     ) -> None:
         """Handle unhandled Telegram polling/runtime exceptions."""
         error = context.error
+        if isinstance(error, BadRequest):
+            logger.error(
+                "Telegram API request rejected",
+                extra={
+                    "failure_class": classify_telegram_delivery_error(error),
+                    "error": str(error),
+                },
+            )
+            return
         if isinstance(error, NetworkError):
             logger.warning(
                 "Transient Telegram network error",

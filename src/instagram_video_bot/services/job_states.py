@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 
 from .download_models import AuthenticationError
+from .telegram_media_retry import is_retriable_telegram_delivery_error
 
 
 class JobState(str, Enum):
@@ -60,6 +61,8 @@ def classify_failure(
 
     if stage is FailureStage.DELIVERY and ambiguous_delivery:
         return FailureDetails(FailureReason.DELIVERY_AMBIGUOUS, retryable=False)
+    if stage is FailureStage.DELIVERY and isinstance(error, BadRequest):
+        return FailureDetails(FailureReason.TELEGRAM_DELIVERY, retryable=False)
 
     text = str(error).lower()
     class_name = error.__class__.__name__.lower()
@@ -111,7 +114,11 @@ def classify_failure(
     if stage is FailureStage.DELIVERY:
         return FailureDetails(
             FailureReason.TELEGRAM_DELIVERY,
-            retryable=True,
+            retryable=(
+                is_retriable_telegram_delivery_error(error)
+                if isinstance(error, TelegramError)
+                else True
+            ),
         )
 
     if isinstance(error, NetworkError) or _contains_any(

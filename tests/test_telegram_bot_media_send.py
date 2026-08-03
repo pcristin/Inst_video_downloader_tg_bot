@@ -574,7 +574,9 @@ async def test_delivery_timeout_records_unknown_outcome_without_failing_download
 async def test_bad_request_records_definite_user_send_failure(tmp_path):
     store = StateStore(tmp_path / "state.db")
     telegram_bot = TelegramBot(state_store=store)
-    request_context = _make_request_context(_FakeStatusMessage())
+    status_message = _FakeStatusMessage()
+    request_context = _make_request_context(status_message)
+    request_context.language_code = "en"
     video_file = tmp_path / "video.mp4"
     video_file.write_bytes(b"video")
     result_future = asyncio.get_running_loop().create_future()
@@ -659,12 +661,16 @@ async def test_bad_request_records_definite_user_send_failure(tmp_path):
     assert dict(request) == {
         "status": "failed",
         "failure_reason": "telegram_delivery",
-        "retryable": 1,
+        "retryable": 0,
     }
     assert dict(metrics) == {
         "delivery_status": "failed",
         "delivery_error_class": "BadRequest",
     }
+    assert status_message.texts[-1] == (
+        "Telegram rejected the media. Retrying will not help."
+    )
+    assert status_message.edit_kwargs[-1]["reply_markup"] is None
 
 
 @pytest.mark.asyncio

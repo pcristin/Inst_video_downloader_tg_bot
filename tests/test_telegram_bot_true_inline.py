@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import InputInvoiceMessageContent
-from telegram.error import NetworkError, TelegramError
+from telegram.error import BadRequest, NetworkError, TelegramError
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.download_models import (
@@ -1352,6 +1352,70 @@ async def test_inline_delivery_records_storage_upload_failure_metadata(
 
 
 @pytest.mark.asyncio
+async def test_inline_storage_bad_request_is_failed_without_retry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "CACHE_DIR", tmp_path / "cache")
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+
+    class FakeDownloader:
+        async def download_video(self, original_url, target_dir):
+            media_file = target_dir / "video.mp4"
+            media_file.write_bytes(b"video")
+            return VideoInfo(
+                file_path=media_file,
+                title="Title",
+                media_items=[MediaItem(file_path=media_file, media_type="video")],
+                primary_media_type="video",
+            )
+
+    async def failing_upload(*args, **kwargs):
+        raise BadRequest("Can't get stat about the file")
+
+    edits = []
+
+    async def edit_message_text(**kwargs):
+        edits.append(kwargs)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader", FakeDownloader
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.upload_first_media_to_storage",
+        failing_upload,
+    )
+
+    bot = TelegramBot(state_store=store)
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=SimpleNamespace(edit_message_text=edit_message_text)),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "failed"
+    assert session["failure_stage"] == "storage_upload"
+    assert session["failure_class"] == "telegram_bad_request"
+    assert session["error_class"] == "BadRequest"
+    assert session["failure_retryable"] == 0
+    assert edits[-1]["text"] == (
+        "Inline delivery failed. If this was a one-time payment, it was refunded."
+    )
+    assert edits[-1]["reply_markup"] is None
+
+
+@pytest.mark.asyncio
 async def test_inline_edit_network_failure_is_unknown_without_retry_or_refund(
     monkeypatch, tmp_path
 ):
@@ -1410,6 +1474,56 @@ async def test_inline_edit_network_failure_is_unknown_without_retry_or_refund(
         "text": (
             "Telegram may have delivered this media. Retry is disabled to prevent "
             "duplicates."
+        ),
+        "reply_markup": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_inline_edit_bad_request_is_definite_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    store = StateStore(tmp_path / "state.db")
+    store.create_inline_session(
+        session_token="s1",
+        user_id=1001,
+        original_url="https://www.instagram.com/reel/abc/",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        provider="instagram",
+        provider_label="Instagram",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+    )
+    store.attach_inline_message("s1", inline_message_id="inline-msg")
+    store.save_inline_cached_media(
+        cache_key=_inline_media_cache_key(
+            "instagram", "https://www.instagram.com/reel/abc/"
+        ),
+        provider="instagram",
+        normalized_url="https://www.instagram.com/reel/abc/",
+        media_items=[
+            {"media_type": "video", "file_id": "video-file-id", "caption": "Caption"}
+        ],
+    )
+    bot = TelegramBot(state_store=store)
+    fake_bot = _InlineActionTelegramBot(
+        media_error=BadRequest("Wrong file identifier/HTTP URL specified")
+    )
+
+    await bot._deliver_inline_session(
+        SimpleNamespace(bot=fake_bot),
+        session_token="s1",
+        one_time_payment_id=None,
+    )
+
+    session = store.get_inline_session("s1")
+    assert session["status"] == "failed"
+    assert session["failure_stage"] == "inline_edit"
+    assert session["failure_class"] == "telegram_bad_request"
+    assert session["error_class"] == "BadRequest"
+    assert session["failure_retryable"] == 0
+    assert fake_bot.edited_text[-1] == {
+        "inline_message_id": "inline-msg",
+        "text": (
+            "Inline delivery failed. If this was a one-time payment, it was refunded."
         ),
         "reply_markup": None,
     }

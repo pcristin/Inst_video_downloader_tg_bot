@@ -280,6 +280,14 @@ class ChaosText:
     ) -> str:
         """Render a typed failure without exposing provider exception text."""
 
+        if (
+            details.reason is FailureReason.TELEGRAM_DELIVERY
+            and not details.retryable
+        ):
+            if language_code == "en":
+                return "Telegram rejected the media. Retrying will not help."
+            return "Telegram отклонил медиа. Повтор не поможет."
+
         if language_code == "en":
             messages = {
                 FailureReason.UNSUPPORTED_URL: "This link is not supported.",

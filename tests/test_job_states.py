@@ -1,4 +1,5 @@
-from telegram.error import NetworkError
+import pytest
+from telegram.error import BadRequest, NetworkError
 
 from src.instagram_video_bot.services.job_states import (
     FailureDetails,
@@ -57,3 +58,22 @@ def test_definitely_failed_delivery_is_retryable():
 
     assert details.reason is FailureReason.TELEGRAM_DELIVERY
     assert details.retryable is True
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "query is too old and response timeout expired",
+        "chat not found",
+        "too many requests for this method",
+    ],
+)
+def test_bad_request_delivery_is_not_retryable_regardless_of_message(message):
+    details = classify_failure(
+        BadRequest(message),
+        stage=FailureStage.DELIVERY,
+        ambiguous_delivery=False,
+    )
+
+    assert details.reason is FailureReason.TELEGRAM_DELIVERY
+    assert details.retryable is False

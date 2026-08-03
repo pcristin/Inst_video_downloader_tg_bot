@@ -48,6 +48,12 @@ def test_classify_telegram_delivery_error_marks_timeout_transient():
     assert classify_telegram_delivery_error(TimedOut("timed out")) == "telegram_timeout"
 
 
+def test_classify_telegram_delivery_error_marks_bad_request_deterministic():
+    error = BadRequest("Can't get stat about the file")
+
+    assert classify_telegram_delivery_error(error) == "telegram_bad_request"
+
+
 def test_bad_request_is_not_an_ambiguous_delivery_outcome():
     error = BadRequest("Can't get stat about the file")
 

@@ -42,6 +42,8 @@ def build_telegram_timeout_kwargs(
 def classify_telegram_delivery_error(error: Exception) -> str:
     if _is_file_too_large_error(error):
         return "telegram_file_too_large"
+    if isinstance(error, BadRequest):
+        return "telegram_bad_request"
     if isinstance(error, TimedOut):
         return "telegram_timeout"
     if isinstance(error, RetryAfter):

@@ -1,4 +1,5 @@
 import datetime as dtm
+import stat
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -83,6 +84,71 @@ def _configure_fast_retry_timeouts(monkeypatch):
     monkeypatch.setattr(app_settings, "TELEGRAM_MEDIA_WRITE_TIMEOUT_SECONDS", 34.0)
     monkeypatch.setattr(app_settings, "TELEGRAM_MEDIA_CONNECT_TIMEOUT_SECONDS", 5.0)
     monkeypatch.setattr(app_settings, "TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS", 6.0)
+
+
+@pytest.mark.parametrize(
+    ("media_type", "suffix", "media_kwarg", "file_id"),
+    [
+        ("video", ".mp4", "video", "local-video-file-id"),
+        ("photo", ".jpg", "photo", "local-photo-file-id"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_inline_storage_upload_uses_shared_local_media_path(
+    monkeypatch, tmp_path, media_type, suffix, media_kwarg, file_id
+):
+    shared_root = tmp_path / "shared"
+    media_dir = shared_root / "result_cache" / "inline" / "session"
+    shared_directories = [
+        shared_root,
+        shared_root / "result_cache",
+        shared_root / "result_cache" / "inline",
+        media_dir,
+    ]
+    media_dir.mkdir(parents=True)
+    for directory in shared_directories:
+        directory.chmod(0o700)
+    media_file = media_dir / f"media{suffix}"
+    media_file.write_bytes(b"media")
+    media_file.chmod(0o600)
+    monkeypatch.setattr(app_settings, "TEMP_DIR", shared_root)
+    monkeypatch.setattr(app_settings, "TELEGRAM_LOCAL_MODE", True)
+
+    class CaptureLocalPathBot:
+        def __init__(self):
+            self.calls = []
+
+        async def send_video(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                video=SimpleNamespace(file_id=file_id), photo=None
+            )
+
+        async def send_photo(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                video=None, photo=[SimpleNamespace(file_id=file_id)]
+            )
+
+    info = VideoInfo(
+        file_path=media_file,
+        title="Title",
+        media_items=[MediaItem(file_path=media_file, media_type=media_type)],
+        primary_media_type=media_type,
+    )
+    bot = CaptureLocalPathBot()
+
+    item = await upload_first_media_to_storage(
+        bot, storage_chat_id=-100, video_info=info
+    )
+
+    assert item.file_id == file_id
+    assert bot.calls[0][media_kwarg] == media_file.resolve()
+    assert stat.S_IMODE(media_file.stat().st_mode) & stat.S_IRGRP
+    for directory in shared_directories:
+        mode = stat.S_IMODE(directory.stat().st_mode)
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IXGRP
 
 
 @pytest.mark.asyncio
