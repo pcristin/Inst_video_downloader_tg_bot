@@ -308,7 +308,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = "==25.1.0" },
-    { name = "instagrapi", specifier = "==2.16.1" },
+    { name = "instagrapi", specifier = "==2.18.17" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "pydantic", specifier = "==2.13.4" },
     { name = "pydantic-settings", specifier = "==2.14.2" },
@@ -317,7 +317,7 @@ requires-dist = [
     { name = "python-telegram-bot", specifier = "==22.8" },
     { name = "requests", specifier = "==2.34.2" },
     { name = "tabulate", specifier = "==0.10.0" },
-    { name = "yt-dlp", specifier = "==2026.7.4" },
+    { name = "yt-dlp", specifier = "==2026.8.19" },
 ]
 
 [package.metadata.requires-dev]
@@ -332,7 +332,7 @@ dev = [
 
 [[package]]
 name = "instagrapi"
-version = "2.16.1"
+version = "2.18.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pillow", marker = "sys_platform != 'android'" },
@@ -341,9 +341,9 @@ dependencies = [
     { name = "pysocks", marker = "sys_platform != 'android'" },
     { name = "requests", marker = "sys_platform != 'android'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/c7/6f41418b4b96cdb2ba8f90ef14e37bff926ff6a1c231e6d5171e2f7d9327/instagrapi-2.16.1.tar.gz", hash = "sha256:d1fce25725fdc9e7d4705635523f2de16eb7d3fca065e901c9c5e6e45f29c020", size = 205034, upload-time = "2026-06-18T11:09:30.847Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/56/4863849ad06cce158cc285cd2e42b6681bca29e5b2e0871020e246060c1a/instagrapi-2.18.17.tar.gz", hash = "sha256:284f8102ad3ecaa415fd037f49f258c7885962680bdf530c91e3ea62b0b7ac28", size = 225546, upload-time = "2026-08-22T12:06:12.563Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/2e/53fa82505855508678f834ed1a44d7e1f40c2629f6c98b5e6e15b98275b3/instagrapi-2.16.1-py3-none-any.whl", hash = "sha256:5881078330d0d357624e880c3b7ffb3f2e1eed7ec574ce5a24e3d49a4c752e62", size = 222161, upload-time = "2026-06-18T11:09:29.326Z" },
+    { url = "https://files.pythonhosted.org/packages/9f/13/93706a920eaa8f27eb10f29b6de88cade7195bcb07e59a6b2d74b329296a/instagrapi-2.18.17-py3-none-any.whl", hash = "sha256:6741337fb5255e85b72675657364796d1671f2a919b48cae0667b72812ed8622", size = 243859, upload-time = "2026-08-22T12:06:10.848Z" },
 ]
 
 [[package]]
@@ -962,9 +962,9 @@ wheels = [
 
 [[package]]
 name = "yt-dlp"
-version = "2026.7.4"
+version = "2026.8.19"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/c5/9972af4b472b0d55badf841ebafd2f98944cb0ae0f46e11d01f363ea5b91/yt_dlp-2026.7.4.tar.gz", hash = "sha256:b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432", size = 3049326, upload-time = "2026-07-04T22:42:14.837Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/e0/832fa4ca334b766a06933a196066edc3dba37cdb6f14cd98d59bcc69a4b4/yt_dlp-2026.8.19.tar.gz", hash = "sha256:9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1", size = 3052025, upload-time = "2026-08-19T23:48:59.291Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/8a/cd4c9b02c10c563adfe78118310129641900e1cd6de888cfae2452072696/yt_dlp-2026.7.4-py3-none-any.whl", hash = "sha256:f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266", size = 3184705, upload-time = "2026-07-04T22:42:12.989Z" },
+    { url = "https://files.pythonhosted.org/packages/69/b2/8cd1613f56eed7ceb64fbd4df3f1c01246bfb098e6f398228bafda22b80b/yt_dlp-2026.8.19-py3-none-any.whl", hash = "sha256:1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf", size = 3185533, upload-time = "2026-08-19T23:48:56.925Z" },
 ]

@@ -1,8 +1,36 @@
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
 from src.instagram_video_bot import __main__ as main_module
+
+
+def test_package_opts_into_ptb_timedelta_before_telegram_import():
+    env = os.environ.copy()
+    env.pop("PTB_TIMEDELTA", None)
+    script = """
+from datetime import timedelta
+import warnings
+
+import src.instagram_video_bot
+from telegram.error import RetryAfter
+from telegram.warnings import PTBDeprecationWarning
+
+warnings.simplefilter("error", PTBDeprecationWarning)
+assert isinstance(RetryAfter(3).retry_after, timedelta)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_check_environment_requires_bot_token(monkeypatch):
