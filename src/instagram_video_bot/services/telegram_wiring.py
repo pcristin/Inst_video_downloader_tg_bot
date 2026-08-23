@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -89,10 +90,36 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
         send_inline_promo_refund_announcement_once,
     )
 
+    post_deploy_task: asyncio.Task[None] | None = None
+
     async def _post_init(application: Application) -> None:
+        nonlocal post_deploy_task
         await _diagnose_group_privacy(application.bot)
         if has_inline_post_init or has_migration_post_init:
-            application.create_task(_run_post_deploy_tasks(application))
+            post_deploy_task = asyncio.create_task(
+                _run_post_deploy_tasks_safely(application),
+                name="post-deploy-notifications",
+            )
+
+    async def _post_stop(_application: Application) -> None:
+        nonlocal post_deploy_task
+        if post_deploy_task is None:
+            return
+        if not post_deploy_task.done():
+            post_deploy_task.cancel()
+        try:
+            await post_deploy_task
+        except asyncio.CancelledError:
+            pass
+        post_deploy_task = None
+
+    async def _run_post_deploy_tasks_safely(application: Application) -> None:
+        try:
+            await _run_post_deploy_tasks(application)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await application.process_error(update=None, error=error)
 
     async def _run_post_deploy_tasks(application: Application) -> None:
         if has_inline_post_init:
@@ -113,7 +140,7 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
             )
             logger.info("Bot migration announcement result: %s", migration_result)
 
-    return builder.post_init(_post_init)
+    return builder.post_init(_post_init).post_stop(_post_stop).post_shutdown(_post_stop)
 
 
 def _register_legacy_redirect_handlers(application: Application, bot: Any) -> None:

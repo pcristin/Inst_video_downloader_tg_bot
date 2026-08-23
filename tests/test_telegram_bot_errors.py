@@ -1,13 +1,16 @@
 import asyncio
 import logging
+import warnings
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from telegram import Chat, Message, Update, User
 from telegram.error import BadRequest, NetworkError
+from telegram.warnings import PTBUserWarning
 
 from src.instagram_video_bot.config.settings import settings
+from src.instagram_video_bot.services import telegram_wiring
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
 from src.instagram_video_bot.services.telegram_wiring import _diagnose_group_privacy
@@ -94,6 +97,12 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
 
         def post_init(self, callback):
             registered["post_init"] = callback
+            return self
+
+        def post_stop(self, _callback):
+            return self
+
+        def post_shutdown(self, _callback):
             return self
 
         def build(self):
@@ -216,72 +225,161 @@ async def test_group_privacy_diagnostic_warns_when_plain_group_messages_are_hidd
 
 
 @pytest.mark.asyncio
-async def test_inline_announcement_post_init_schedules_background_task(
+async def test_post_deploy_task_is_owned_without_ptb_startup_warning(
     monkeypatch, telegram_bot_factory
 ):
-    registered = {
-        "post_init": None,
-        "scheduled": None,
-    }
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
 
-    class FakeApplication:
-        bot = object()
-
-        def add_handler(self, _handler):
-            pass
-
-        def add_error_handler(self, _handler):
-            pass
-
-        def create_task(self, coroutine):
-            registered["scheduled"] = coroutine
-            return SimpleNamespace()
-
-        def run_polling(self):
-            pass
-
-    class FakeBuilder:
-        def token(self, _token):
-            return self
-
-        def concurrent_updates(self, _updates):
-            return self
-
-        def connection_pool_size(self, _size):
-            return self
-
-        def media_write_timeout(self, _timeout):
-            return self
-
-        def post_init(self, callback):
-            registered["post_init"] = callback
-            return self
-
-        def build(self):
-            return FakeApplication()
+    async def skip_group_privacy_diagnostic(_telegram_bot):
+        return None
 
     async def slow_announcement(_bot, _state_store):
-        await asyncio.sleep(999)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
 
     monkeypatch.setattr(
-        "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
-        lambda: FakeBuilder(),
+        telegram_wiring, "_diagnose_group_privacy", skip_group_privacy_diagnostic
     )
     monkeypatch.setattr(
         "src.instagram_video_bot.services.post_deploy_notifications.send_inline_mode_announcement_once",
         slow_announcement,
     )
-    monkeypatch.setattr(settings, "BOT_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "INLINE_MODE_ENABLED", True)
     monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
     monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", None)
 
     bot = telegram_bot_factory()
-    bot.run()
+    application = telegram_wiring._configure_post_init(
+        telegram_wiring.ApplicationBuilder().token("test-token"), bot
+    ).build()
+    tasks_before = set(asyncio.all_tasks())
 
-    await registered["post_init"](bot.application)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", PTBUserWarning)
+            await application.post_init(application)
+        await asyncio.wait_for(started.wait(), timeout=1)
 
-    assert registered["scheduled"] is not None
-    registered["scheduled"].close()
+        startup_warnings = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, PTBUserWarning)
+        ]
+        assert startup_warnings == []
+        assert application.post_stop is not None
+
+        await application.post_stop(application)
+        await application.post_shutdown(application)
+
+        assert cancelled.is_set()
+    finally:
+        remaining_tasks = [
+            task for task in set(asyncio.all_tasks()) - tasks_before if not task.done()
+        ]
+        for task in remaining_tasks:
+            task.cancel()
+        if remaining_tasks:
+            await asyncio.gather(*remaining_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_post_deploy_task_failure_reaches_application_error_handlers(
+    monkeypatch, telegram_bot_factory
+):
+    class PostDeployFailure(Exception):
+        pass
+
+    handled = asyncio.Event()
+
+    async def skip_group_privacy_diagnostic(_telegram_bot):
+        return None
+
+    async def failing_announcement(_bot, _state_store):
+        raise PostDeployFailure("announcement failed")
+
+    async def error_handler(_update, context):
+        if isinstance(context.error, PostDeployFailure):
+            handled.set()
+
+    monkeypatch.setattr(
+        telegram_wiring, "_diagnose_group_privacy", skip_group_privacy_diagnostic
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.post_deploy_notifications.send_inline_mode_announcement_once",
+        failing_announcement,
+    )
+    monkeypatch.setattr(settings, "INLINE_MODE_ENABLED", True)
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", None)
+
+    bot = telegram_bot_factory()
+    application = telegram_wiring._configure_post_init(
+        telegram_wiring.ApplicationBuilder().token("test-token"), bot
+    ).build()
+    application.add_error_handler(error_handler)
+
+    await application.post_init(application)
+    try:
+        await asyncio.wait_for(handled.wait(), timeout=1)
+    finally:
+        await application.post_stop(application)
+
+
+@pytest.mark.asyncio
+async def test_post_shutdown_cleans_task_when_application_never_starts(
+    monkeypatch, telegram_bot_factory
+):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def skip_group_privacy_diagnostic(_telegram_bot):
+        return None
+
+    async def slow_announcement(_bot, _state_store):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(
+        telegram_wiring, "_diagnose_group_privacy", skip_group_privacy_diagnostic
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.post_deploy_notifications.send_inline_mode_announcement_once",
+        slow_announcement,
+    )
+    monkeypatch.setattr(settings, "INLINE_MODE_ENABLED", True)
+    monkeypatch.setattr(settings, "INLINE_STORAGE_CHAT_ID", -100)
+    monkeypatch.setattr(settings, "BOT_MIGRATION_TARGET_USERNAME", None)
+
+    bot = telegram_bot_factory()
+    application = telegram_wiring._configure_post_init(
+        telegram_wiring.ApplicationBuilder().token("test-token"), bot
+    ).build()
+    tasks_before = set(asyncio.all_tasks())
+
+    try:
+        await application.post_init(application)
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        assert application.post_shutdown is not None
+
+        await application.post_shutdown(application)
+
+        assert cancelled.is_set()
+    finally:
+        remaining_tasks = [
+            task for task in set(asyncio.all_tasks()) - tasks_before if not task.done()
+        ]
+        for task in remaining_tasks:
+            task.cancel()
+        if remaining_tasks:
+            await asyncio.gather(*remaining_tasks, return_exceptions=True)
 
 
 def test_legacy_redirect_mode_registers_only_redirect_handlers(
@@ -319,6 +417,12 @@ def test_legacy_redirect_mode_registers_only_redirect_handlers(
 
         def post_init(self, callback):
             registered["post_init"] = callback
+            return self
+
+        def post_stop(self, _callback):
+            return self
+
+        def post_shutdown(self, _callback):
             return self
 
         def build(self):
@@ -382,6 +486,12 @@ def test_group_privacy_post_init_is_registered_without_inline_storage(
             registered["post_init"] = callback
             return self
 
+        def post_stop(self, _callback):
+            return self
+
+        def post_shutdown(self, _callback):
+            return self
+
         def build(self):
             return FakeApplication()
 
@@ -405,8 +515,11 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
 ):
     registered = {
         "post_init": None,
-        "scheduled": None,
+        "post_stop": None,
+        "post_shutdown": None,
     }
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
 
     class FakeApplication:
         bot = object()
@@ -416,10 +529,6 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
 
         def add_error_handler(self, _handler):
             pass
-
-        def create_task(self, coroutine):
-            registered["scheduled"] = coroutine
-            return SimpleNamespace()
 
         def run_polling(self):
             pass
@@ -441,12 +550,24 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
             registered["post_init"] = callback
             return self
 
+        def post_stop(self, callback):
+            registered["post_stop"] = callback
+            return self
+
+        def post_shutdown(self, callback):
+            registered["post_shutdown"] = callback
+            return self
+
         def build(self):
             return FakeApplication()
 
     async def slow_migration_announcement(_bot, _state_store, *, target_username):
         assert target_username == "igclipbot"
-        await asyncio.sleep(999)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
 
     monkeypatch.setattr(
         "src.instagram_video_bot.services.telegram_wiring.ApplicationBuilder",
@@ -464,6 +585,11 @@ async def test_migration_announcement_post_init_registers_without_inline_storage
     bot.run()
 
     await registered["post_init"](bot.application)
+    await asyncio.wait_for(started.wait(), timeout=1)
 
-    assert registered["scheduled"] is not None
-    registered["scheduled"].close()
+    assert registered["post_stop"] is not None
+    assert registered["post_shutdown"] is not None
+
+    await registered["post_stop"](bot.application)
+
+    assert cancelled.is_set()
