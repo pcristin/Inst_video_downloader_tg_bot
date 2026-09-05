@@ -361,3 +361,25 @@ def test_download_media_explicit_proxy_preserves_single_proxy_path(tmp_path, mon
     assert len(download_commands) == 1
     assert download_commands[0][-2:] == ["--proxy", explicit_proxy]
     assert commands[-1][-2:] == ["--proxy", explicit_proxy]
+
+
+def test_title_timeout_does_not_discard_downloaded_media(tmp_path, monkeypatch):
+    downloader = TwitterDownloader(timeout_seconds=5)
+    media_file = tmp_path / "photo.jpg"
+    media_file.write_bytes(b"photo")
+    monkeypatch.setattr(downloader, "_run_download_attempt", lambda *args: [media_file])
+    monkeypatch.setattr(downloader, "_build_base_command", lambda: ["yt-dlp"])
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("yt-dlp", 5)
+
+    monkeypatch.setattr(twitter_downloader.subprocess, "run", timeout)
+    result = downloader._download_media_sync("https://x.com/example/status/123", tmp_path)
+    assert result.title == ""
+    assert result.media_items == [TwitterMediaItem(media_file, "photo")]
+
+
+def test_default_command_uses_photo_aware_extractor():
+    assert TwitterDownloader()._build_base_command()[-2:] == [
+        "-m", "src.instagram_video_bot.services.twitter_media"
+    ]

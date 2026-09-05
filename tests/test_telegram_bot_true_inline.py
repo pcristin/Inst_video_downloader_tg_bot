@@ -285,7 +285,7 @@ async def test_inline_retry_action_reuses_claimed_payment(monkeypatch, tmp_path)
     assert scheduled == [("s1", payment_id)]
 
 
-def test_inline_media_cache_key_versions_only_instagram_media():
+def test_inline_media_cache_key_versions_instagram_audio_and_twitter_galleries():
     instagram_url = "https://www.instagram.com/reel/abc/"
     twitter_url = "https://x.com/example/status/1"
 
@@ -293,7 +293,7 @@ def test_inline_media_cache_key_versions_only_instagram_media():
         "instagram:av2:https://www.instagram.com/reel/abc/"
     )
     assert _inline_media_cache_key("twitter", twitter_url) == (
-        "twitter:https://x.com/example/status/1"
+        "twitter:gallery1:https://x.com/example/status/1"
     )
 
 
@@ -673,7 +673,7 @@ async def test_chosen_inline_result_over_user_rate_limit_edits_placeholder(
     assert edits == [
         {
             "inline_message_id": "inline-msg-2",
-            "text": "Слишком много запросов. Попробуй снова примерно через 10 мин.",
+            "text": "Слишком много запросов. Попробуй снова примерно через 10 мин.\n\nSource: https://x.com/example/status/s2",
         }
     ]
 
@@ -803,7 +803,7 @@ async def test_missing_inline_storage_marks_session_failed_and_refunds(
     ]
     assert fake_telegram_bot.edited_text == {
         "inline_message_id": "inline-msg",
-        "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.",
+        "text": "Inline delivery is not configured. Set INLINE_STORAGE_CHAT_ID.\n\nSource: https://www.instagram.com/reel/abc/",
         "reply_markup": None,
     }
     assert store.get_subscription_delivery_stats(
@@ -1344,7 +1344,7 @@ async def test_inline_delivery_records_storage_upload_failure_metadata(
     assert session["error_class"] == "NetworkError"
     assert session["failure_class"] == "telegram_network"
     assert session["failure_retryable"] == 1
-    assert edits[-1]["text"] == "Inline delivery failed. You can retry safely."
+    assert edits[-1]["text"] == "Inline delivery failed. You can retry safely.\n\nSource: https://www.instagram.com/reel/abc/"
     assert (
         edits[-1]["reply_markup"].inline_keyboard[0][0].callback_data
         == "inline-action:retry:s1"
@@ -1410,7 +1410,7 @@ async def test_inline_storage_bad_request_is_failed_without_retry(
     assert session["error_class"] == "BadRequest"
     assert session["failure_retryable"] == 0
     assert edits[-1]["text"] == (
-        "Inline delivery failed. If this was a one-time payment, it was refunded."
+        "Inline delivery failed. If this was a one-time payment, it was refunded.\n\nSource: https://www.instagram.com/reel/abc/"
     )
     assert edits[-1]["reply_markup"] is None
 
@@ -1473,7 +1473,7 @@ async def test_inline_edit_network_failure_is_unknown_without_retry_or_refund(
         "inline_message_id": "inline-msg",
         "text": (
             "Telegram may have delivered this media. Retry is disabled to prevent "
-            "duplicates."
+            "duplicates.\n\nSource: https://www.instagram.com/reel/abc/"
         ),
         "reply_markup": None,
     }
@@ -1523,7 +1523,7 @@ async def test_inline_edit_bad_request_is_definite_failure(monkeypatch, tmp_path
     assert fake_bot.edited_text[-1] == {
         "inline_message_id": "inline-msg",
         "text": (
-            "Inline delivery failed. If this was a one-time payment, it was refunded."
+            "Inline delivery failed. If this was a one-time payment, it was refunded.\n\nSource: https://www.instagram.com/reel/abc/"
         ),
         "reply_markup": None,
     }
@@ -1839,7 +1839,7 @@ async def test_subscription_inline_delivery_records_failure_event(
     assert stats["failed"] == 1
     assert (
         edits[-1]["text"]
-        == "Inline delivery failed. If this was a one-time payment, it was refunded."
+        == "Inline delivery failed. If this was a one-time payment, it was refunded.\n\nSource: https://x.com/example/status/1"
     )
 
 

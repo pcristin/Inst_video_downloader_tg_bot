@@ -184,6 +184,12 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
     )
     application.add_handler(PreCheckoutQueryHandler(bot.pre_checkout_handler))
     application.add_handler(
+        CallbackQueryHandler(
+            bot.inline_gallery_callback_handler,
+            pattern=r"^inline-gallery:",
+        )
+    )
+    application.add_handler(
         MessageHandler(filters.SUCCESSFUL_PAYMENT, bot.successful_payment_handler)
     )
     application.add_handler(

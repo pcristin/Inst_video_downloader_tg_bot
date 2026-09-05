@@ -361,6 +361,18 @@ Required setup:
 6. Grant free inline access with `/inline_whitelist add <telegram_id>` or forward a visible-origin user message to the bot as owner.
 
 Telegram cannot upload a new file while editing an inline message, so the bot first uploads media to the storage chat, then edits the selected inline message using the resulting `file_id`.
+
+Twitter/X posts with multiple photos or videos are delivered as a browsable inline
+gallery with previous/next buttons and a media counter. Recipients can browse the
+gallery without another download or payment, including after a bot restart.
+In ordinary bot chats, the same posts use Telegram albums. Inline failure messages
+retain the original source URL, including when a retry is available.
+
+Twitter photo extraction extends the pinned yt-dlp extractor to retain photo
+metadata and request original-resolution images; video extraction still uses
+yt-dlp. Twitter inline cache keys are versioned to avoid reusing older entries
+that contain only the first item. Keep the Twitter extractor regression tests
+passing when upgrading yt-dlp, since this extension uses its extractor API.
 `INLINE_ONE_TIME_CLAIM_RECOVERY_SECONDS` controls when a paid one-time link that was claimed but never finished becomes selectable again; active deliveries are not released by this cleanup.
 
 ## Troubleshooting

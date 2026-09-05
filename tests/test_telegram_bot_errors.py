@@ -127,6 +127,7 @@ def test_run_registers_global_error_handler(monkeypatch, telegram_bot_factory):
         ("inline_callback_handler", "CallbackQueryHandler"),
         ("inline_action_callback_handler", "CallbackQueryHandler"),
         ("pre_checkout_handler", "PreCheckoutQueryHandler"),
+        ("inline_gallery_callback_handler", "CallbackQueryHandler"),
         ("successful_payment_handler", "MessageHandler"),
         ("inline_whitelist_command", "CommandHandler"),
         ("inline_price_command", "CommandHandler"),

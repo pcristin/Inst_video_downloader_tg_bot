@@ -9,6 +9,42 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 CALLBACK_DATA_LIMIT = 64
 _SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+INLINE_GALLERY_PATTERN = r"^inline-gallery:([A-Za-z0-9_-]+):([0-9]{1,3})$"
+
+
+def parse_inline_gallery_data(data: str) -> tuple[str, int] | None:
+    if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+        return None
+    match = re.fullmatch(INLINE_GALLERY_PATTERN, data)
+    return (match[1], int(match[2])) if match else None
+
+
+def inline_gallery_keyboard(
+    session_token: str, index: int, count: int
+) -> InlineKeyboardMarkup | None:
+    if count <= 1:
+        return None
+    if (
+        not _SESSION_TOKEN_PATTERN.fullmatch(session_token)
+        or not 0 <= index < count <= 999
+    ):
+        raise ValueError("Invalid inline gallery")
+
+    def button(label: str, target: int) -> InlineKeyboardButton:
+        data = f"inline-gallery:{session_token}:{target}"
+        if len(data.encode("utf-8")) > CALLBACK_DATA_LIMIT:
+            raise ValueError("callback data exceeds Telegram's 64-byte limit")
+        return InlineKeyboardButton(label, callback_data=data)
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                button("‹", (index - 1) % count),
+                button(f"{index + 1}/{count}", index),
+                button("›", (index + 1) % count),
+            ]
+        ]
+    )
 
 
 class InlineAction(str, Enum):

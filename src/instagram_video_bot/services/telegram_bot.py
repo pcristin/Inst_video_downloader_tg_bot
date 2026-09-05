@@ -6,7 +6,7 @@ import asyncio
 import logging
 import shutil
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -49,8 +49,10 @@ from .telegram.command_handlers import TelegramCommandHandlers
 from .telegram.inline_actions import (
     InlineAction,
     inline_cancel_keyboard,
+    inline_gallery_keyboard,
     inline_retry_keyboard,
     parse_inline_action_data,
+    parse_inline_gallery_data,
 )
 from .telegram.job_actions import (
     JobAction,
@@ -107,6 +109,8 @@ _INSTAGRAM_INLINE_MEDIA_CACHE_VERSION = "av2"
 def _inline_media_cache_key(provider: str, normalized_url: str) -> str:
     if provider == "instagram":
         return f"{provider}:{_INSTAGRAM_INLINE_MEDIA_CACHE_VERSION}:{normalized_url}"
+    if provider == "twitter":
+        return f"{provider}:gallery1:{normalized_url}"
     return f"{provider}:{normalized_url}"
 
 
@@ -796,7 +800,10 @@ class TelegramBot:
             await self._safe_edit_inline_text(
                 context,
                 inline_message_id=chosen.inline_message_id,
-                text=ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+                text=self._inline_failure_text(
+                    ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+                    session_token,
+                ),
             )
             return
         one_time_payment_id = None
@@ -811,7 +818,9 @@ class TelegramBot:
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=chosen.inline_message_id,
-                    text=ChaosText.inline_delivery_failed(),
+                    text=self._inline_failure_text(
+                        ChaosText.inline_delivery_failed(), session_token
+                    ),
                 )
                 return
         self._schedule_inline_delivery(
@@ -855,7 +864,10 @@ class TelegramBot:
             await self._safe_edit_inline_text(
                 context,
                 inline_message_id=query.inline_message_id,
-                text=ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+                text=self._inline_failure_text(
+                    ChaosText.rate_limited(rate_limit["retry_after_seconds"]),
+                    session_token,
+                ),
             )
             return
         await query.answer("Preparing media.")
@@ -871,7 +883,9 @@ class TelegramBot:
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=query.inline_message_id,
-                    text=ChaosText.inline_delivery_failed(),
+                    text=self._inline_failure_text(
+                        ChaosText.inline_delivery_failed(), session_token
+                    ),
                 )
                 return
         self._schedule_inline_delivery(
@@ -879,6 +893,45 @@ class TelegramBot:
             session_token=session_token,
             one_time_payment_id=one_time_payment_id,
         )
+
+    async def inline_gallery_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Let recipients browse persisted media without a new download or charge."""
+        query = update.callback_query
+        if not query or not query.data or not query.inline_message_id:
+            return
+        parsed = parse_inline_gallery_data(query.data)
+        if parsed is None:
+            await query.answer("This gallery is no longer available.")
+            return
+        session_token, index = parsed
+        session = self.state_store.get_inline_session(session_token)
+        if (
+            session is None
+            or session["status"] != "delivered"
+            or session["inline_message_id"] != query.inline_message_id
+        ):
+            await query.answer("This gallery is no longer available.")
+            return
+        cached = self.state_store.get_inline_cached_media(
+            _inline_media_cache_key(session["provider"], session["normalized_url"])
+        )
+        if not cached or index >= len(cached["media_items"]):
+            await query.answer("This gallery is no longer available.")
+            return
+        await query.answer()
+        try:
+            await context.bot.edit_message_media(
+                inline_message_id=query.inline_message_id,
+                media=build_inline_input_media(InlineCachedMediaItem(**cached["media_items"][index])),
+                reply_markup=inline_gallery_keyboard(session_token, index, len(cached["media_items"])),
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logger.warning("Inline gallery edit rejected for session %s", session_token)
+        except TelegramError:
+            logger.warning("Inline gallery edit failed for session %s", session_token)
 
     async def inline_action_callback_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1328,7 +1381,9 @@ class TelegramBot:
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=inline_message_id,
-                    text=ChaosText.inline_storage_missing(),
+                    text=self._inline_failure_text(
+                        ChaosText.inline_storage_missing(), session_token
+                    ),
                     reply_markup=None,
                 )
                 return
@@ -1339,7 +1394,7 @@ class TelegramBot:
             )
             cached = self.state_store.get_inline_cached_media(cache_key)
             if cached:
-                media_item = cached["media_items"][0]
+                media_items = cached["media_items"]
             else:
                 parsed_link = ParsedRequestLink(
                     original_url=session["original_url"],
@@ -1369,26 +1424,30 @@ class TelegramBot:
                             session_token, failure_stage
                         ):
                             return
-                        inline_item = await upload_first_media_to_storage(
-                            context.bot,
-                            storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
-                            video_info=video_info,
+                        media_items = []
+                        items = (
+                            video_info.media_items
+                            if parsed_link.provider == "twitter"
+                            else video_info.media_items[:1]
                         )
+                        for item in items:
+                            inline_item = await upload_first_media_to_storage(
+                                context.bot,
+                                storage_chat_id=settings.INLINE_STORAGE_CHAT_ID,
+                                video_info=replace(
+                                    video_info,
+                                    file_path=item.file_path,
+                                    media_items=[item],
+                                ),
+                            )
+                            media_items.append(asdict(inline_item))
                 finally:
                     shutil.rmtree(output_dir, ignore_errors=True)
-                media_item = {
-                    "media_type": inline_item.media_type,
-                    "file_id": inline_item.file_id,
-                    "caption": inline_item.caption,
-                    "duration": inline_item.duration,
-                    "width": inline_item.width,
-                    "height": inline_item.height,
-                }
                 self.state_store.save_inline_cached_media(
                     cache_key=cache_key,
                     provider=parsed_link.provider,
                     normalized_url=parsed_link.normalized_url,
-                    media_items=[media_item],
+                    media_items=media_items,
                 )
 
             failure_stage = "inline_edit"
@@ -1396,11 +1455,15 @@ class TelegramBot:
                 session_token, failure_stage
             ):
                 return
-            input_media = build_inline_input_media(InlineCachedMediaItem(**media_item))
+            input_media = build_inline_input_media(
+                InlineCachedMediaItem(**media_items[0])
+            )
             await context.bot.edit_message_media(
                 inline_message_id=inline_message_id,
                 media=input_media,
-                reply_markup=None,
+                reply_markup=inline_gallery_keyboard(
+                    session_token, 0, len(media_items)
+                ),
             )
             if not self.state_store.finish_inline_delivery(
                 session_token, status="delivered"
@@ -1451,7 +1514,9 @@ class TelegramBot:
                     await self._safe_edit_inline_text(
                         context,
                         inline_message_id=inline_message_id,
-                        text=ChaosText.inline_delivery_unknown("en"),
+                        text=self._inline_failure_text(
+                            ChaosText.inline_delivery_unknown("en"), session_token
+                        ),
                         reply_markup=None,
                     )
                 return
@@ -1461,7 +1526,9 @@ class TelegramBot:
                     await self._safe_edit_inline_text(
                         context,
                         inline_message_id=inline_message_id,
-                        text=ChaosText.inline_delivery_retryable("en"),
+                        text=self._inline_failure_text(
+                            ChaosText.inline_delivery_retryable("en"), session_token
+                        ),
                         reply_markup=inline_retry_keyboard(
                             session_token, language_code="en"
                         ),
@@ -1481,7 +1548,9 @@ class TelegramBot:
                 await self._safe_edit_inline_text(
                     context,
                     inline_message_id=inline_message_id,
-                    text=ChaosText.inline_delivery_failed(),
+                    text=self._inline_failure_text(
+                        ChaosText.inline_delivery_failed(), session_token
+                    ),
                     reply_markup=None,
                 )
         finally:
@@ -1659,6 +1728,11 @@ class TelegramBot:
         self.state_store.mark_inline_one_time_payment_refunded(
             payment_id, reason=reason
         )
+
+    def _inline_failure_text(self, text: str, session_token: str) -> str:
+        session = self.state_store.get_inline_session(session_token)
+        source_url = session.get("original_url") if session else None
+        return f"{text}\n\nSource: {source_url}" if source_url else text
 
     @staticmethod
     async def _safe_edit_inline_text(

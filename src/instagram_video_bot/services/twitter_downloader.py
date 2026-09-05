@@ -183,6 +183,8 @@ class TwitterDownloader:
 
     def _build_base_command(self) -> List[str]:
         """Resolve yt-dlp CLI invocation."""
+        if self.ytdlp_binary == "yt-dlp" and importlib.util.find_spec("yt_dlp"):
+            return [sys.executable, "-m", f"{__package__}.twitter_media"]
         if shutil.which(self.ytdlp_binary):
             return [self.ytdlp_binary]
         if importlib.util.find_spec("yt_dlp"):
@@ -197,7 +199,10 @@ class TwitterDownloader:
         if title_proxy:
             cmd.extend(["--proxy", title_proxy])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
         if result.returncode != 0:
             return ""
         title = (result.stdout or "").strip().splitlines()
