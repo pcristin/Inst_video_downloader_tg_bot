@@ -84,46 +84,41 @@ class TwitterDownloader:
         status_id = self._extract_status_id(url)
         base_prefix = f"twitter_{status_id}_{time.time_ns()}"
 
-        errors: List[str] = []
-
         if self.proxy:
-            file_paths = self._run_download_attempt(
+            return self._run_download_attempt(
                 url,
                 output_dir,
                 f"{base_prefix}_explicit",
                 self.proxy,
             )
-            return self._build_download_result(url, file_paths, self.proxy)
 
         try:
-            file_paths = self._run_download_attempt(
+            return self._run_download_attempt(
                 url,
                 output_dir,
                 f"{base_prefix}_direct",
             )
-            return self._build_download_result(url, file_paths)
         except TwitterDownloadError as exc:
-            errors.append(str(exc))
+            last_error = str(exc)
 
         configured_proxies = settings.get_proxy_list()
         proxy_attempts = self._rotated_configured_proxies(configured_proxies)
         for attempt_index, proxy in enumerate(proxy_attempts, start=1):
             try:
-                file_paths = self._run_download_attempt(
+                result = self._run_download_attempt(
                     url,
                     output_dir,
                     f"{base_prefix}_proxy{attempt_index}",
                     proxy,
                 )
             except TwitterDownloadError as exc:
-                errors.append(str(exc))
+                last_error = str(exc)
                 continue
 
             self._advance_proxy_rotation(proxy, configured_proxies)
-            return self._build_download_result(url, file_paths, proxy)
+            return result
 
         attempt_count = 1 + len(proxy_attempts)
-        last_error = errors[-1] if errors else "Unknown yt-dlp error"
         raise TwitterDownloadError(
             f"Twitter/X download failed after {attempt_count} attempts; last error: {last_error}"
         )
@@ -134,7 +129,7 @@ class TwitterDownloader:
         output_dir: Path,
         prefix: str,
         proxy: str | None = None,
-    ) -> Sequence[Path]:
+    ) -> TwitterDownloadResult:
         output_template = str(output_dir / f"{prefix}_%(autonumber)02d.%(ext)s")
         cmd = self._build_base_command()
         cmd.extend(
@@ -143,6 +138,8 @@ class TwitterDownloader:
                 "--no-progress",
                 "--restrict-filenames",
                 "--no-part",
+                "--print",
+                "after_move:%(title)s",
                 "-o",
                 output_template,
                 url,
@@ -167,19 +164,13 @@ class TwitterDownloader:
         if not file_paths:
             raise TwitterDownloadError("Twitter/X download produced no media files")
 
-        return file_paths
-
-    def _build_download_result(
-        self,
-        url: str,
-        file_paths: Sequence[Path],
-        proxy: str | None = None,
-    ) -> TwitterDownloadResult:
         media_items = [
             TwitterMediaItem(file_path=path, media_type=self._infer_media_type(path))
             for path in file_paths
         ]
-        return TwitterDownloadResult(title=self._fetch_title(url, proxy), media_items=media_items)
+        title_lines = (result.stdout or "").strip().splitlines()
+        title = title_lines[0].strip() if title_lines else ""
+        return TwitterDownloadResult(title=title, media_items=media_items)
 
     def _build_base_command(self) -> List[str]:
         """Resolve yt-dlp CLI invocation."""
@@ -190,23 +181,6 @@ class TwitterDownloader:
         if importlib.util.find_spec("yt_dlp"):
             return [sys.executable, "-m", "yt_dlp"]
         raise TwitterDownloadError("yt-dlp is not installed in this environment")
-
-    def _fetch_title(self, url: str, proxy: str | None = None) -> str:
-        """Best-effort tweet title extraction for Telegram caption."""
-        cmd = self._build_base_command()
-        cmd.extend(["--no-warnings", "--skip-download", "--print", "%(title)s", url])
-        title_proxy = proxy if proxy is not None else self.proxy
-        if title_proxy:
-            cmd.extend(["--proxy", title_proxy])
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_seconds)
-        except (subprocess.TimeoutExpired, OSError):
-            return ""
-        if result.returncode != 0:
-            return ""
-        title = (result.stdout or "").strip().splitlines()
-        return title[0].strip() if title else ""
 
     @classmethod
     def _rotated_configured_proxies(cls, proxies: Sequence[str]) -> List[str]:

@@ -1,6 +1,7 @@
 import subprocess
 
 import pytest
+from yt_dlp import parse_options
 
 from src.instagram_video_bot.services import twitter_downloader
 from src.instagram_video_bot.services.twitter_downloader import (
@@ -62,7 +63,13 @@ def test_download_media_converts_download_timeout_to_twitter_error(tmp_path, mon
         )
 
 
-def test_download_media_direct_success_does_not_use_proxy_or_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "stdout,title",
+    [("Tweet title\nSecond line\n", "Tweet title"), ("", "")],
+)
+def test_download_media_direct_success_does_not_use_proxy_or_fallback(
+    tmp_path, monkeypatch, stdout, title
+):
     downloader = TwitterDownloader(timeout_seconds=5)
     commands = []
     media_file = tmp_path / "tweet.mp4"
@@ -83,9 +90,7 @@ def test_download_media_direct_success_does_not_use_proxy_or_fallback(tmp_path, 
 
     def _run(cmd, **kwargs):
         commands.append(cmd)
-        if "--skip-download" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(twitter_downloader.subprocess, "run", _run)
 
@@ -94,10 +99,14 @@ def test_download_media_direct_success_does_not_use_proxy_or_fallback(tmp_path, 
         tmp_path,
     )
 
-    assert result.title == "Tweet title"
+    assert result.title == title
     assert result.media_items == [TwitterMediaItem(file_path=media_file, media_type="video")]
-    assert len([cmd for cmd in commands if "--skip-download" not in cmd]) == 1
+    assert len(commands) == 1
     assert all("--proxy" not in cmd for cmd in commands)
+    options = parse_options(commands[0][1:]).ydl_opts
+    assert not options["simulate"]
+    assert not options["skip_download"]
+    assert options["forceprint"] == {"after_move": ["%(title)s"]}
 
 
 def test_download_media_falls_back_to_first_configured_proxy_after_direct_failure(
@@ -125,10 +134,8 @@ def test_download_media_falls_back_to_first_configured_proxy_after_direct_failur
 
     def _run(cmd, **kwargs):
         commands.append(cmd)
-        if "--skip-download" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
         if "--proxy" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="direct failed")
 
     monkeypatch.setattr(twitter_downloader.subprocess, "run", _run)
@@ -138,11 +145,10 @@ def test_download_media_falls_back_to_first_configured_proxy_after_direct_failur
         tmp_path,
     )
 
-    download_commands = [cmd for cmd in commands if "--skip-download" not in cmd]
     assert result.title == "Tweet title"
-    assert "--proxy" not in download_commands[0]
-    assert download_commands[1][-2:] == ["--proxy", proxy]
-    assert commands[-1][-2:] == ["--proxy", proxy]
+    assert len(commands) == 2
+    assert "--proxy" not in commands[0]
+    assert commands[1][-2:] == ["--proxy", proxy]
 
 
 def test_download_media_fallback_ignores_artifacts_from_failed_attempt(
@@ -169,8 +175,6 @@ def test_download_media_fallback_ignores_artifacts_from_failed_attempt(
             file_handle.write(payload)
 
     def _run(cmd, **kwargs):
-        if "--skip-download" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
         if "--proxy" in cmd:
             _write_output_file(cmd, b"proxy-video")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -218,8 +222,6 @@ def test_download_media_rotates_next_fallback_start_after_proxy_success(tmp_path
 
     def _run(cmd, **kwargs):
         commands.append(cmd)
-        if "--skip-download" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
         if "--proxy" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="direct failed")
@@ -239,13 +241,13 @@ def test_download_media_rotates_next_fallback_start_after_proxy_success(tmp_path
         tmp_path,
     )
 
-    download_commands = [cmd for cmd in commands if "--skip-download" not in cmd]
-    assert "--proxy" not in download_commands[0]
-    assert download_commands[1][-2:] == ["--proxy", proxies[0]]
-    assert "--proxy" not in download_commands[2]
-    assert download_commands[3][-2:] == ["--proxy", proxies[1]]
-    assert "--proxy" not in download_commands[4]
-    assert download_commands[5][-2:] == ["--proxy", proxies[0]]
+    assert len(commands) == 6
+    assert "--proxy" not in commands[0]
+    assert commands[1][-2:] == ["--proxy", proxies[0]]
+    assert "--proxy" not in commands[2]
+    assert commands[3][-2:] == ["--proxy", proxies[1]]
+    assert "--proxy" not in commands[4]
+    assert commands[5][-2:] == ["--proxy", proxies[0]]
 
 
 def test_download_media_all_attempts_fail_without_exposing_proxy_credentials(
@@ -346,37 +348,18 @@ def test_download_media_explicit_proxy_preserves_single_proxy_path(tmp_path, mon
 
     def _run(cmd, **kwargs):
         commands.append(cmd)
-        if "--skip-download" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Tweet title\n", stderr="")
 
     monkeypatch.setattr(twitter_downloader.subprocess, "run", _run)
 
-    downloader._download_media_sync(
+    result = downloader._download_media_sync(
         "https://twitter.com/user/status/1901234567890123456",
         tmp_path,
     )
 
-    download_commands = [cmd for cmd in commands if "--skip-download" not in cmd]
-    assert len(download_commands) == 1
-    assert download_commands[0][-2:] == ["--proxy", explicit_proxy]
-    assert commands[-1][-2:] == ["--proxy", explicit_proxy]
-
-
-def test_title_timeout_does_not_discard_downloaded_media(tmp_path, monkeypatch):
-    downloader = TwitterDownloader(timeout_seconds=5)
-    media_file = tmp_path / "photo.jpg"
-    media_file.write_bytes(b"photo")
-    monkeypatch.setattr(downloader, "_run_download_attempt", lambda *args: [media_file])
-    monkeypatch.setattr(downloader, "_build_base_command", lambda: ["yt-dlp"])
-
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired("yt-dlp", 5)
-
-    monkeypatch.setattr(twitter_downloader.subprocess, "run", timeout)
-    result = downloader._download_media_sync("https://x.com/example/status/123", tmp_path)
-    assert result.title == ""
-    assert result.media_items == [TwitterMediaItem(media_file, "photo")]
+    assert result.title == "Tweet title"
+    assert len(commands) == 1
+    assert commands[0][-2:] == ["--proxy", explicit_proxy]
 
 
 def test_default_command_uses_photo_aware_extractor():
