@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -26,6 +27,19 @@ def status_command():
         return
 
     print(manager.get_detailed_status())
+
+
+def list_command():
+    """List roster positions and proxy assignments without credentials."""
+    manager = get_account_manager()
+    if not manager:
+        logger.error("No accounts found. Make sure accounts.txt exists.")
+        return
+    for index, account in enumerate(manager.accounts, 1):
+        proxy = account.proxy or "none"
+        if "@" in proxy:
+            proxy = "***@" + proxy.rsplit("@", 1)[1]
+        print(f"{index}: {account.username} proxy={proxy}")
 
 
 def setup_command():
@@ -136,6 +150,7 @@ def export_auth_command(
     *,
     output_path: Path = Path("secrets/instagram_auth.json"),
     available_only: bool = False,
+    runtime_uid: int | None = None,
 ):
     """Export logged-in account sessions as fast auth fallback cookies."""
     manager = get_account_manager()
@@ -156,6 +171,10 @@ def export_auth_command(
         "Auth fallback file written to: %s",
         getattr(summary, "output_path", output_path),
     )
+    if runtime_uid is not None:
+        for path in (output_path, manager.state_file, *manager.sessions_dir.glob("*.json")):
+            if path.exists():
+                os.chown(path, runtime_uid, runtime_uid)
 
 
 def main():
@@ -163,7 +182,7 @@ def main():
     parser = argparse.ArgumentParser(description="Manage Instagram bot accounts")
     parser.add_argument(
         "command",
-        choices=["status", "setup", "rotate", "reset", "reset-old", "export-auth"],
+        choices=["list", "status", "setup", "rotate", "reset", "reset-old", "export-auth"],
         help="Command to execute",
     )
     parser.add_argument(
@@ -183,11 +202,14 @@ def main():
         action="store_true",
         help="Only export accounts currently available in account state",
     )
+    parser.add_argument("--runtime-uid", type=int, help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
     try:
-        if args.command == "status":
+        if args.command == "list":
+            list_command()
+        elif args.command == "status":
             status_command()
         elif args.command == "setup":
             setup_command()
@@ -201,6 +223,7 @@ def main():
             export_auth_command(
                 output_path=args.output,
                 available_only=args.available_only,
+                runtime_uid=args.runtime_uid,
             )
     except KeyboardInterrupt:
         logger.info("Operation cancelled by user")

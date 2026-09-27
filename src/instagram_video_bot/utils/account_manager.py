@@ -219,6 +219,12 @@ class AccountManager:
                         if saved_account.get('proxy'):
                             account.proxy = saved_account['proxy']
                         break
+            if any(
+                isinstance(saved_account, dict)
+                and any(key in saved_account for key in ('password', 'totp_secret', 'proxy'))
+                for saved_account in state.get('accounts', [])
+            ):
+                self._save_state()
                         
         except Exception as error:
             logger.error("Failed to load state (type=%s)", type(error).__name__)

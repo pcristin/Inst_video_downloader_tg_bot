@@ -43,6 +43,22 @@ def test_get_account_manager_uses_configured_state_file(
     assert manager.state_file == configured_state
 
 
+def test_loading_legacy_state_removes_stored_credentials(tmp_path):
+    accounts_file = tmp_path / "accounts.txt"
+    state_file = tmp_path / "accounts_state.json"
+    _write_accounts(accounts_file, "first")
+    state_file.write_text(json.dumps({"accounts": [{
+        "username": "first", "password": "old-secret", "totp_secret": "old-totp",
+        "proxy": "http://old-proxy", "is_banned": True,
+    }]}))
+
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    assert manager.accounts[0].is_banned is True
+    saved = json.loads(state_file.read_text())["accounts"][0]
+    assert all(key not in saved for key in ("password", "totp_secret", "proxy"))
+
+
 def test_save_state_preserves_previous_file_when_replace_fails(
     monkeypatch, tmp_path
 ):

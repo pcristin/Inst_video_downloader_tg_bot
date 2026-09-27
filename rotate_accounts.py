@@ -45,18 +45,19 @@ def read_candidates(path: Path) -> list[Candidate]:
             raise ValueError(f"line {line_number}: expected exactly three fields")
         username, password, seed = (part.strip() for part in parts)
         seed = re.sub(r"\s+", "", seed).upper()
-        if not USERNAME.fullmatch(username) or username in seen:
+        if not USERNAME.fullmatch(username) or username.casefold() in seen:
             raise ValueError(f"line {line_number}: invalid or duplicate username")
         if not password or "|" in password or "\n" in password:
             raise ValueError(f"line {line_number}: invalid password field")
-        if not seed or not re.fullmatch(r"[A-Z2-7]+", seed):
+        if seed and not re.fullmatch(r"[A-Z2-7]+", seed):
             raise ValueError(f"line {line_number}: invalid TOTP seed")
-        try:
-            pyotp.TOTP(seed).now()
-        except (ValueError, TypeError) as error:
-            raise ValueError(f"line {line_number}: invalid TOTP seed") from error
+        if seed:
+            try:
+                pyotp.TOTP(seed).now()
+            except (ValueError, TypeError) as error:
+                raise ValueError(f"line {line_number}: invalid TOTP seed") from error
         candidates.append(Candidate(username, password, seed))
-        seen.add(username)
+        seen.add(username.casefold())
     if not candidates:
         raise ValueError("candidate file has no accounts")
     return candidates
@@ -65,6 +66,19 @@ def read_candidates(path: Path) -> list[Candidate]:
 def fingerprint(candidates: list[Candidate]) -> str:
     content = "".join(account.account_line() for account in candidates)
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def assert_private_candidate_file(path: Path) -> None:
+    info = path.stat()
+    if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise ValueError("candidate file must be owned by the operator and mode 0600")
+
+
+def account_proxy(index: int) -> str | None:
+    proxies = settings.get_proxy_list()
+    if proxies:
+        return proxies[index % len(proxies)]
+    return settings.get_single_proxy()
 
 
 def roster_diff(current_path: Path, candidates: list[Candidate]) -> dict[str, int]:
@@ -159,10 +173,13 @@ def login_worker(path: Path, index: int, stage: Path) -> int:
     from instagrapi import Client
 
     candidate = read_candidates(path)[index]
-    proxies = settings.get_proxy_list()
+    if not candidate.totp_secret:
+        print(json.dumps({"result": "missing_totp"}))
+        return 1
     client = Client()
-    if proxies:
-        client.set_proxy(proxies[index % len(proxies)])
+    proxy = account_proxy(index)
+    if proxy:
+        client.set_proxy(proxy)
     try:
         success = client.login(
             candidate.username,
@@ -171,7 +188,10 @@ def login_worker(path: Path, index: int, stage: Path) -> int:
         )
         if success:
             identity = client.account_info()
-            if identity.username.casefold() != candidate.username.casefold():
+            cookies = client.get_settings().get("cookies", {})
+            if identity.username.casefold() != candidate.username.casefold() or str(
+                identity.pk
+            ) != str(cookies.get("ds_user_id")):
                 print(json.dumps({"result": "identity_mismatch"}))
                 return 1
             target = stage / "sessions" / f"{candidate.username}.json"
@@ -197,10 +217,10 @@ def verify_worker(path: Path, index: int, stage: Path) -> int:
     if not _session_is_usable(session_file):
         print(json.dumps({"result": "session_missing"}))
         return 1
-    proxies = settings.get_proxy_list()
     client = Client()
-    if proxies:
-        client.set_proxy(proxies[index % len(proxies)])
+    proxy = account_proxy(index)
+    if proxy:
+        client.set_proxy(proxy)
     try:
         client.load_settings(session_file)
         identity = client.account_info()
@@ -216,36 +236,49 @@ def verify_worker(path: Path, index: int, stage: Path) -> int:
     return 1
 
 
-def _verify_session(path: Path, index: int, stage: Path, timeout: int = 45) -> bool:
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "verify",
-                "--candidates",
-                str(path),
-                "--index",
-                str(index),
-                "--stage-root",
-                str(stage),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        payload = json.loads(completed.stdout.strip().splitlines()[-1])
-        return completed.returncode == 0 and payload.get("result") == "success"
-    except (subprocess.TimeoutExpired, ValueError, IndexError, KeyError):
-        return False
+def _verify_session(path: Path, index: int, stage: Path, timeout: int = 45) -> str:
+    result = "worker_timeout_or_error"
+    for _ in range(2):
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "verify",
+                    "--candidates",
+                    str(path),
+                    "--index",
+                    str(index),
+                    "--stage-root",
+                    str(stage),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            payload = json.loads(completed.stdout.strip().splitlines()[-1])
+            result = payload.get("result", "worker_failed")
+            if completed.returncode == 0 and result == "success":
+                return "success"
+            if result in {"identity_mismatch", "session_missing", "LoginRequired"}:
+                return result
+        except (subprocess.TimeoutExpired, ValueError, IndexError, KeyError):
+            result = "worker_timeout_or_error"
+    return result
 
 
 def prewarm(
-    path: Path, root: Path, seed_sessions: Path | None = None, timeout: int = 100
+    path: Path,
+    root: Path,
+    seed_sessions: Path | None = None,
+    timeout: int = 100,
+    project: Path = Path(__file__).resolve().parent,
 ) -> dict[str, int]:
     candidates = read_candidates(path)
-    diff = roster_diff(Path("accounts.txt"), candidates)
+    diff = roster_diff(project / "accounts.txt", candidates)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root, 0o700)
     stage = _stage_for(root, candidates)
     stage.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(stage, 0o700)
@@ -253,19 +286,33 @@ def prewarm(
     for index, candidate in enumerate(candidates):
         key = str(index)
         session = stage / "sessions" / f"{candidate.username}.json"
-        if (
-            results.get(key) == "success"
-            and _session_is_usable(session)
-            and _verify_session(path, index, stage)
-        ):
+        if not candidate.totp_secret:
+            results[key] = "missing_totp"
+            session.unlink(missing_ok=True)
+            _write_results(stage, candidates, results)
             continue
-        if seed_sessions is not None:
+        staged_success = results.get(key) == "success" and _session_is_usable(session)
+        if staged_success:
+            verification = _verify_session(path, index, stage)
+            if verification == "success":
+                continue
+            if verification not in {
+                "identity_mismatch",
+                "session_missing",
+                "LoginRequired",
+            }:
+                print(
+                    f"account {index + 1}/{len(candidates)}: verification_deferred",
+                    flush=True,
+                )
+                continue
+        if seed_sessions is not None and not staged_success:
             seeded = seed_sessions / f"{candidate.username}.json"
             if _session_is_usable(seeded):
                 session.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 shutil.copyfile(seeded, session)
                 os.chmod(session, 0o600)
-                if _verify_session(path, index, stage):
+                if _verify_session(path, index, stage) == "success":
                     results[key] = "success"
                     _write_results(stage, candidates, results)
                     continue
@@ -323,14 +370,21 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
     if not successful:
         raise ValueError("no successful sessions; refusing activation")
     for index, candidate in enumerate(candidates):
-        if results[str(index)] == "success" and (
-            not _session_is_usable(stage / "sessions" / f"{candidate.username}.json")
-            or not _verify_session(path, index, stage)
-        ):
-            raise ValueError("staged session could not authenticate as candidate")
+        if results[str(index)] != "success":
+            continue
+        session = stage / "sessions" / f"{candidate.username}.json"
+        verification = (
+            _verify_session(path, index, stage)
+            if _session_is_usable(session)
+            else "session_missing"
+        )
+        if verification != "success":
+            raise ValueError(
+                f"staged session for {candidate.username} failed verification ({verification})"
+            )
 
     sessions = project / "sessions"
-    sessions.mkdir(exist_ok=True)
+    sessions.mkdir(exist_ok=True, mode=0o700)
     state_file = project / "account-state" / "accounts_state.json"
     auth_file = project / "secrets" / "instagram_auth.json"
     current_roster = project / "accounts.txt"
@@ -393,6 +447,7 @@ def main() -> None:
     parser.add_argument("--index", type=int)
     args = parser.parse_args()
     try:
+        assert_private_candidate_file(args.candidates)
         if args.command == "worker":
             if args.index is None:
                 raise ValueError("worker requires --index")
@@ -404,7 +459,12 @@ def main() -> None:
                 verify_worker(args.candidates, args.index, args.stage_root)
             )
         if args.command == "prewarm":
-            summary = prewarm(args.candidates, args.stage_root, args.seed_sessions)
+            summary = prewarm(
+                args.candidates,
+                args.stage_root,
+                args.seed_sessions,
+                project=args.project,
+            )
         else:
             summary = activate(args.candidates, args.stage_root, args.project)
         print(json.dumps(summary, sort_keys=True))

@@ -1,5 +1,7 @@
 .PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth accounts-prewarm accounts-activate sessions-clean sessions-backup sessions-restore
 
+COMPOSE ?= docker compose
+
 help: ## Show this help message
 	@echo 'Instagram Video Downloader Bot - uv-native workflow'
 	@echo ''
@@ -100,7 +102,7 @@ test-proxies: ## Test proxy parsing and configuration
 
 # Account Management Commands
 accounts-list: ## List all accounts from accounts.txt with proxy assignments
-	@docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py status
+	@docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py list
 
 accounts-status: ## Show status of all Instagram accounts
 	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py status
@@ -120,8 +122,7 @@ accounts-reset-old: ## Reset accounts banned longer than HOURS hours (default 24
 accounts-export-auth: ## Export fast fallback cookies from configured Instagram accounts
 	@mkdir -p secrets
 	@test -f secrets/instagram_auth.json || printf '%s\n' '{"instagram":[],"instagram_bearer":[]}' > secrets/instagram_auth.json
-	docker compose run --rm --user root --entrypoint /app/.venv/bin/python -v ./secrets:/app/secrets instagram-video-bot /app/manage_accounts.py export-auth
-	chown -R --reference=sessions sessions secrets/instagram_auth.json
+	$(COMPOSE) run --rm --user root --cap-add DAC_OVERRIDE --cap-add CHOWN --entrypoint /app/.venv/bin/python -v ./secrets:/app/secrets instagram-video-bot /app/manage_accounts.py export-auth --runtime-uid 1000
 
 accounts-prewarm: ## Validate and prewarm every candidate, preserving successful sessions
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
@@ -129,7 +130,8 @@ accounts-prewarm: ## Validate and prewarm every candidate, preserving successful
 
 accounts-activate: ## Stop bot, install checked roster, then restart
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
-	@docker compose stop instagram-video-bot && { uv run --frozen python rotate_accounts.py activate --candidates "$(CANDIDATES)"; result=$$?; docker compose up -d instagram-video-bot || exit $$?; exit $$result; }
+	@$(COMPOSE) run --rm --entrypoint /app/.venv/bin/python instagram-video-bot -c 'import os; from pathlib import Path; p=Path("/app/accounts.txt"); assert p.stat().st_uid == os.getuid(), "current roster owner differs from runtime user"; assert os.access("/app/sessions", os.W_OK), "session directory is not writable"; assert os.access("/app/account-state", os.W_OK), "state directory is not writable"'
+	@$(COMPOSE) stop instagram-video-bot && { uv run --frozen python rotate_accounts.py activate --candidates "$(CANDIDATES)"; result=$$?; $(COMPOSE) up -d --force-recreate --no-deps instagram-video-bot || exit $$?; exit $$result; }
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)
