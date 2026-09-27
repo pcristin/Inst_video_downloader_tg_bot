@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,32 @@ def test_get_account_manager_ignores_directory_placeholder(monkeypatch, tmp_path
     manager = account_manager_module.get_account_manager()
 
     assert manager is None
+
+
+def test_new_accounts_have_a_gradual_lease_cooldown(tmp_path):
+    accounts_file = tmp_path / "accounts.txt"
+    _write_accounts(accounts_file, "new", "legacy")
+    state_file = tmp_path / "accounts_state.json"
+    now = datetime.now()
+    state_file.write_text(json.dumps({"accounts": [
+        {"username": "new", "activated_at": (now - timedelta(hours=1)).isoformat(),
+         "last_used": now.isoformat()},
+    ]}))
+    manager = AccountManager(accounts_file=accounts_file, state_file=state_file)
+
+    assert manager.get_next_account().username == "legacy"
+    manager.accounts[1].is_banned = True
+    assert manager.acquire_account() is None
+    manager.accounts[0].last_used = now - timedelta(minutes=6)
+    assert manager.acquire_account().username == "new"
+    manager.release_account(manager.accounts[0])
+    manager.accounts[0].activated_at = now - timedelta(hours=25)
+    manager.accounts[0].last_used = now - timedelta(minutes=2)
+    assert manager.acquire_account().username == "new"
+    manager.release_account(manager.accounts[0])
+    manager.accounts[0].activated_at = now - timedelta(hours=73)
+    manager.accounts[0].last_used = now
+    assert manager.acquire_account().username == "new"
 
 
 def test_get_account_manager_uses_configured_state_file(

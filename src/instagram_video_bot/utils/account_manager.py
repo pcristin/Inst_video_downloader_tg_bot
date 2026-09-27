@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 REPLACEMENT_REQUIRED_PREFIX = "replacement_required:"
 LEGACY_HARD_FAILURE_PREFIX = "hard_failure:"
+NEW_ACCOUNT_RAMP = (
+    (timedelta(hours=24), timedelta(minutes=5)),
+    (timedelta(hours=72), timedelta(minutes=1)),
+)
 
 
 def _failure_category(reason: Optional[str]) -> str:
@@ -43,6 +47,7 @@ class Account:
     ban_reason: Optional[str] = None  # Reason for being marked unavailable
     banned_at: Optional[datetime] = None  # When the account was banned
     last_used: Optional[datetime] = None
+    activated_at: Optional[datetime] = None
     consecutive_failures: int = 0
     last_failure_reason: Optional[str] = None
     last_failure_at: Optional[datetime] = None
@@ -55,6 +60,7 @@ class Account:
             'ban_reason': self.ban_reason,
             'banned_at': self.banned_at.isoformat() if self.banned_at else None,
             'last_used': self.last_used.isoformat() if self.last_used else None,
+            'activated_at': self.activated_at.isoformat() if self.activated_at else None,
             'consecutive_failures': self.consecutive_failures,
             'last_failure_reason': self.last_failure_reason,
             'last_failure_at': self.last_failure_at.isoformat() if self.last_failure_at else None,
@@ -80,6 +86,8 @@ class Account:
             account.banned_at = datetime.fromisoformat(data['banned_at'])
         if data.get('last_used'):
             account.last_used = datetime.fromisoformat(data['last_used'])
+        if data.get('activated_at'):
+            account.activated_at = datetime.fromisoformat(data['activated_at'])
         if data.get('last_failure_at'):
             account.last_failure_at = datetime.fromisoformat(data['last_failure_at'])
             
@@ -209,6 +217,7 @@ class AccountManager:
                 for account in self.accounts:
                     if account.username == saved_account['username']:
                         account.last_used = datetime.fromisoformat(saved_account['last_used']) if saved_account.get('last_used') else None
+                        account.activated_at = datetime.fromisoformat(saved_account['activated_at']) if saved_account.get('activated_at') else None
                         account.is_banned = saved_account.get('is_banned', False)
                         account.ban_reason = saved_account.get('ban_reason')
                         account.banned_at = datetime.fromisoformat(saved_account['banned_at']) if saved_account.get('banned_at') else None
@@ -298,7 +307,20 @@ class AccountManager:
                 for account in self.get_available_accounts()
                 if account.username not in self._leased_accounts
                 and account.username not in excluded_usernames
+                and self._ramp_allows(account)
             )
+
+    @staticmethod
+    def _ramp_allows(account: Account) -> bool:
+        """Limit first use volume for newly activated accounts."""
+        if account.activated_at is None or account.last_used is None:
+            return True
+        now = datetime.now()
+        age = now - account.activated_at
+        for until, interval in NEW_ACCOUNT_RAMP:
+            if age < until:
+                return now - account.last_used >= interval
+        return True
     
     def get_next_account(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[Account]:
         """Get the next available account for rotation."""
@@ -307,6 +329,7 @@ class AccountManager:
             acc for acc in self.get_available_accounts()
             if acc.username not in self._leased_accounts
             and acc.username not in excluded_usernames
+            and self._ramp_allows(acc)
         ]
         
         if not available:

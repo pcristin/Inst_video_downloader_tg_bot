@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth accounts-prewarm accounts-activate sessions-clean sessions-backup sessions-restore
+.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth accounts-prewarm accounts-canary accounts-activate sessions-clean sessions-backup sessions-restore
 
 COMPOSE ?= docker compose
 
@@ -34,7 +34,8 @@ help: ## Show this help message
 	@echo '  accounts-reset-old Reset accounts banned longer than HOURS (default 24)'
 	@echo '  accounts-export-auth Export fast fallback cookies to secrets/instagram_auth.json'
 	@echo '  accounts-prewarm Validate and log in a candidate roster (CANDIDATES=/absolute/path)'
-	@echo '  accounts-activate Stop bot, install prewarmed roster, and restart it'
+	@echo '  accounts-canary  Download public media with each staged session (CANARY_URL=...)'
+	@echo '  accounts-activate Stop bot, install canary-checked roster, and restart it'
 	@echo ''
 	@echo '📁 Session Management:'
 	@echo '  sessions-clean   Delete all session files'
@@ -127,6 +128,11 @@ accounts-export-auth: ## Export fast fallback cookies from configured Instagram 
 accounts-prewarm: ## Validate and prewarm every candidate, preserving successful sessions
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
 	uv run --frozen python rotate_accounts.py prewarm --candidates "$(CANDIDATES)" $(if $(SEED_SESSIONS),--seed-sessions "$(SEED_SESSIONS)",)
+
+accounts-canary: ## Check each staged account with a real public media download
+	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
+	@test -n "$(CANARY_URL)" || { echo 'Set CANARY_URL=https://www.instagram.com/p/.../'; exit 2; }
+	uv run --frozen python rotate_accounts.py canary --candidates "$(CANDIDATES)" --canary-url "$(CANARY_URL)"
 
 accounts-activate: ## Stop bot, install checked roster, then restart
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }

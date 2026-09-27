@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pyotp
 
@@ -168,6 +170,57 @@ def _load_results(stage: Path, candidates: list[Candidate]) -> dict[str, str]:
     return payload.get("results", {})
 
 
+def _session_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canary_path(stage: Path) -> Path:
+    return stage / "canary.json"
+
+
+def _write_canary_results(
+    stage: Path, candidates: list[Candidate], results: dict[str, dict[str, str]]
+) -> None:
+    payload = {"fingerprint": fingerprint(candidates), "results": results}
+    _private_write(
+        _canary_path(stage), (json.dumps(payload, sort_keys=True) + "\n").encode()
+    )
+
+
+def _load_canary_results(
+    stage: Path, candidates: list[Candidate]
+) -> dict[str, dict[str, str]]:
+    if not _canary_path(stage).is_file():
+        return {}
+    payload = json.loads(_canary_path(stage).read_text())
+    if payload.get("fingerprint") != fingerprint(candidates):
+        raise ValueError("staged canary does not match candidate file")
+    return payload.get("results", {})
+
+
+def _canary_passed(
+    stage: Path, candidate: Candidate, index: int, canaries: dict
+) -> bool:
+    session = stage / "sessions" / f"{candidate.username}.json"
+    result = canaries.get(str(index), {})
+    return (
+        isinstance(result, dict)
+        and _session_is_usable(session)
+        and result.get("result") == "success"
+        and result.get("session_sha256") == _session_hash(session)
+    )
+
+
+def _validate_canary_url(url: str) -> None:
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"instagram.com", "www.instagram.com"}
+        or not re.fullmatch(r"/(p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path)
+    ):
+        raise ValueError("canary URL must be a public Instagram post or reel URL")
+
+
 def login_worker(path: Path, index: int, stage: Path) -> int:
     """Run one CAA login in an isolated process with redacted output."""
     from instagrapi import Client
@@ -234,6 +287,110 @@ def verify_worker(path: Path, index: int, stage: Path) -> int:
     except Exception as error:
         print(json.dumps({"result": type(error).__name__}))
     return 1
+
+
+def canary_worker(path: Path, index: int, stage: Path, url: str) -> int:
+    """Download one public media item using a saved, identity-checked session."""
+    from instagrapi import Client
+
+    candidate = read_candidates(path)[index]
+    session = stage / "sessions" / f"{candidate.username}.json"
+    if not _session_is_usable(session):
+        print(json.dumps({"result": "session_missing"}))
+        return 1
+    client = Client()
+    proxy = account_proxy(index)
+    if proxy:
+        client.set_proxy(proxy)
+    try:
+        client.load_settings(session)
+        identity = client.account_info()
+        cookies = client.get_settings().get("cookies", {})
+        if identity.username.casefold() != candidate.username.casefold() or str(
+            identity.pk
+        ) != str(cookies.get("ds_user_id")):
+            print(json.dumps({"result": "identity_mismatch"}))
+            return 1
+        media_pk = client.media_pk_from_url(url)
+        media = client.media_info(media_pk)
+        with tempfile.TemporaryDirectory() as folder:
+            if media.media_type == 1:
+                output = client.photo_download(media_pk, folder=Path(folder))
+            elif media.media_type == 2:
+                output = client.video_download(media_pk, folder=Path(folder))
+            else:
+                print(json.dumps({"result": "unsupported_media_type"}))
+                return 1
+            if Path(output).is_file() and Path(output).stat().st_size > 0:
+                print(json.dumps({"result": "success"}))
+                return 0
+        print(json.dumps({"result": "empty_download"}))
+    except Exception as error:
+        print(json.dumps({"result": type(error).__name__}))
+    return 1
+
+
+def canary(path: Path, root: Path, url: str, timeout: int = 120) -> dict[str, int]:
+    _validate_canary_url(url)
+    candidates = read_candidates(path)
+    stage = _stage_for(root, candidates)
+    results = _load_results(stage, candidates)
+    if len(results) != len(candidates):
+        raise ValueError("every candidate must have a prewarm result")
+    canaries = _load_canary_results(stage, candidates)
+    for index, candidate in enumerate(candidates):
+        if results.get(str(index)) != "success":
+            continue
+        if _canary_passed(stage, candidate, index, canaries):
+            continue
+        session = stage / "sessions" / f"{candidate.username}.json"
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "canary-worker",
+                    "--candidates",
+                    str(path),
+                    "--index",
+                    str(index),
+                    "--stage-root",
+                    str(stage),
+                    "--canary-url",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            payload = json.loads(completed.stdout.strip().splitlines()[-1])
+            result = payload.get("result", "worker_failed")
+            if completed.returncode != 0 and result == "success":
+                result = "worker_failed"
+        except (subprocess.TimeoutExpired, ValueError, IndexError, KeyError):
+            result = "worker_timeout_or_error"
+        canaries[str(index)] = {
+            "result": result,
+            "session_sha256": (
+                _session_hash(session) if _session_is_usable(session) else ""
+            ),
+        }
+        _write_canary_results(stage, candidates, canaries)
+        print(f"account {index + 1}/{len(candidates)}: {result}", flush=True)
+    return {
+        "total": len(candidates),
+        "passed": sum(
+            results.get(str(index)) == "success"
+            and _canary_passed(stage, candidate, index, canaries)
+            for index, candidate in enumerate(candidates)
+        ),
+        "pending": sum(
+            results.get(str(index)) == "success"
+            and not _canary_passed(stage, candidate, index, canaries)
+            for index, candidate in enumerate(candidates)
+        ),
+    }
 
 
 def _verify_session(path: Path, index: int, stage: Path, timeout: int = 45) -> str:
@@ -370,6 +527,14 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
     ]
     if not successful:
         raise ValueError("no successful sessions; refusing activation")
+    canaries = _load_canary_results(stage, candidates)
+    for index, candidate in enumerate(candidates):
+        if results[str(index)] == "success" and not _canary_passed(
+            stage, candidate, index, canaries
+        ):
+            raise ValueError(
+                f"staged media canary missing or stale for {candidate.username}"
+            )
     for index, candidate in enumerate(candidates):
         if results[str(index)] != "success":
             continue
@@ -392,11 +557,30 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
     owner_info = current_roster.stat()
     owner = (owner_info.st_uid, owner_info.st_gid)
     roster = "".join(candidate.account_line() for candidate in candidates).encode()
+    previous_roster = {
+        account.username: account for account in read_candidates(current_roster)
+    }
+    previous_state = {}
+    if state_file.is_file():
+        previous_state = {
+            account["username"]: account
+            for account in json.loads(state_file.read_text()).get("accounts", [])
+        }
+    activated_now = datetime.now().isoformat()
     state = {
         "accounts": [
             {
                 "username": candidate.username,
                 "is_banned": results[str(index)] != "success",
+                "activated_at": (
+                    (
+                        previous_state.get(candidate.username, {}).get("activated_at")
+                        if previous_roster.get(candidate.username) == candidate
+                        else activated_now
+                    )
+                    if results[str(index)] == "success"
+                    else None
+                ),
                 "ban_reason": (
                     None if results[str(index)] == "success" else "prewarm_failed"
                 ),
@@ -440,12 +624,16 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prewarm", "activate", "worker", "verify"])
+    parser.add_argument(
+        "command",
+        choices=["prewarm", "canary", "activate", "worker", "verify", "canary-worker"],
+    )
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--stage-root", type=Path, default=Path(".account-rotation"))
     parser.add_argument("--seed-sessions", type=Path)
     parser.add_argument("--project", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--index", type=int)
+    parser.add_argument("--canary-url")
     args = parser.parse_args()
     try:
         assert_private_candidate_file(args.candidates)
@@ -459,6 +647,15 @@ def main() -> None:
             raise SystemExit(
                 verify_worker(args.candidates, args.index, args.stage_root)
             )
+        if args.command == "canary-worker":
+            if args.index is None or not args.canary_url:
+                raise ValueError("canary-worker requires --index and --canary-url")
+            _validate_canary_url(args.canary_url)
+            raise SystemExit(
+                canary_worker(
+                    args.candidates, args.index, args.stage_root, args.canary_url
+                )
+            )
         if args.command == "prewarm":
             summary = prewarm(
                 args.candidates,
@@ -466,6 +663,10 @@ def main() -> None:
                 args.seed_sessions,
                 project=args.project,
             )
+        elif args.command == "canary":
+            if not args.canary_url:
+                raise ValueError("canary requires --canary-url")
+            summary = canary(args.candidates, args.stage_root, args.canary_url)
         else:
             summary = activate(args.candidates, args.stage_root, args.project)
         print(json.dumps(summary, sort_keys=True))
