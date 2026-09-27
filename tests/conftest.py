@@ -1,4 +1,4 @@
-"""Keep unit tests on injected in-process providers by default."""
+"""Opt-in fixture for unit tests that inject in-process providers."""
 
 import pytest
 

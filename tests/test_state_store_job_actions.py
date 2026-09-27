@@ -46,10 +46,12 @@ def test_state_store_writer_waits_for_lock_then_commits(tmp_path):
         writer.execute("UPDATE jobs SET status = 'queued' WHERE job_id = 'job-1'")
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(update_status)
-            assert started.wait(timeout=1)
-            time.sleep(0.1)
-            assert not future.done()
-            writer.commit()
+            try:
+                assert started.wait(timeout=1)
+                time.sleep(0.1)
+                assert not future.done()
+            finally:
+                writer.commit()
             future.result(timeout=2)
         assert (
             writer.execute("SELECT status FROM jobs WHERE job_id = 'job-1'").fetchone()[

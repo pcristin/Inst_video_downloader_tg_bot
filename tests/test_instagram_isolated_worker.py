@@ -10,6 +10,7 @@ import pytest
 
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services import instagram_isolated_worker as worker
+from src.instagram_video_bot.services import subprocess_lifecycle
 from src.instagram_video_bot.services.download_models import (
     DownloadError,
     MediaItem,
@@ -73,6 +74,24 @@ def test_worker_reports_malformed_payload_when_result_path_is_available(
     response = json.loads(result_path.read_text(encoding="utf-8"))
     assert response["ok"] is False
     assert response["error_type"] == "JSONDecodeError"
+
+
+def test_process_group_cleanup_runs_after_leader_exits(monkeypatch):
+    calls = []
+
+    class ExitedLeader:
+        pid = 12345
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(
+        subprocess_lifecycle.os, "killpg", lambda pid, sig: calls.append((pid, sig))
+    )
+
+    subprocess_lifecycle.terminate_process_group(ExitedLeader())
+
+    assert calls == [(12345, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio

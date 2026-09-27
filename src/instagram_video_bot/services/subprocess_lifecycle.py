@@ -23,12 +23,13 @@ async def wait_for_process(
 
 
 def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+    """Kill the process group of a child started with start_new_session=True."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    if process.poll() is not None:
+        return
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:

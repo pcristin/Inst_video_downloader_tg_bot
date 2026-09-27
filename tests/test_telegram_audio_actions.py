@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,6 +79,7 @@ async def test_audio_action_sends_converted_cached_video(monkeypatch, tmp_path):
     await bot.audio_action_callback_handler(
         audio_update(query), SimpleNamespace(bot=telegram)
     )
+    await bot._audio_action_tasks["req-1"]
 
     assert len(telegram.sent) == 1
     assert telegram.sent[0]["chat_id"] == 77
@@ -185,6 +187,7 @@ async def test_audio_action_reports_conversion_failure(monkeypatch, tmp_path):
     await bot.audio_action_callback_handler(
         audio_update(AudioQuery()), SimpleNamespace(bot=telegram)
     )
+    await bot._audio_action_tasks["req-1"]
 
     assert telegram.sent == []
     assert (
@@ -217,5 +220,42 @@ async def test_audio_action_swallows_failed_fallback_message(monkeypatch, tmp_pa
     await bot.audio_action_callback_handler(
         audio_update(AudioQuery()), SimpleNamespace(bot=UnreachableBot())
     )
+    await bot._audio_action_tasks["req-1"]
 
+    assert bot._active_audio_requests == set()
+
+
+@pytest.mark.asyncio
+async def test_audio_conversion_runs_after_callback_returns(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    saved_video(store, source)
+    bot = TelegramBot(state_store=store)
+    telegram = AudioBot()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def convert(_source, output):
+        started.set()
+        await release.wait()
+        output.write_bytes(b"audio")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.convert_video_to_mp3", convert
+    )
+    query = AudioQuery()
+
+    await bot.audio_action_callback_handler(
+        audio_update(query), SimpleNamespace(bot=telegram)
+    )
+
+    task = bot._audio_action_tasks["req-1"]
+    assert not task.done()
+    assert query.answers == ["Preparing audio…"]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert telegram.sent == []
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+    assert len(telegram.sent) == 1
     assert bot._active_audio_requests == set()

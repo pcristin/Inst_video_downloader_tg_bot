@@ -140,6 +140,7 @@ class TelegramBot:
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
         self._active_audio_requests: set[str] = set()
+        self._audio_action_tasks: dict[str, asyncio.Task[None]] = {}
         self._audio_conversion_semaphore = asyncio.Semaphore(2)
         self.request_contexts: dict[str, RequestContext] = {}
         self.request_intake = TelegramRequestIntake(self)
@@ -322,9 +323,57 @@ class TelegramBot:
             return
 
         self._active_audio_requests.add(request_id)
-        audio_path: Path | None = None
         try:
             await query.answer(label("Preparing audio…", "Готовлю аудио…"))
+        except (TelegramError, asyncio.CancelledError):
+            self._active_audio_requests.discard(request_id)
+            raise
+        task = asyncio.create_task(
+            self._deliver_audio_action(
+                request_id=request_id,
+                source=source,
+                chat_id=int(row["chat_id"]),
+                message_id=query.message.message_id,
+                bot=context.bot,
+                russian=russian,
+            )
+        )
+        self._audio_action_tasks[request_id] = task
+        task.add_done_callback(
+            lambda completed, rid=request_id: self._finish_audio_action_task(
+                rid, completed
+            )
+        )
+
+    def _finish_audio_action_task(
+        self, request_id: str, task: asyncio.Task[None]
+    ) -> None:
+        self._audio_action_tasks.pop(request_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Audio action task failed for request %s",
+                request_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _deliver_audio_action(
+        self,
+        *,
+        request_id: str,
+        source: Path,
+        chat_id: int,
+        message_id: int,
+        bot: Any,
+        russian: bool,
+    ) -> None:
+        def label(english: str, russian_text: str) -> str:
+            return russian_text if russian else english
+
+        audio_path: Path | None = None
+        try:
             with tempfile.NamedTemporaryFile(
                 prefix="bot-audio-", suffix=".mp3", dir=settings.TEMP_DIR, delete=False
             ) as temp_file:
@@ -336,10 +385,10 @@ class TelegramBot:
                 ):
                     raise AudioConversionError("Audio is too large for Telegram")
                 with audio_path.open("rb") as audio_file:
-                    await context.bot.send_audio(
-                        chat_id=int(row["chat_id"]),
+                    await bot.send_audio(
+                        chat_id=chat_id,
                         audio=audio_file,
-                        reply_to_message_id=query.message.message_id,
+                        reply_to_message_id=message_id,
                     )
         except (
             AudioConversionError,
@@ -361,10 +410,10 @@ class TelegramBot:
                 )
             )
             try:
-                await context.bot.send_message(
-                    chat_id=int(row["chat_id"]),
+                await bot.send_message(
+                    chat_id=chat_id,
                     text=message,
-                    reply_to_message_id=query.message.message_id,
+                    reply_to_message_id=message_id,
                 )
             except TelegramError as fallback_error:
                 logger.warning(
