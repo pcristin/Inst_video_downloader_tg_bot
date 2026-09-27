@@ -1,4 +1,4 @@
-.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth sessions-clean sessions-backup sessions-restore
+.PHONY: help build up down logs restart shell clean setup-2fa dev test-health test-proxies local-prepare local-config local-build local-up local-down local-logs accounts-list accounts-status accounts-setup accounts-rotate accounts-reset accounts-reset-old accounts-export-auth accounts-prewarm accounts-activate sessions-clean sessions-backup sessions-restore
 
 help: ## Show this help message
 	@echo 'Instagram Video Downloader Bot - uv-native workflow'
@@ -31,6 +31,8 @@ help: ## Show this help message
 	@echo '  accounts-reset   Reset banned accounts'
 	@echo '  accounts-reset-old Reset accounts banned longer than HOURS (default 24)'
 	@echo '  accounts-export-auth Export fast fallback cookies to secrets/instagram_auth.json'
+	@echo '  accounts-prewarm Validate and log in a candidate roster (CANDIDATES=/absolute/path)'
+	@echo '  accounts-activate Stop bot, install prewarmed roster, and restart it'
 	@echo ''
 	@echo '📁 Session Management:'
 	@echo '  sessions-clean   Delete all session files'
@@ -89,47 +91,45 @@ dev-build: ## Build for development
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 
 test-health: ## Test the health check
-	docker compose exec instagram-video-bot uv run --no-sync python -m src.instagram_video_bot.utils.health_check
+	docker compose exec instagram-video-bot /app/.venv/bin/python -m src.instagram_video_bot.utils.health_check
 
 test-proxies: ## Test proxy parsing and configuration
 	@echo "🌐 Testing Proxy Configuration"
 	@echo "Format: user:pass@host:port (http:// added automatically)"
-	@docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python -c "from src.instagram_video_bot.config.settings import settings; proxies = settings.get_proxy_list(); print(f'✅ Found {len(proxies)} proxies:'); [print(f'  {i+1}: {proxy}') for i, proxy in enumerate(proxies[:10])] if proxies else print('❌ No proxies configured in PROXIES environment variable')"
+	@docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot -c "from src.instagram_video_bot.config.settings import settings; print(f'Configured proxies: {len(settings.get_proxy_list())}')"
 
 # Account Management Commands
 accounts-list: ## List all accounts from accounts.txt with proxy assignments
-	@echo "📋 Accounts Configuration:"
-	@if [ -f accounts.txt ]; then \
-		echo ""; \
-		cat -n accounts.txt | head -10 | while read line; do \
-			echo "$$line"; \
-		done; \
-		echo ""; \
-		echo "💡 Total accounts: $$(wc -l < accounts.txt 2>/dev/null || echo 0)"; \
-	else \
-		echo "❌ accounts.txt not found"; \
-		echo "Create accounts.txt with format: username|password|totp_secret"; \
-	fi
+	@docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py status
 
 accounts-status: ## Show status of all Instagram accounts
-	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py status
+	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py status
 
 accounts-setup: ## Setup all accounts (login and create sessions)
-	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py setup
+	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py setup
 
 accounts-rotate: ## Manually rotate to next available account
-	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py rotate
+	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py rotate
 
 accounts-reset: ## Reset banned status for all accounts
-	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset
+	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py reset
 
 accounts-reset-old: ## Reset accounts banned longer than HOURS hours (default 24)
-	docker compose run --rm --entrypoint uv instagram-video-bot run --no-sync python /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
+	docker compose run --rm --entrypoint /app/.venv/bin/python instagram-video-bot /app/manage_accounts.py reset-old --hours $(if $(HOURS),$(HOURS),24)
 
 accounts-export-auth: ## Export fast fallback cookies from configured Instagram accounts
 	@mkdir -p secrets
 	@test -f secrets/instagram_auth.json || printf '%s\n' '{"instagram":[],"instagram_bearer":[]}' > secrets/instagram_auth.json
-	docker compose run --rm --user root --entrypoint sh -v ./secrets:/app/secrets instagram-video-bot -c 'uv run --no-sync python /app/manage_accounts.py export-auth; status=$$?; chown -R 1000:1000 /app/sessions /app/secrets/instagram_auth.json 2>/dev/null || true; exit $$status'
+	docker compose run --rm --user root --entrypoint /app/.venv/bin/python -v ./secrets:/app/secrets instagram-video-bot /app/manage_accounts.py export-auth
+	chown -R --reference=sessions sessions secrets/instagram_auth.json
+
+accounts-prewarm: ## Validate and prewarm every candidate, preserving successful sessions
+	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
+	uv run --no-sync python rotate_accounts.py prewarm --candidates "$(CANDIDATES)" $(if $(SEED_SESSIONS),--seed-sessions "$(SEED_SESSIONS)",)
+
+accounts-activate: ## Stop bot, install checked roster, then restart
+	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
+	@docker compose stop instagram-video-bot && { uv run --no-sync python rotate_accounts.py activate --candidates "$(CANDIDATES)"; result=$$?; docker compose up -d instagram-video-bot || exit $$?; exit $$result; }
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)

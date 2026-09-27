@@ -73,6 +73,8 @@ def test_save_state_atomically_replaces_with_valid_json(tmp_path):
 
     payload = json.loads(state_file.read_text())
     assert payload["accounts"][0]["username"] == "first"
+    assert "password" not in payload["accounts"][0]
+    assert "totp_secret" not in payload["accounts"][0]
     assert list(state_file.parent.glob(".accounts_state.json.*.tmp")) == []
 
 

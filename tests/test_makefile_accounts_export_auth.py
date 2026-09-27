@@ -10,5 +10,6 @@ def test_accounts_export_auth_runs_containerized_exporter() -> None:
     assert "docker compose run" in recipe
     assert "--user root" in recipe
     assert "-v ./secrets:/app/secrets" in recipe
-    assert "python /app/manage_accounts.py export-auth" in recipe
-    assert "chown -R 1000:1000 /app/sessions /app/secrets/instagram_auth.json" in recipe
+    assert "/app/.venv/bin/python" in recipe
+    assert "/app/manage_accounts.py export-auth" in recipe
+    assert "chown -R --reference=sessions sessions secrets/instagram_auth.json" in recipe
