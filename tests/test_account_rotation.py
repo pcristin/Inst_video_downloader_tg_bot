@@ -149,6 +149,258 @@ def test_activate_requires_every_account_attempted(tmp_path):
         rotate_accounts.activate(candidates, tmp_path / "stage", tmp_path / "project")
 
 
+def test_activate_requires_matching_media_canary_before_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: "success")
+    project = tmp_path / "project"
+    project.mkdir()
+    roster = project / "accounts.txt"
+    roster.write_text(f"old|pw|{SEED}\n")
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+
+    with pytest.raises(ValueError, match="canary"):
+        rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
+    assert roster.read_text() == f"old|pw|{SEED}\n"
+
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(session),
+            }
+        },
+    )
+    session.write_text(json.dumps({**SESSION, "new": True}))
+    with pytest.raises(ValueError, match="canary"):
+        rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
+    assert roster.read_text() == f"old|pw|{SEED}\n"
+
+
+def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: "success")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "accounts.txt").write_text(
+        f"first|pw1|{SEED}\nsecond|pw2|{SEED}\nthird|pw3|{SEED}\n"
+    )
+    (project / "account-state").mkdir()
+    (project / "account-state" / "accounts_state.json").write_text(
+        json.dumps(
+            {
+                "accounts": [
+                    {
+                        "username": "first",
+                        "activated_at": "2026-01-01T00:00:00",
+                        "last_used": "2026-09-27T12:00:00",
+                    },
+                    {
+                        "username": "second",
+                        "activated_at": None,
+                        "is_banned": True,
+                        "last_used": "2026-09-27T12:00:00",
+                    },
+                    {"username": "third", "is_banned": False},
+                ]
+            }
+        )
+    )
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(
+        f"first|pw1|{SEED}\nsecond|pw2|{SEED}\nthird|pw3|{SEED}\n"
+    )
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    canaries = {}
+    for index, candidate in enumerate(candidates):
+        session = stage / "sessions" / f"{candidate.username}.json"
+        session.write_text(json.dumps(SESSION))
+        canaries[str(index)] = {
+            "result": "success",
+            "session_sha256": rotate_accounts._session_hash(session),
+        }
+    rotate_accounts._write_results(
+        stage, candidates, {"0": "success", "1": "success", "2": "success"}
+    )
+    rotate_accounts._write_canary_results(stage, candidates, canaries)
+
+    rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
+
+    state = json.loads((project / "account-state" / "accounts_state.json").read_text())
+    assert state["accounts"][0]["activated_at"] == "2026-01-01T00:00:00"
+    assert state["accounts"][0]["last_used"] == "2026-09-27T12:00:00"
+    assert state["accounts"][1]["activated_at"] is not None
+    assert state["accounts"][1]["last_used"] is None
+    assert state["accounts"][2]["activated_at"] is None
+
+
+def test_activate_rejects_session_replaced_during_verification(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    roster = project / "accounts.txt"
+    roster.write_text(f"old|pw|{SEED}\n")
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(session),
+            }
+        },
+    )
+
+    def replace_session(*_args):
+        session.write_text(json.dumps({**SESSION, "renewed": True}))
+        return "success"
+
+    monkeypatch.setattr(rotate_accounts, "_verify_session", replace_session)
+    with pytest.raises(ValueError, match="canary"):
+        rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
+    assert roster.read_text() == f"old|pw|{SEED}\n"
+
+
+@pytest.mark.parametrize("media_type", [1, 8])
+def test_canary_checks_saved_session_and_downloads_media(
+    tmp_path, monkeypatch, capsys, media_type
+):
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    stage = tmp_path / "stage"
+    (stage / "sessions").mkdir(parents=True)
+    (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
+    monkeypatch.setattr(rotate_accounts, "account_proxy", lambda _index: None)
+    loaded = []
+
+    class FakeClient:
+        def load_settings(self, path):
+            loaded.append(path)
+
+        def account_info(self):
+            return SimpleNamespace(username="first", pk="123")
+
+        def get_settings(self):
+            return SESSION
+
+        def media_pk_from_url(self, _url):
+            return "456"
+
+        def media_info(self, _pk):
+            return SimpleNamespace(media_type=media_type)
+
+        def photo_download(self, _pk, folder):
+            output = folder / "sample.jpg"
+            output.write_bytes(b"image")
+            return output
+
+        def album_download(self, _pk, folder):
+            return [self.photo_download(_pk, folder)]
+
+    monkeypatch.setattr(instagrapi, "Client", FakeClient)
+    assert (
+        rotate_accounts.canary_worker(
+            candidate_file, 0, stage, "https://www.instagram.com/p/test/"
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["result"] == "success"
+    assert loaded == [stage / "sessions" / "first.json"]
+
+
+def test_canary_records_success_for_exact_session_and_skips_failed_logins(
+    tmp_path, monkeypatch
+):
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\nsecond|pw2|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(
+        stage, candidates, {"0": "success", "1": "LoginRequired"}
+    )
+    calls = []
+
+    def worker(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout='{"result":"success"}\n', returncode=0)
+
+    monkeypatch.setattr(rotate_accounts.subprocess, "run", worker)
+    first = rotate_accounts.canary(
+        candidate_file, tmp_path / "stage", "https://www.instagram.com/p/test/"
+    )
+    second = rotate_accounts.canary(
+        candidate_file, tmp_path / "stage", "https://www.instagram.com/p/test/"
+    )
+
+    assert first == second == {"total": 2, "passed": 1, "pending": 0}
+    assert len(calls) == 1
+    assert "canary-worker" in calls[0]
+    assert rotate_accounts._load_canary_results(stage, candidates)["0"][
+        "session_sha256"
+    ] == rotate_accounts._session_hash(stage / "sessions" / "first.json")
+
+
+def test_canary_rejects_session_replaced_during_worker(tmp_path, monkeypatch):
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+
+    def worker(*_args, **_kwargs):
+        session.write_text(json.dumps({**SESSION, "renewed": True}))
+        return SimpleNamespace(stdout='{"result":"success"}\n', returncode=0)
+
+    monkeypatch.setattr(rotate_accounts.subprocess, "run", worker)
+    summary = rotate_accounts.canary(
+        candidate_file, tmp_path / "stage", "https://www.instagram.com/p/test/"
+    )
+
+    assert summary["passed"] == 0
+    assert summary["pending"] == 1
+    assert (
+        rotate_accounts._load_canary_results(stage, candidates)["0"]["result"]
+        != "success"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://www.instagram.com/p/test/",
+        "https://evil.test/p/test/",
+        "https://www.instagram.com/accounts/login/",
+    ],
+)
+def test_canary_rejects_non_media_urls(tmp_path, url):
+    with pytest.raises(ValueError, match="canary URL"):
+        rotate_accounts.canary(tmp_path / "missing", tmp_path / "stage", url)
+
+
+def test_canary_accepts_instagram_share_reel_url():
+    rotate_accounts._validate_canary_url("https://www.instagram.com/share/reel/ABC123/")
+
+
 def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: "success")
     project = tmp_path / "project"
@@ -172,6 +424,18 @@ def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path, monkeypa
     (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
     rotate_accounts._write_results(
         stage, candidates, {"0": "success", "1": "ClientError"}
+    )
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(
+                    stage / "sessions" / "first.json"
+                ),
+            }
+        },
     )
 
     summary = rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
@@ -224,6 +488,18 @@ def test_activate_restores_old_files_if_write_fails(tmp_path, monkeypatch):
     (stage / "sessions").mkdir(parents=True)
     (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
     rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(
+                    stage / "sessions" / "first.json"
+                ),
+            }
+        },
+    )
     write = rotate_accounts._private_write
     failed = False
 
@@ -266,6 +542,18 @@ def test_activate_rejects_unverified_identity_before_mutation(tmp_path, monkeypa
     (stage / "sessions").mkdir(parents=True)
     (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
     rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(
+                    stage / "sessions" / "first.json"
+                ),
+            }
+        },
+    )
     monkeypatch.setattr(
         rotate_accounts, "_verify_session", lambda *_args: "identity_mismatch"
     )
