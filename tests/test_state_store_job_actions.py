@@ -3,6 +3,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from src.instagram_video_bot.services.state_store import StateStore
 
 
@@ -55,6 +57,26 @@ def test_state_store_writer_waits_for_lock_then_commits(tmp_path):
             ]
             == "running"
         )
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_state_store_writer_reports_lock_after_busy_wait(tmp_path):
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.create_job("job-1", 77, "https://example.com/video", "instagram", "queued")
+    writer = sqlite3.connect(db_path)
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("UPDATE jobs SET status = 'queued' WHERE job_id = 'job-1'")
+        store._conn.execute("PRAGMA busy_timeout = 100")
+        started = time.monotonic()
+
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store.update_job_status("job-1", "running")
+
+        assert time.monotonic() - started >= 0.09
     finally:
         writer.rollback()
         writer.close()

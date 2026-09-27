@@ -314,6 +314,16 @@ class VideoDownloader:
             tried_accounts.add(account.username)
             self._record_instagram_account_attempt()
             release_account_on_exit = True
+            legacy_timeout_callbacks = {}
+            if not settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED:
+                # Only a detached thread can outlive its account lease.
+                legacy_timeout_callbacks = {
+                    "on_timeout_finish": lambda account=account, manager=manager: manager.release_account(account),
+                    "on_timeout_stale": lambda account=account, manager=manager: self._retire_stale_instagram_account(manager, account),
+                    "on_cancel_stale": lambda account=account, manager=manager: self._retire_stale_instagram_account(
+                        manager, account, reason="provider_cancelled_stale"
+                    ),
+                }
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
@@ -325,16 +335,7 @@ class VideoDownloader:
                             output_dir,
                         ),
                         action="leased", url=url, output_dir=output_dir, account=account,
-                        on_timeout_finish=lambda account=account, manager=manager: manager.release_account(account),
-                        on_timeout_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
-                            manager,
-                            account,
-                        ),
-                        on_cancel_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
-                            manager,
-                            account,
-                            reason="provider_cancelled_stale",
-                        ),
+                        **legacy_timeout_callbacks,
                     )
                     release_account_on_exit = True
                 manager.record_account_success(account)
