@@ -2133,11 +2133,11 @@ class TelegramBot:
                 if job.last_delivery_error is not None:
                     raise job.last_delivery_error
                 raise RuntimeError("Shared delivery finished without a result")
-            await self._delete_status_message(request_context.status_message)
             self.job_manager.mark_request_completed(
                 request_context.request_id,
                 cache_hit=video_info.from_cache,
             )
+            await self._delete_status_message(request_context.status_message)
             if (
                 not video_info.from_cache
                 and not settings.RESULT_CACHE_ENABLED

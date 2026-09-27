@@ -277,6 +277,90 @@ def _make_request_context(status_message: _FakeStatusMessage) -> RequestContext:
     )
 
 
+@pytest.mark.asyncio
+async def test_request_is_completed_before_status_message_deletion(tmp_path):
+    class SlowDeleteStatusMessage(_FakeStatusMessage):
+        def __init__(self):
+            super().__init__()
+            self.deleting = asyncio.Event()
+            self.release_delete = asyncio.Event()
+
+        async def delete(self):
+            self.deleting.set()
+            await self.release_delete.wait()
+            await super().delete()
+
+    store = StateStore(tmp_path / "state.db")
+    telegram_bot = TelegramBot(state_store=store)
+    status_message = SlowDeleteStatusMessage()
+    request_context = _make_request_context(status_message)
+    video_file = tmp_path / "video.mp4"
+    video_file.write_bytes(b"video")
+    video_info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[MediaItem(file_path=video_file, media_type="video")],
+        primary_media_type="video",
+    )
+    result_future = asyncio.get_running_loop().create_future()
+    result_future.set_result(video_info)
+    job = SharedJob(
+        job_id="job-1",
+        chat_id=request_context.chat_id,
+        submitter_user_id=request_context.user_id,
+        provider="instagram",
+        provider_label="Instagram",
+        original_url=request_context.original_url,
+        normalized_url=request_context.normalized_url,
+        state="completed",
+        result_future=result_future,
+        delivery_future=asyncio.get_running_loop().create_future(),
+        delivery_request_id=request_context.request_id,
+        requesters={
+            request_context.request_id: RequestRecord(
+                request_id=request_context.request_id,
+                chat_id=request_context.chat_id,
+                user_id=request_context.user_id,
+                user_label="alice",
+            )
+        },
+    )
+    telegram_bot.job_manager._jobs[job.job_id] = job
+    store.create_job(
+        job.job_id,
+        request_context.chat_id,
+        request_context.normalized_url,
+        "instagram",
+        "completed",
+    )
+    store.create_request(
+        request_context.request_id,
+        job.job_id,
+        request_context.chat_id,
+        request_context.user_id,
+        "alice",
+        "instagram",
+        request_context.normalized_url,
+        "running",
+    )
+    store.start_job_metrics(
+        job_id=job.job_id,
+        chat_id=request_context.chat_id,
+        provider="instagram",
+        normalized_url=request_context.normalized_url,
+    )
+    task = asyncio.create_task(
+        telegram_bot._await_request(_FakeContext(_FakeBot()), request_context, job)
+    )
+    try:
+        await asyncio.wait_for(status_message.deleting.wait(), timeout=1)
+        row = store.get_request_for_action(request_context.request_id)
+        assert row is not None and row["status"] == "completed"
+    finally:
+        status_message.release_delete.set()
+        await asyncio.wait_for(task, timeout=1)
+
+
 @pytest.fixture(autouse=True)
 def _disable_direct_media_staging_by_default(monkeypatch):
     monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STORAGE_CHAT_ID", None)
