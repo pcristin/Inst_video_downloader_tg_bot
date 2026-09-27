@@ -3,6 +3,27 @@ import sqlite3
 from src.instagram_video_bot.services.state_store import StateStore
 
 
+def test_state_store_allows_health_reader_during_writer_transaction(tmp_path):
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.create_job("job-1", 77, "https://example.com/video", "instagram", "queued")
+    writer = sqlite3.connect(db_path)
+    reader = sqlite3.connect(db_path, timeout=0.2)
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("UPDATE jobs SET status = 'running' WHERE job_id = 'job-1'")
+
+        status = reader.execute(
+            "SELECT status FROM jobs WHERE job_id = 'job-1'"
+        ).fetchone()[0]
+
+        assert status == "queued"
+    finally:
+        writer.rollback()
+        reader.close()
+        writer.close()
+
+
 def test_request_failure_metadata_and_retry_link_are_persisted(tmp_path):
     store = StateStore(tmp_path / "state.db")
     normalized_url = "https://x.com/example/status/123"

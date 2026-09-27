@@ -342,6 +342,33 @@ async def test_send_single_video_uses_send_video(tmp_path):
     assert len(fake_bot.video_calls) == 1
     assert len(fake_bot.photo_calls) == 0
     assert len(fake_bot.group_calls) == 0
+    button = fake_bot.video_calls[0]["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "🎵 Аудио"
+    assert button.callback_data == "audio:req-1"
+
+
+@pytest.mark.asyncio
+async def test_large_single_video_does_not_offer_audio_after_cache_cleanup(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(settings, "TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES", 3)
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    request_context = _make_request_context(_FakeStatusMessage())
+    video_file = tmp_path / "v.mp4"
+    video_file.write_bytes(b"video")
+    info = VideoInfo(
+        file_path=video_file,
+        title="Video title",
+        media_items=[MediaItem(file_path=video_file, media_type="video")],
+        primary_media_type="video",
+    )
+
+    await telegram_bot._send_media(context, request_context, info)
+
+    assert fake_bot.video_calls[0]["reply_markup"] is None
+    assert not video_file.exists()
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1160,31 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
         "Instagram: отправляю в Telegram.",
     ]
     assert update.message.status_messages[0].deleted is True
+
+
+@pytest.mark.asyncio
+async def test_status_reply_failure_cancels_unattended_download(tmp_path):
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    update = _FakeUpdate("https://www.instagram.com/reel/a/")
+
+    async def reject_status(*args, **kwargs):
+        raise BadRequest("Cannot send status")
+
+    update.message.reply_text = reject_status
+    with pytest.raises(BadRequest, match="Cannot send status"):
+        await telegram_bot.handle_message(update, _FakeContext(_FakeBot()))
+
+    await asyncio.sleep(0)
+    assert not telegram_bot.active_request_tasks
+    assert all(
+        not request.active
+        for job in telegram_bot.job_manager._jobs.values()
+        for request in job.requesters.values()
+    )
+    assert all(
+        job.task.done() or job.task.cancelling()
+        for job in telegram_bot.job_manager._jobs.values()
+    )
 
 
 @pytest.mark.asyncio

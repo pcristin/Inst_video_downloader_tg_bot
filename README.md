@@ -42,7 +42,9 @@ Bot:  [Sends downloaded media with caption]
 - **Fast Primary Downloader + Legacy Fallback** - Multi-endpoint fast extraction first, authenticated fallback second
 - **Automatic Media Downloads** - Supports Instagram posts, reels, TV, stories (fallback path), and share links
 - **Photo + Album Support** - Sends single photos and mixed carousel albums to Telegram
+- **One-Tap Audio** - Tap the audio button on a direct, single-video delivery to receive an MP3 while the recent result is cached
 - **Multi-Account Rotation** - High availability with account switching
+- **Bounded Instagram Workers** - Blocking Instagram downloads run in killable subprocesses, so timed-out work cannot keep a provider thread occupied
 - **Anti-Ban Protection** - Account rotation and cooldown-based recovery
 - **Advanced Authentication** - Cookie management and 2FA support
 - **Health Monitoring** - Automatic account status tracking
@@ -308,6 +310,8 @@ PROXY_PASSWORD=proxy_pass
 IG_FAST_METHOD_ENABLED=true
 IG_FAST_TIMEOUT_CONNECT=10
 IG_FAST_TIMEOUT_READ=45
+INSTAGRAM_ISOLATED_WORKERS_ENABLED=true
+INSTAGRAM_PROVIDER_TIMEOUT_SECONDS=180
 LOG_LEVEL=INFO
 VIDEO_WIDTH=320
 VIDEO_HEIGHT=480
@@ -348,6 +352,8 @@ uv run python manage_accounts.py status
 ## Paid true inline mode
 
 Inline mode sends media into the chat where the inline result is selected. Directly pasting links into a bot chat remains free.
+
+For directly pasted links, a single delivered video has a **🎵 Audio** button when its source stays in the recent-result cache. It converts the video to MP3 and replies in the same chat. The button expires with the cache (four hours by default); send the link again if it has expired. Albums, large videos removed from local cache, and inline deliveries do not show this button.
 
 For users who do not already have inline access, the first inline selection is a Stars invoice or subscription invoice link. After the payment succeeds, they run the same inline query again and select "Send media here"; that second result is the one the bot edits into the requested media. One-time payments grant that retry only for the paid link, and are refunded if delivery for that paid link fails.
 

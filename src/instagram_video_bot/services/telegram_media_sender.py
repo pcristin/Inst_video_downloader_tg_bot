@@ -8,7 +8,13 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Protocol
 
-from telegram import InputMediaPhoto, InputMediaVideo, Message
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Message,
+)
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
@@ -22,8 +28,10 @@ from .telegram_media_files import (
     media_input,
     validate_media_path,
 )
-from .telegram_media_retry import (build_telegram_timeout_kwargs,
-                                   call_telegram_with_retries)
+from .telegram_media_retry import (
+    build_telegram_timeout_kwargs,
+    call_telegram_with_retries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,7 @@ class MediaRequestContext(Protocol):
     chat_id: int
     normalized_url: str
     original_message_id: int
+    request_id: str
 
 
 class TelegramMediaSender:
@@ -72,6 +81,7 @@ class TelegramMediaSender:
                     media_item,
                     caption,
                     fallback_to_local_on_rejected_file_id,
+                    offer_audio=True,
                 )
             )
             self._persist_telegram_file_ids(
@@ -136,7 +146,32 @@ class TelegramMediaSender:
         media_item: MediaItem,
         caption: RichText | None,
         fallback_to_local_on_rejected_file_id: bool,
+        offer_audio: bool = False,
     ) -> str | None:
+        audio_markup = None
+        if (
+            offer_audio
+            and media_item.media_type == "video"
+            and settings.RESULT_CACHE_ENABLED
+            and media_item.file_path.is_file()
+            and media_item.file_path.stat().st_size
+            <= settings.TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES
+            and getattr(request_context, "request_id", None)
+        ):
+            label = (
+                "🎵 Аудио"
+                if getattr(request_context, "language_code", "en") == "ru"
+                else "🎵 Send audio"
+            )
+            audio_markup = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            label, callback_data=f"audio:{request_context.request_id}"
+                        )
+                    ]
+                ]
+            )
         if media_item.telegram_file_id:
             try:
                 message = await self._send_single_media_value(
@@ -145,6 +180,7 @@ class TelegramMediaSender:
                     media_item,
                     caption,
                     media_item.telegram_file_id,
+                    reply_markup=audio_markup,
                 )
                 return self.extract_telegram_file_id(message, media_item.media_type)
             except BadRequest as exc:
@@ -180,6 +216,7 @@ class TelegramMediaSender:
                     caption,
                     media_file,
                     timeout_kwargs=timeout_kwargs,
+                    reply_markup=audio_markup,
                 )
 
         message = await call_telegram_with_retries(
@@ -204,6 +241,7 @@ class TelegramMediaSender:
         media_value: Any,
         *,
         timeout_kwargs: dict[str, float] | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Message:
         timeout_kwargs = timeout_kwargs or {}
         caption_entities = caption.entities if caption and caption.entities else None
@@ -215,6 +253,7 @@ class TelegramMediaSender:
                 caption=caption_text,
                 caption_entities=caption_entities,
                 reply_to_message_id=request_context.original_message_id,
+                reply_markup=reply_markup,
                 **self.telegram_video_kwargs(media_item),
                 **timeout_kwargs,
             )

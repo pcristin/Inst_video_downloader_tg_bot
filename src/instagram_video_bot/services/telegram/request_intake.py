@@ -124,7 +124,11 @@ class TelegramRequestIntake:
             language_code=language_code,
         )
         if status_message is None:
-            status_message = await message.reply_text(text, reply_markup=markup)
+            try:
+                status_message = await message.reply_text(text, reply_markup=markup)
+            except (Exception, asyncio.CancelledError):
+                bot.job_manager.cancel_request(submission.request_id)
+                raise
         else:
             await bot._safe_edit_text(
                 status_message,

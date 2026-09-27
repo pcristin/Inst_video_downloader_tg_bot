@@ -14,13 +14,16 @@ from time import perf_counter
 from typing import AsyncIterator, Optional, TypeVar
 from urllib.parse import urlparse
 
+from ..config.settings import settings
+from ..utils.account_manager import get_account_manager
+from . import instagram_isolated_worker
 from .download_models import (
     AuthenticationError,
     DownloadError,
     MediaItem,
     ProviderExecutionMetrics,
-    VideoInfo,
     VideoDownloadError,
+    VideoInfo,
 )
 from .instagram_client import InstagramAuthError, InstagramClient
 from .instagram_fast_extractor import InstagramFastExtractor
@@ -33,8 +36,6 @@ from .provider_adapters import (
 )
 from .twitter_downloader import TwitterDownloader
 from .youtube_downloader import YouTubeShortsDownloader
-from ..config.settings import settings
-from ..utils.account_manager import get_account_manager
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -216,8 +217,9 @@ class VideoDownloader:
                         min_delay=self.fast_min_delay_between_downloads,
                         random_delay_range=self.fast_random_delay_range,
                     )
-                    fast_result = await self._run_instagram_sync(
-                        lambda: self.instagram_adapter.download_with_fast_method(url, output_dir)
+                    fast_result = await self._run_instagram_operation(
+                        lambda: self.instagram_adapter.download_with_fast_method(url, output_dir),
+                        action="fast", url=url, output_dir=output_dir,
                     )
                 self.last_provider_metrics.instagram_fast_status = "succeeded"
                 self.last_provider_metrics.instagram_fast_duration_ms = int(
@@ -257,10 +259,11 @@ class VideoDownloader:
         self.last_provider_metrics.instagram_fallback_attempted = True
         if not is_story_url:
             try:
-                public_result = await self._run_instagram_sync(
+                public_result = await self._run_instagram_operation(
                     lambda: self.instagram_adapter.download_with_public_ytdlp(
                         url, output_dir
-                    )
+                    ),
+                    action="public", url=url, output_dir=output_dir,
                 )
                 if public_result:
                     fallback_path = getattr(
@@ -315,12 +318,13 @@ class VideoDownloader:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle(account.username)
                     release_account_on_exit = False
-                    result = await self._run_instagram_sync(
+                    result = await self._run_instagram_operation(
                         lambda account=account: self._download_with_leased_account_sync(
                             account,
                             url,
                             output_dir,
                         ),
+                        action="leased", url=url, output_dir=output_dir, account=account,
                         on_timeout_finish=lambda account=account, manager=manager: manager.release_account(account),
                         on_timeout_stale=lambda account=account, manager=manager: self._retire_stale_instagram_account(
                             manager,
@@ -363,7 +367,7 @@ class VideoDownloader:
                 if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
                     self.last_account_health_event = event
             except Exception as error:
-                if isinstance(error, InstagramProviderTimeoutError):
+                if isinstance(error, InstagramProviderTimeoutError) and not settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED:
                     release_account_on_exit = False
                 else:
                     release_account_on_exit = True
@@ -374,7 +378,7 @@ class VideoDownloader:
                 self.last_provider_metrics.failure_class = "download_failed"
                 raise DownloadError(f"Download failed: {str(error)}") from error
             finally:
-                if release_account_on_exit:
+                if release_account_on_exit or settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED:
                     manager.release_account(account)
         if isinstance(last_error, (InstagramAuthError, AuthenticationError)):
             raise DownloadError("Authentication failed after account rotation retry") from last_error
@@ -411,8 +415,9 @@ class VideoDownloader:
             try:
                 async with self._instagram_provider_slot():
                     await self._apply_instagram_throttle("__single__")
-                    result = await self._run_instagram_sync(
-                        lambda: self._download_with_single_account_sync(url, output_dir)
+                    result = await self._run_instagram_operation(
+                        lambda: self._download_with_single_account_sync(url, output_dir),
+                        action="single", url=url, output_dir=output_dir,
                     )
                 self.last_provider_metrics.instagram_success_path = "fallback"
                 self.last_provider_metrics.instagram_fallback_path = getattr(
@@ -600,6 +605,43 @@ class VideoDownloader:
         if fast_error:
             raise DownloadError(f"Download failed: fast_path_error={str(fast_error)}")
         raise DownloadError("Download failed")
+
+    async def _run_instagram_operation(
+        self,
+        operation: Callable[[], VideoInfo | None],
+        *,
+        action: str,
+        url: str,
+        output_dir: Path,
+        account=None,
+        **timeout_callbacks,
+    ) -> VideoInfo | None:
+        if not settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED:
+            return await self._run_instagram_sync(operation, **timeout_callbacks)
+        payload: dict[str, object] = {
+            "action": action,
+            "url": url,
+            "output_dir": str(output_dir),
+        }
+        if account is not None:
+            payload["account"] = {
+                "username": account.username,
+                "password": account.password,
+                "session_file": str(account.session_file) if account.session_file else None,
+                "proxy": account.proxy,
+                "totp_secret": account.totp_secret,
+            }
+        try:
+            return await instagram_isolated_worker.run_isolated_instagram_operation(
+                payload,
+                timeout_seconds=float(settings.INSTAGRAM_PROVIDER_TIMEOUT_SECONDS),
+            )
+        except InstagramProviderTimeoutError:
+            self.last_provider_metrics.failure_class = "provider_timeout"
+            raise
+        except asyncio.CancelledError:
+            self.last_provider_metrics.failure_class = "provider_cancelled"
+            raise
 
     async def _run_instagram_sync(
         self,
