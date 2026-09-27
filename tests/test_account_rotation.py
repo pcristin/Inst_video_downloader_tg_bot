@@ -188,11 +188,20 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
     monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: "success")
     project = tmp_path / "project"
     project.mkdir()
-    (project / "accounts.txt").write_text(f"first|pw1|{SEED}\n")
+    (project / "accounts.txt").write_text(f"first|pw1|{SEED}\nsecond|pw2|{SEED}\n")
     (project / "account-state").mkdir()
     (project / "account-state" / "accounts_state.json").write_text(
         json.dumps(
-            {"accounts": [{"username": "first", "activated_at": "2026-01-01T00:00:00"}]}
+            {
+                "accounts": [
+                    {
+                        "username": "first",
+                        "activated_at": "2026-01-01T00:00:00",
+                        "last_used": "2026-09-27T12:00:00",
+                    },
+                    {"username": "second", "activated_at": None, "is_banned": True},
+                ]
+            }
         )
     )
     candidate_file = tmp_path / "new.txt"
@@ -215,7 +224,8 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
 
     state = json.loads((project / "account-state" / "accounts_state.json").read_text())
     assert state["accounts"][0]["activated_at"] == "2026-01-01T00:00:00"
-    assert state["accounts"][1]["activated_at"] != "2026-01-01T00:00:00"
+    assert state["accounts"][0]["last_used"] == "2026-09-27T12:00:00"
+    assert state["accounts"][1]["activated_at"] is not None
 
 
 def test_canary_checks_saved_session_and_downloads_media(tmp_path, monkeypatch, capsys):
@@ -289,6 +299,33 @@ def test_canary_records_success_for_exact_session_and_skips_failed_logins(
     assert rotate_accounts._load_canary_results(stage, candidates)["0"][
         "session_sha256"
     ] == rotate_accounts._session_hash(stage / "sessions" / "first.json")
+
+
+def test_canary_rejects_session_replaced_during_worker(tmp_path, monkeypatch):
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+
+    def worker(*_args, **_kwargs):
+        session.write_text(json.dumps({**SESSION, "renewed": True}))
+        return SimpleNamespace(stdout='{"result":"success"}\n', returncode=0)
+
+    monkeypatch.setattr(rotate_accounts.subprocess, "run", worker)
+    summary = rotate_accounts.canary(
+        candidate_file, tmp_path / "stage", "https://www.instagram.com/p/test/"
+    )
+
+    assert summary["passed"] == 0
+    assert summary["pending"] == 1
+    assert (
+        rotate_accounts._load_canary_results(stage, candidates)["0"]["result"]
+        != "success"
+    )
 
 
 @pytest.mark.parametrize(

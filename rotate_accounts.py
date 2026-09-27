@@ -344,6 +344,9 @@ def canary(path: Path, root: Path, url: str, timeout: int = 120) -> dict[str, in
         if _canary_passed(stage, candidate, index, canaries):
             continue
         session = stage / "sessions" / f"{candidate.username}.json"
+        session_hash_before = (
+            _session_hash(session) if _session_is_usable(session) else None
+        )
         try:
             completed = subprocess.run(
                 [
@@ -370,11 +373,14 @@ def canary(path: Path, root: Path, url: str, timeout: int = 120) -> dict[str, in
                 result = "worker_failed"
         except (subprocess.TimeoutExpired, ValueError, IndexError, KeyError):
             result = "worker_timeout_or_error"
+        session_hash_after = (
+            _session_hash(session) if _session_is_usable(session) else None
+        )
+        if result == "success" and session_hash_before != session_hash_after:
+            result = "session_changed"
         canaries[str(index)] = {
             "result": result,
-            "session_sha256": (
-                _session_hash(session) if _session_is_usable(session) else ""
-            ),
+            "session_sha256": session_hash_after or "",
         }
         _write_canary_results(stage, candidates, canaries)
         print(f"account {index + 1}/{len(candidates)}: {result}", flush=True)
@@ -576,9 +582,17 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
                     (
                         previous_state.get(candidate.username, {}).get("activated_at")
                         if previous_roster.get(candidate.username) == candidate
+                        and previous_state.get(candidate.username, {}).get(
+                            "activated_at"
+                        )
                         else activated_now
                     )
                     if results[str(index)] == "success"
+                    else None
+                ),
+                "last_used": (
+                    previous_state.get(candidate.username, {}).get("last_used")
+                    if previous_roster.get(candidate.username) == candidate
                     else None
                 ),
                 "ban_reason": (
