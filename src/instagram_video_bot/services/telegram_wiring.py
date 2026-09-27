@@ -207,6 +207,12 @@ def _register_standard_handlers(application: Application, bot: Any) -> None:
         )
     )
     application.add_handler(
+        CallbackQueryHandler(
+            bot.audio_action_callback_handler,
+            pattern=r"^audio:[A-Za-z0-9_-]+$",
+        )
+    )
+    application.add_handler(
         MessageHandler(
             (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
             bot.handle_message,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import tempfile
 import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
 from . import video_downloader as video_downloader_module
+from .audio_conversion import AudioConversionError, convert_video_to_mp3
 from .chaos_text import ChaosText, TextContext
 from .inline_access import (
     build_inline_result_id,
@@ -70,6 +72,7 @@ from .telegram_inline_sessions import (
     record_successful_inline_access,
     subscription_expires_at,
 )
+from .telegram_media_files import effective_upload_limit_bytes
 from .telegram_media_retry import (
     classify_telegram_delivery_error,
     is_ambiguous_telegram_delivery_error,
@@ -136,6 +139,9 @@ class TelegramBot:
         self.job_manager = JobManager(self.state_store)
         self.job_manager.add_state_listener(self._on_job_state_change)
         self.active_request_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_audio_requests: set[str] = set()
+        self._audio_action_tasks: dict[str, asyncio.Task[None]] = {}
+        self._audio_conversion_semaphore = asyncio.Semaphore(2)
         self.request_contexts: dict[str, RequestContext] = {}
         self.request_intake = TelegramRequestIntake(self)
         self.command_handlers = TelegramCommandHandlers(self)
@@ -239,6 +245,186 @@ class TelegramBot:
             return
         await query.answer("Retry started.")
         return
+
+    async def audio_action_callback_handler(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Send MP3 audio from a recently delivered single video."""
+        query = update.callback_query
+        if not query or not query.data or not query.from_user or not query.message:
+            return
+        if not query.data.startswith("audio:"):
+            return
+        russian = self._language_for_update(update) == "ru"
+
+        def label(english: str, russian_text: str) -> str:
+            return russian_text if russian else english
+
+        request_id = query.data.removeprefix("audio:")
+        row = self.state_store.get_request_for_action(request_id)
+        if row is None or row["status"] != "completed":
+            await query.answer(
+                label("This audio is no longer available.", "Аудио больше недоступно."),
+                show_alert=True,
+            )
+            return
+        if (
+            not update.effective_chat
+            or int(row["chat_id"]) != update.effective_chat.id
+            or int(row["user_id"]) != query.from_user.id
+        ):
+            await query.answer(
+                label(
+                    "This action belongs to another request.",
+                    "Это действие относится к другому запросу.",
+                ),
+                show_alert=True,
+            )
+            return
+        cached = self.state_store.get_cached_result(
+            int(row["chat_id"]), str(row["job_normalized_url"])
+        )
+        if (
+            cached is None
+            or len(cached.media_items) != 1
+            or cached.media_items[0]["media_type"] != "video"
+        ):
+            await query.answer(
+                label(
+                    "Audio expired. Send the link again.",
+                    "Аудио больше недоступно. Отправьте ссылку ещё раз.",
+                ),
+                show_alert=True,
+            )
+            return
+        source = Path(cached.media_items[0]["file_path"])
+        if not source.is_file():
+            await query.answer(
+                label(
+                    "Audio expired. Send the link again.",
+                    "Аудио больше недоступно. Отправьте ссылку ещё раз.",
+                ),
+                show_alert=True,
+            )
+            return
+        if request_id in self._active_audio_requests:
+            await query.answer(
+                label("Audio is already being prepared.", "Аудио уже готовится.")
+            )
+            return
+        rate_limit = self._consume_user_rate_limit(query.from_user.id, source="audio")
+        if not rate_limit["allowed"]:
+            await query.answer(
+                ChaosText.rate_limited(
+                    rate_limit["retry_after_seconds"], self._language_for_update(update)
+                ),
+                show_alert=True,
+            )
+            return
+
+        self._active_audio_requests.add(request_id)
+        try:
+            await query.answer(label("Preparing audio…", "Готовлю аудио…"))
+        except (TelegramError, asyncio.CancelledError):
+            self._active_audio_requests.discard(request_id)
+            raise
+        task = context.application.create_task(
+            self._deliver_audio_action(
+                request_id=request_id,
+                source=source,
+                chat_id=int(row["chat_id"]),
+                message_id=query.message.message_id,
+                bot=context.bot,
+                russian=russian,
+            )
+        )
+        self._audio_action_tasks[request_id] = task
+        task.add_done_callback(
+            lambda completed, rid=request_id: self._finish_audio_action_task(
+                rid, completed
+            )
+        )
+
+    def _finish_audio_action_task(
+        self, request_id: str, task: asyncio.Task[None]
+    ) -> None:
+        self._audio_action_tasks.pop(request_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Audio action task failed for request %s",
+                request_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _deliver_audio_action(
+        self,
+        *,
+        request_id: str,
+        source: Path,
+        chat_id: int,
+        message_id: int,
+        bot: Any,
+        russian: bool,
+    ) -> None:
+        def label(english: str, russian_text: str) -> str:
+            return russian_text if russian else english
+
+        audio_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="bot-audio-", suffix=".mp3", dir=settings.TEMP_DIR, delete=False
+            ) as temp_file:
+                audio_path = Path(temp_file.name)
+            async with self._audio_conversion_semaphore:
+                await convert_video_to_mp3(source, audio_path)
+                if audio_path.stat().st_size > effective_upload_limit_bytes(
+                    settings.TELEGRAM_LOCAL_MODE, settings.TELEGRAM_MAX_UPLOAD_BYTES
+                ):
+                    raise AudioConversionError("Audio is too large for Telegram")
+                with audio_path.open("rb") as audio_file:
+                    await bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_file,
+                        reply_to_message_id=message_id,
+                    )
+        except (
+            AudioConversionError,
+            asyncio.TimeoutError,
+            FileNotFoundError,
+            OSError,
+            TelegramError,
+        ) as error:
+            logger.warning("Audio action failed for request %s: %s", request_id, error)
+            message = (
+                label(
+                    "Audio delivery status is unknown. Check the chat before trying again.",
+                    "Неясно, доставлено ли аудио. Проверьте чат перед повтором.",
+                )
+                if is_ambiguous_telegram_delivery_error(error)
+                else label(
+                    "Could not prepare audio. Please try the link again.",
+                    "Не удалось подготовить аудио. Отправьте ссылку ещё раз.",
+                )
+            )
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    reply_to_message_id=message_id,
+                )
+            except TelegramError as fallback_error:
+                logger.warning(
+                    "Audio fallback message failed for request %s: %s",
+                    request_id,
+                    fallback_error,
+                )
+        finally:
+            if audio_path is not None:
+                audio_path.unlink(missing_ok=True)
+            self._active_audio_requests.discard(request_id)
 
     async def start_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1947,11 +2133,11 @@ class TelegramBot:
                 if job.last_delivery_error is not None:
                     raise job.last_delivery_error
                 raise RuntimeError("Shared delivery finished without a result")
-            await self._delete_status_message(request_context.status_message)
             self.job_manager.mark_request_completed(
                 request_context.request_id,
                 cache_hit=video_info.from_cache,
             )
+            await self._delete_status_message(request_context.status_message)
             if (
                 not video_info.from_cache
                 and not settings.RESULT_CACHE_ENABLED

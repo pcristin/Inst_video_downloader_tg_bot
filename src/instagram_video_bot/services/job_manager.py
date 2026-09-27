@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 JobExecutor = Callable[["SharedJob"], Awaitable[Any]]
 StateListener = Callable[["SharedJob"], Awaitable[None]]
+TERMINAL_JOB_STATES = frozenset(
+    {JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED}
+)
 
 
 @dataclass
@@ -116,11 +119,7 @@ class JobManager:
         request_id = uuid.uuid4().hex
         active_key = (chat_id, normalized_url)
         existing = self._active_jobs.get(active_key) if duplicate_suppression else None
-        if existing and existing.state not in {
-            JobState.COMPLETED,
-            JobState.FAILED,
-            JobState.CANCELLED,
-        }:
+        if existing and existing.state not in TERMINAL_JOB_STATES:
             record = RequestRecord(
                 request_id=request_id,
                 chat_id=chat_id,
@@ -285,13 +284,14 @@ class JobManager:
                 elif job.delivery_request_id == request_id:
                     self._promote_delivery_request(job)
                 if not any(item.active for item in job.requesters.values()):
-                    job.state = JobState.CANCELLED
-                    self.store.update_job_status(
-                        job.job_id, JobState.CANCELLED.value
-                    )
-                    self.store.finalize_job_metrics(
-                        job.job_id, status=JobState.CANCELLED.value
-                    )
+                    if job.state not in TERMINAL_JOB_STATES:
+                        job.state = JobState.CANCELLED
+                        self.store.update_job_status(
+                            job.job_id, JobState.CANCELLED.value
+                        )
+                        self.store.finalize_job_metrics(
+                            job.job_id, status=JobState.CANCELLED.value
+                        )
                     if job.result_future and not job.result_future.done():
                         job.result_future.cancel()
                     if job.delivery_future and not job.delivery_future.done():
