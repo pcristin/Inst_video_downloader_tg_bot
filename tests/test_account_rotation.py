@@ -188,7 +188,9 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
     monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: "success")
     project = tmp_path / "project"
     project.mkdir()
-    (project / "accounts.txt").write_text(f"first|pw1|{SEED}\nsecond|pw2|{SEED}\n")
+    (project / "accounts.txt").write_text(
+        f"first|pw1|{SEED}\nsecond|pw2|{SEED}\nthird|pw3|{SEED}\n"
+    )
     (project / "account-state").mkdir()
     (project / "account-state" / "accounts_state.json").write_text(
         json.dumps(
@@ -200,12 +202,15 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
                         "last_used": "2026-09-27T12:00:00",
                     },
                     {"username": "second", "activated_at": None, "is_banned": True},
+                    {"username": "third", "is_banned": False},
                 ]
             }
         )
     )
     candidate_file = tmp_path / "new.txt"
-    candidate_file.write_text(f"first|pw1|{SEED}\nsecond|pw2|{SEED}\n")
+    candidate_file.write_text(
+        f"first|pw1|{SEED}\nsecond|pw2|{SEED}\nthird|pw3|{SEED}\n"
+    )
     candidates = rotate_accounts.read_candidates(candidate_file)
     stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
     (stage / "sessions").mkdir(parents=True)
@@ -217,7 +222,9 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
             "result": "success",
             "session_sha256": rotate_accounts._session_hash(session),
         }
-    rotate_accounts._write_results(stage, candidates, {"0": "success", "1": "success"})
+    rotate_accounts._write_results(
+        stage, candidates, {"0": "success", "1": "success", "2": "success"}
+    )
     rotate_accounts._write_canary_results(stage, candidates, canaries)
 
     rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
@@ -226,6 +233,41 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
     assert state["accounts"][0]["activated_at"] == "2026-01-01T00:00:00"
     assert state["accounts"][0]["last_used"] == "2026-09-27T12:00:00"
     assert state["accounts"][1]["activated_at"] is not None
+    assert state["accounts"][2]["activated_at"] is None
+
+
+def test_activate_rejects_session_replaced_during_verification(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    roster = project / "accounts.txt"
+    roster.write_text(f"old|pw|{SEED}\n")
+    candidate_file = tmp_path / "new.txt"
+    candidate_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidate_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    rotate_accounts._write_canary_results(
+        stage,
+        candidates,
+        {
+            "0": {
+                "result": "success",
+                "session_sha256": rotate_accounts._session_hash(session),
+            }
+        },
+    )
+
+    def replace_session(*_args):
+        session.write_text(json.dumps({**SESSION, "renewed": True}))
+        return "success"
+
+    monkeypatch.setattr(rotate_accounts, "_verify_session", replace_session)
+    with pytest.raises(ValueError, match="canary"):
+        rotate_accounts.activate(candidate_file, tmp_path / "stage", project)
+    assert roster.read_text() == f"old|pw|{SEED}\n"
 
 
 def test_canary_checks_saved_session_and_downloads_media(tmp_path, monkeypatch, capsys):

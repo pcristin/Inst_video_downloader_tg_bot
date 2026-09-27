@@ -289,7 +289,7 @@ class AccountManager:
         ]
 
     def get_eligible_account_count(self, excluded_usernames: Optional[Set[str]] = None) -> int:
-        """Return how many healthy accounts are eligible, including currently leased accounts."""
+        """Count healthy accounts, including leases and ramp cooldowns that may soon clear."""
         excluded_usernames = excluded_usernames or set()
         with self._lock:
             return sum(

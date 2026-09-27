@@ -155,18 +155,26 @@ def _result_path(stage: Path) -> Path:
 def _write_results(
     stage: Path, candidates: list[Candidate], results: dict[str, str]
 ) -> None:
+    _write_stage_manifest(_result_path(stage), candidates, results)
+
+
+def _write_stage_manifest(
+    path: Path, candidates: list[Candidate], results: dict
+) -> None:
     payload = {"fingerprint": fingerprint(candidates), "results": results}
-    _private_write(
-        _result_path(stage), (json.dumps(payload, sort_keys=True) + "\n").encode()
-    )
+    _private_write(path, (json.dumps(payload, sort_keys=True) + "\n").encode())
 
 
 def _load_results(stage: Path, candidates: list[Candidate]) -> dict[str, str]:
-    if not _result_path(stage).exists():
+    return _load_stage_manifest(_result_path(stage), candidates, "result")
+
+
+def _load_stage_manifest(path: Path, candidates: list[Candidate], label: str) -> dict:
+    if not path.is_file():
         return {}
-    payload = json.loads(_result_path(stage).read_text())
+    payload = json.loads(path.read_text())
     if payload.get("fingerprint") != fingerprint(candidates):
-        raise ValueError("staged result does not match candidate file")
+        raise ValueError(f"staged {label} does not match candidate file")
     return payload.get("results", {})
 
 
@@ -181,21 +189,21 @@ def _canary_path(stage: Path) -> Path:
 def _write_canary_results(
     stage: Path, candidates: list[Candidate], results: dict[str, dict[str, str]]
 ) -> None:
-    payload = {"fingerprint": fingerprint(candidates), "results": results}
-    _private_write(
-        _canary_path(stage), (json.dumps(payload, sort_keys=True) + "\n").encode()
-    )
+    _write_stage_manifest(_canary_path(stage), candidates, results)
 
 
 def _load_canary_results(
     stage: Path, candidates: list[Candidate]
 ) -> dict[str, dict[str, str]]:
-    if not _canary_path(stage).is_file():
-        return {}
-    payload = json.loads(_canary_path(stage).read_text())
-    if payload.get("fingerprint") != fingerprint(candidates):
-        raise ValueError("staged canary does not match candidate file")
-    return payload.get("results", {})
+    return _load_stage_manifest(_canary_path(stage), candidates, "canary")
+
+
+def _identity_matches(client, candidate: Candidate) -> bool:
+    identity = client.account_info()
+    cookies = client.get_settings().get("cookies", {})
+    return identity.username.casefold() == candidate.username.casefold() and str(
+        identity.pk
+    ) == str(cookies.get("ds_user_id"))
 
 
 def _canary_passed(
@@ -240,11 +248,7 @@ def login_worker(path: Path, index: int, stage: Path) -> int:
             verification_code=pyotp.TOTP(candidate.totp_secret).now(),
         )
         if success:
-            identity = client.account_info()
-            cookies = client.get_settings().get("cookies", {})
-            if identity.username.casefold() != candidate.username.casefold() or str(
-                identity.pk
-            ) != str(cookies.get("ds_user_id")):
+            if not _identity_matches(client, candidate):
                 print(json.dumps({"result": "identity_mismatch"}))
                 return 1
             target = stage / "sessions" / f"{candidate.username}.json"
@@ -276,11 +280,7 @@ def verify_worker(path: Path, index: int, stage: Path) -> int:
         client.set_proxy(proxy)
     try:
         client.load_settings(session_file)
-        identity = client.account_info()
-        cookies = client.get_settings().get("cookies", {})
-        if identity.username.casefold() == candidate.username.casefold() and str(
-            identity.pk
-        ) == str(cookies.get("ds_user_id")):
+        if _identity_matches(client, candidate):
             print(json.dumps({"result": "success"}))
             return 0
         print(json.dumps({"result": "identity_mismatch"}))
@@ -304,11 +304,7 @@ def canary_worker(path: Path, index: int, stage: Path, url: str) -> int:
         client.set_proxy(proxy)
     try:
         client.load_settings(session)
-        identity = client.account_info()
-        cookies = client.get_settings().get("cookies", {})
-        if identity.username.casefold() != candidate.username.casefold() or str(
-            identity.pk
-        ) != str(cookies.get("ds_user_id")):
+        if not _identity_matches(client, candidate):
             print(json.dumps({"result": "identity_mismatch"}))
             return 1
         media_pk = client.media_pk_from_url(url)
@@ -541,6 +537,7 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
             raise ValueError(
                 f"staged media canary missing or stale for {candidate.username}"
             )
+    verified_sessions: dict[str, bytes] = {}
     for index, candidate in enumerate(candidates):
         if results[str(index)] != "success":
             continue
@@ -554,6 +551,13 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
             raise ValueError(
                 f"staged session for {candidate.username} failed verification ({verification})"
             )
+        session_bytes = session.read_bytes()
+        if (
+            hashlib.sha256(session_bytes).hexdigest()
+            != canaries[str(index)]["session_sha256"]
+        ):
+            raise ValueError(f"staged media canary is stale for {candidate.username}")
+        verified_sessions[candidate.username] = session_bytes
 
     sessions = project / "sessions"
     sessions.mkdir(exist_ok=True, mode=0o700)
@@ -573,20 +577,22 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
             for account in json.loads(state_file.read_text()).get("accounts", [])
         }
     activated_now = datetime.now().isoformat()
+
+    def activation_time(candidate: Candidate) -> str | None:
+        if previous_roster.get(candidate.username) != candidate:
+            return activated_now
+        prior = previous_state.get(candidate.username, {})
+        if prior.get("is_banned"):
+            return activated_now
+        return prior.get("activated_at")
+
     state = {
         "accounts": [
             {
                 "username": candidate.username,
                 "is_banned": results[str(index)] != "success",
                 "activated_at": (
-                    (
-                        previous_state.get(candidate.username, {}).get("activated_at")
-                        if previous_roster.get(candidate.username) == candidate
-                        and previous_state.get(candidate.username, {}).get(
-                            "activated_at"
-                        )
-                        else activated_now
-                    )
+                    activation_time(candidate)
                     if results[str(index)] == "success"
                     else None
                 ),
@@ -608,9 +614,7 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
         # Populate sessions before exposing the new roster. The bot is stopped by Make.
         for candidate in successful:
             target = sessions / f"{candidate.username}.json"
-            _private_write(
-                target, (stage / "sessions" / target.name).read_bytes(), owner
-            )
+            _private_write(target, verified_sessions[candidate.username], owner)
         _private_write(
             state_file, (json.dumps(state, sort_keys=True) + "\n").encode(), owner
         )

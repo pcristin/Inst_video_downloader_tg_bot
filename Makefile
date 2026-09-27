@@ -130,9 +130,9 @@ accounts-prewarm: ## Validate and prewarm every candidate, preserving successful
 	uv run --frozen python rotate_accounts.py prewarm --candidates "$(CANDIDATES)" $(if $(SEED_SESSIONS),--seed-sessions "$(SEED_SESSIONS)",)
 
 accounts-canary: ## Check each staged account with a real public media download
-	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
-	@test -n "$(CANARY_URL)" || { echo 'Set CANARY_URL=https://www.instagram.com/p/.../'; exit 2; }
-	uv run --frozen python rotate_accounts.py canary --candidates "$(CANDIDATES)" --canary-url "$(CANARY_URL)"
+	@test -n "$$CANDIDATES" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
+	@test -n "$$CANARY_URL" || { echo 'Set CANARY_URL=https://www.instagram.com/p/.../'; exit 2; }
+	uv run --frozen python rotate_accounts.py canary --candidates "$$CANDIDATES" --canary-url "$$CANARY_URL"
 
 accounts-activate: ## Stop bot, install checked roster, then restart
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
