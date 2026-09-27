@@ -58,4 +58,4 @@ async def convert_video_to_mp3(
                     (details or b"ffmpeg conversion failed").decode(errors="replace")
                 )
         finally:
-            terminate_process_group(process)
+            await terminate_process_group(process)

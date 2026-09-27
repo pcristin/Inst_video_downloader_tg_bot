@@ -328,7 +328,7 @@ class TelegramBot:
         except (TelegramError, asyncio.CancelledError):
             self._active_audio_requests.discard(request_id)
             raise
-        task = asyncio.create_task(
+        task = context.application.create_task(
             self._deliver_audio_action(
                 request_id=request_id,
                 source=source,

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import signal
@@ -76,7 +77,8 @@ def test_worker_reports_malformed_payload_when_result_path_is_available(
     assert response["error_type"] == "JSONDecodeError"
 
 
-def test_process_group_cleanup_runs_after_leader_exits(monkeypatch):
+@pytest.mark.asyncio
+async def test_process_group_cleanup_runs_after_leader_exits(monkeypatch):
     calls = []
 
     class ExitedLeader:
@@ -89,9 +91,31 @@ def test_process_group_cleanup_runs_after_leader_exits(monkeypatch):
         subprocess_lifecycle.os, "killpg", lambda pid, sig: calls.append((pid, sig))
     )
 
-    subprocess_lifecycle.terminate_process_group(ExitedLeader())
+    await subprocess_lifecycle.terminate_process_group(ExitedLeader())
 
     assert calls == [(12345, signal.SIGKILL)]
+
+
+@pytest.mark.asyncio
+async def test_process_group_reaping_does_not_block_event_loop(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowWait:
+        pid = 12345
+
+        def poll(self):
+            started.set()
+            return -signal.SIGKILL if release.is_set() else None
+
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", lambda _pid, _sig: None)
+    task = asyncio.create_task(subprocess_lifecycle.terminate_process_group(SlowWait()))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert not task.done()
+    finally:
+        release.set()
+        await task
 
 
 @pytest.mark.asyncio

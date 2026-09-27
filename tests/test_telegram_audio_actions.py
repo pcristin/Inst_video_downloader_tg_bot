@@ -22,6 +22,20 @@ class AudioBot:
         self.messages.append(kwargs)
 
 
+class AudioApplication:
+    def __init__(self):
+        self.tasks = []
+
+    def create_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.append(task)
+        return task
+
+
+def audio_context(telegram):
+    return SimpleNamespace(bot=telegram, application=AudioApplication())
+
+
 class AudioQuery:
     def __init__(self, user_id=1001, language_code=None):
         self.data = "audio:req-1"
@@ -77,9 +91,9 @@ async def test_audio_action_sends_converted_cached_video(monkeypatch, tmp_path):
         raising=False,
     )
     await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=telegram)
+        audio_update(query), audio_context(telegram)
     )
-    await bot._audio_action_tasks["req-1"]
+    await asyncio.wait_for(bot._audio_action_tasks["req-1"], timeout=1)
 
     assert len(telegram.sent) == 1
     assert telegram.sent[0]["chat_id"] == 77
@@ -98,7 +112,7 @@ async def test_audio_action_rejects_another_user(tmp_path):
     query = AudioQuery(user_id=1002)
 
     await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=telegram)
+        audio_update(query), audio_context(telegram)
     )
 
     assert telegram.sent == []
@@ -116,7 +130,7 @@ async def test_audio_action_explains_expired_cache_in_russian(tmp_path):
     query = AudioQuery(language_code="ru")
 
     await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=AudioBot())
+        audio_update(query), audio_context(AudioBot())
     )
 
     assert query.answers[-1] == "Аудио больше недоступно. Отправьте ссылку ещё раз."
@@ -134,7 +148,7 @@ async def test_audio_action_rejects_another_click_while_preparing(tmp_path):
     query = AudioQuery()
 
     await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=telegram)
+        audio_update(query), audio_context(telegram)
     )
 
     assert query.answers[-1] == "Audio is already being prepared."
@@ -159,7 +173,7 @@ async def test_audio_action_rate_limits_repeated_conversions(monkeypatch, tmp_pa
     query = AudioQuery()
 
     await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=telegram)
+        audio_update(query), audio_context(telegram)
     )
 
     assert sources == ["audio"]
@@ -185,9 +199,9 @@ async def test_audio_action_reports_conversion_failure(monkeypatch, tmp_path):
     )
 
     await bot.audio_action_callback_handler(
-        audio_update(AudioQuery()), SimpleNamespace(bot=telegram)
+        audio_update(AudioQuery()), audio_context(telegram)
     )
-    await bot._audio_action_tasks["req-1"]
+    await asyncio.wait_for(bot._audio_action_tasks["req-1"], timeout=1)
 
     assert telegram.sent == []
     assert (
@@ -218,9 +232,9 @@ async def test_audio_action_swallows_failed_fallback_message(monkeypatch, tmp_pa
     )
 
     await bot.audio_action_callback_handler(
-        audio_update(AudioQuery()), SimpleNamespace(bot=UnreachableBot())
+        audio_update(AudioQuery()), audio_context(UnreachableBot())
     )
-    await bot._audio_action_tasks["req-1"]
+    await asyncio.wait_for(bot._audio_action_tasks["req-1"], timeout=1)
 
     assert bot._active_audio_requests == set()
 
@@ -246,11 +260,11 @@ async def test_audio_conversion_runs_after_callback_returns(monkeypatch, tmp_pat
     )
     query = AudioQuery()
 
-    await bot.audio_action_callback_handler(
-        audio_update(query), SimpleNamespace(bot=telegram)
-    )
+    context = audio_context(telegram)
+    await bot.audio_action_callback_handler(audio_update(query), context)
 
     task = bot._audio_action_tasks["req-1"]
+    assert context.application.tasks == [task]
     assert not task.done()
     assert query.answers == ["Preparing audio…"]
     await asyncio.wait_for(started.wait(), timeout=1)

@@ -103,7 +103,7 @@ async def run_isolated_instagram_operation(
             ) from error
     finally:
         if process is not None:
-            terminate_process_group(process)
+            await terminate_process_group(process)
         result_path.unlink(missing_ok=True)
     if response.get("ok"):
         return decode_result(response.get("result"))

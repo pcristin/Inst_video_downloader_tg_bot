@@ -22,15 +22,13 @@ async def wait_for_process(
         await asyncio.sleep(min(0.05, deadline - loop.time()))
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+async def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     """Kill the process group of a child started with start_new_session=True."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    if process.poll() is not None:
-        return
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        pass
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 1
+    while process.poll() is None and loop.time() < deadline:
+        await asyncio.sleep(0.05)
