@@ -306,6 +306,7 @@ def prewarm(
                     flush=True,
                 )
                 continue
+            staged_success = False
         if seed_sessions is not None and not staged_success:
             seeded = seed_sessions / f"{candidate.username}.json"
             if _session_is_usable(seeded):

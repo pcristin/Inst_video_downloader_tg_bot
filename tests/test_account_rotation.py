@@ -377,3 +377,66 @@ def test_prewarm_keeps_session_when_verification_is_temporarily_unavailable(
 
     assert summary["success"] == 1
     assert session.read_text() == json.dumps(SESSION)
+
+
+def test_prewarm_imports_replacement_seed_after_staged_session_expires(
+    tmp_path, monkeypatch
+):
+    candidates_file = tmp_path / "new.txt"
+    candidates_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidates_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    session = stage / "sessions" / "first.json"
+    session.write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    seeded = tmp_path / "seeded"
+    seeded.mkdir()
+    replacement = {"cookies": {"sessionid": "replacement", "ds_user_id": "123"}}
+    (seeded / "first.json").write_text(json.dumps(replacement))
+    responses = iter(["LoginRequired", "success"])
+    monkeypatch.setattr(
+        rotate_accounts, "_verify_session", lambda *_args: next(responses)
+    )
+    monkeypatch.setattr(
+        rotate_accounts.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("must not re-login"),
+    )
+
+    summary = rotate_accounts.prewarm(
+        candidates_file, tmp_path / "stage", seeded, project=tmp_path
+    )
+
+    assert summary["success"] == 1
+    assert json.loads(session.read_text()) == replacement
+
+
+def test_verify_worker_reports_missing_session_without_contacting_instagram(
+    tmp_path, capsys
+):
+    candidates = tmp_path / "new.txt"
+    candidates.write_text(f"first|pw1|{SEED}\n")
+    assert rotate_accounts.verify_worker(candidates, 0, tmp_path / "stage") == 1
+    assert json.loads(capsys.readouterr().out)["result"] == "session_missing"
+
+
+def test_verify_worker_reports_provider_error_without_leaking_details(
+    tmp_path, monkeypatch, capsys
+):
+    candidates = tmp_path / "new.txt"
+    candidates.write_text(f"first|pw1|{SEED}\n")
+    stage = tmp_path / "stage"
+    (stage / "sessions").mkdir(parents=True)
+    (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
+    monkeypatch.setattr(rotate_accounts, "account_proxy", lambda _index: None)
+
+    class FakeClient:
+        def load_settings(self, _path):
+            raise RuntimeError("secret provider detail")
+
+    monkeypatch.setattr(instagrapi, "Client", FakeClient)
+    assert rotate_accounts.verify_worker(candidates, 0, stage) == 1
+    output = capsys.readouterr().out
+    assert json.loads(output)["result"] == "RuntimeError"
+    assert "secret provider detail" not in output
