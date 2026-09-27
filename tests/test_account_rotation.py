@@ -201,7 +201,12 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
                         "activated_at": "2026-01-01T00:00:00",
                         "last_used": "2026-09-27T12:00:00",
                     },
-                    {"username": "second", "activated_at": None, "is_banned": True},
+                    {
+                        "username": "second",
+                        "activated_at": None,
+                        "is_banned": True,
+                        "last_used": "2026-09-27T12:00:00",
+                    },
                     {"username": "third", "is_banned": False},
                 ]
             }
@@ -233,6 +238,7 @@ def test_activate_preserves_ramp_age_for_unchanged_accounts(tmp_path, monkeypatc
     assert state["accounts"][0]["activated_at"] == "2026-01-01T00:00:00"
     assert state["accounts"][0]["last_used"] == "2026-09-27T12:00:00"
     assert state["accounts"][1]["activated_at"] is not None
+    assert state["accounts"][1]["last_used"] is None
     assert state["accounts"][2]["activated_at"] is None
 
 

@@ -604,6 +604,7 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
                 "last_used": (
                     previous_state.get(candidate.username, {}).get("last_used")
                     if previous_roster.get(candidate.username) == candidate
+                    and not previous_state.get(candidate.username, {}).get("is_banned")
                     else None
                 ),
                 "ban_reason": (
