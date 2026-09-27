@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 import subprocess
 import tempfile
 from pathlib import Path
+
+from .subprocess_lifecycle import terminate_process_group, wait_for_process
 
 
 class AudioConversionError(Exception):
@@ -40,29 +41,21 @@ async def convert_video_to_mp3(
             start_new_session=True,
         )
         try:
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + max(0.1, timeout_seconds)
-            while process.poll() is None:
-                if loop.time() >= deadline:
-                    raise asyncio.TimeoutError("Audio conversion timed out")
-                await asyncio.sleep(min(0.05, deadline - loop.time()))
+            await wait_for_process(
+                process,
+                timeout_seconds=timeout_seconds,
+                timeout_error=asyncio.TimeoutError("Audio conversion timed out"),
+            )
             if (
                 process.returncode != 0
                 or not output.is_file()
                 or output.stat().st_size == 0
             ):
-                stderr_file.seek(0)
-                details = stderr_file.read()[-300:]
+                stderr_file.seek(0, os.SEEK_END)
+                stderr_file.seek(max(0, stderr_file.tell() - 300))
+                details = stderr_file.read(300)
                 raise AudioConversionError(
                     (details or b"ffmpeg conversion failed").decode(errors="replace")
                 )
         finally:
-            if process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    pass
+            terminate_process_group(process)

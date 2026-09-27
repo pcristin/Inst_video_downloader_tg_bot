@@ -1,11 +1,11 @@
 import asyncio
 import json
 import logging
+import sys
+import threading
+import time
 from concurrent.futures import Future
 from pathlib import Path
-import sys
-import time
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +30,8 @@ from src.instagram_video_bot.services.video_downloader import (
     VideoDownloader,
     VideoInfo,
 )
+
+pytestmark = pytest.mark.usefixtures("in_process_provider_for_unit_tests")
 
 
 @pytest.fixture(autouse=True)

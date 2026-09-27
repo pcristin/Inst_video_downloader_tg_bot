@@ -9,6 +9,8 @@ from src.instagram_video_bot.services.instagram_fast_extractor import (
 )
 from src.instagram_video_bot.services.video_downloader import VideoDownloader
 
+pytestmark = pytest.mark.usefixtures("in_process_provider_for_unit_tests")
+
 
 class _FastExtractorSuccess:
     def __init__(self, path: Path):

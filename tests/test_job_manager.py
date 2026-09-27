@@ -214,6 +214,50 @@ async def test_job_manager_passes_job_to_executor_and_records_metrics(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+async def test_cancel_request_preserves_terminal_job_and_metrics(
+    tmp_path, terminal_status
+):
+    store = StateStore(tmp_path / "state.db")
+    manager = JobManager(store)
+
+    async def execute(_job):
+        if terminal_status == "failed":
+            raise RuntimeError("provider failed")
+        return "ok"
+
+    submission = manager.submit(
+        chat_id=77,
+        user_id=1001,
+        user_label="alice",
+        provider="instagram",
+        provider_label="Instagram",
+        original_url="https://www.instagram.com/reel/a/",
+        normalized_url="https://www.instagram.com/reel/a/",
+        execute=execute,
+        duplicate_suppression=False,
+    )
+    await submission.job.task
+    if terminal_status == "failed":
+        submission.job.result_future.exception()
+
+    manager.cancel_request(submission.request_id)
+
+    with store._lock:
+        job_status = store._conn.execute(
+            "SELECT status FROM jobs WHERE job_id = ?", (submission.job.job_id,)
+        ).fetchone()[0]
+        metric_status = store._conn.execute(
+            "SELECT status FROM performance_metrics WHERE job_id = ?",
+            (submission.job.job_id,),
+        ).fetchone()[0]
+    assert submission.job.state.value == terminal_status
+    assert job_status == terminal_status
+    assert metric_status == terminal_status
+    assert store.get_request_for_action(submission.request_id)["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_job_manager_supports_zero_arg_executor_for_compatibility(tmp_path):
     store = StateStore(tmp_path / "state.db")
     manager = JobManager(store)

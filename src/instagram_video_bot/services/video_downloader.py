@@ -367,6 +367,15 @@ class VideoDownloader:
                 if getattr(event, "should_alert_owner", False) or self.last_account_health_event is None:
                     self.last_account_health_event = event
             except Exception as error:
+                if (
+                    isinstance(error, InstagramProviderTimeoutError)
+                    and settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED
+                ):
+                    record_failure = getattr(manager, "record_account_failure", None)
+                    if record_failure:
+                        event = record_failure(account, "provider_timeout")
+                        if getattr(event, "should_alert_owner", False):
+                            self.last_account_health_event = event
                 if isinstance(error, InstagramProviderTimeoutError) and not settings.INSTAGRAM_ISOLATED_WORKERS_ENABLED:
                     release_account_on_exit = False
                 else:

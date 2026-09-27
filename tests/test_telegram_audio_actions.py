@@ -2,7 +2,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram.error import TimedOut
 
+from src.instagram_video_bot.services.audio_conversion import AudioConversionError
 from src.instagram_video_bot.services.state_store import StateStore
 from src.instagram_video_bot.services.telegram_bot import TelegramBot
 
@@ -10,9 +12,13 @@ from src.instagram_video_bot.services.telegram_bot import TelegramBot
 class AudioBot:
     def __init__(self):
         self.sent = []
+        self.messages = []
 
     async def send_audio(self, **kwargs):
         self.sent.append(kwargs)
+
+    async def send_message(self, **kwargs):
+        self.messages.append(kwargs)
 
 
 class AudioQuery:
@@ -112,3 +118,104 @@ async def test_audio_action_explains_expired_cache_in_russian(tmp_path):
     )
 
     assert query.answers[-1] == "Аудио больше недоступно. Отправьте ссылку ещё раз."
+
+
+@pytest.mark.asyncio
+async def test_audio_action_rejects_another_click_while_preparing(tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    saved_video(store, source)
+    bot = TelegramBot(state_store=store)
+    bot._active_audio_requests.add("req-1")
+    telegram = AudioBot()
+    query = AudioQuery()
+
+    await bot.audio_action_callback_handler(
+        audio_update(query), SimpleNamespace(bot=telegram)
+    )
+
+    assert query.answers[-1] == "Audio is already being prepared."
+    assert telegram.sent == []
+
+
+@pytest.mark.asyncio
+async def test_audio_action_rate_limits_repeated_conversions(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    saved_video(store, source)
+    bot = TelegramBot(state_store=store)
+    sources = []
+
+    def deny_rate_limit(_user_id, *, source):
+        sources.append(source)
+        return {"allowed": False, "retry_after_seconds": 60}
+
+    monkeypatch.setattr(bot, "_consume_user_rate_limit", deny_rate_limit)
+    telegram = AudioBot()
+    query = AudioQuery()
+
+    await bot.audio_action_callback_handler(
+        audio_update(query), SimpleNamespace(bot=telegram)
+    )
+
+    assert sources == ["audio"]
+    assert telegram.sent == []
+    assert "Too many requests" in query.answers[-1]
+
+
+@pytest.mark.asyncio
+async def test_audio_action_reports_conversion_failure(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    saved_video(store, source)
+    bot = TelegramBot(state_store=store)
+    telegram = AudioBot()
+
+    async def fail_conversion(_source, _output):
+        raise AudioConversionError("no audio stream")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.convert_video_to_mp3",
+        fail_conversion,
+    )
+
+    await bot.audio_action_callback_handler(
+        audio_update(AudioQuery()), SimpleNamespace(bot=telegram)
+    )
+
+    assert telegram.sent == []
+    assert (
+        telegram.messages[0]["text"]
+        == "Could not prepare audio. Please try the link again."
+    )
+    assert bot._active_audio_requests == set()
+
+
+@pytest.mark.asyncio
+async def test_audio_action_swallows_failed_fallback_message(monkeypatch, tmp_path):
+    store = StateStore(tmp_path / "state.db")
+    source = tmp_path / "video.mp4"
+    source.write_bytes(b"video")
+    saved_video(store, source)
+    bot = TelegramBot(state_store=store)
+
+    async def fail_conversion(_source, _output):
+        raise AudioConversionError("no audio stream")
+
+    class UnreachableBot(AudioBot):
+        async def send_message(self, **kwargs):
+            raise TimedOut("network unavailable")
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.convert_video_to_mp3",
+        fail_conversion,
+    )
+
+    await bot.audio_action_callback_handler(
+        audio_update(AudioQuery()), SimpleNamespace(bot=UnreachableBot())
+    )
+
+    assert bot._active_audio_requests == set()

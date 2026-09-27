@@ -311,6 +311,15 @@ class TelegramBot:
                 label("Audio is already being prepared.", "Аудио уже готовится.")
             )
             return
+        rate_limit = self._consume_user_rate_limit(query.from_user.id, source="audio")
+        if not rate_limit["allowed"]:
+            await query.answer(
+                ChaosText.rate_limited(
+                    rate_limit["retry_after_seconds"], self._language_for_update(update)
+                ),
+                show_alert=True,
+            )
+            return
 
         self._active_audio_requests.add(request_id)
         audio_path: Path | None = None
@@ -351,11 +360,18 @@ class TelegramBot:
                     "Не удалось подготовить аудио. Отправьте ссылку ещё раз.",
                 )
             )
-            await context.bot.send_message(
-                chat_id=int(row["chat_id"]),
-                text=message,
-                reply_to_message_id=query.message.message_id,
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=int(row["chat_id"]),
+                    text=message,
+                    reply_to_message_id=query.message.message_id,
+                )
+            except TelegramError as fallback_error:
+                logger.warning(
+                    "Audio fallback message failed for request %s: %s",
+                    request_id,
+                    fallback_error,
+                )
         finally:
             if audio_path is not None:
                 audio_path.unlink(missing_ok=True)

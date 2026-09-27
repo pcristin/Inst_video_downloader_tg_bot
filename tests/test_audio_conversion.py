@@ -1,8 +1,8 @@
 import asyncio
 import shutil
+import signal
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -72,23 +72,23 @@ async def test_video_without_audio_reports_conversion_failure(tmp_path):
 
 @pytest.mark.asyncio
 async def test_audio_conversion_kills_timed_out_ffmpeg(monkeypatch, tmp_path):
-    marker = tmp_path / "finished"
-    script = f"import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).write_text('done')"
+    script = "import time; time.sleep(60)"
     real_popen = subprocess.Popen
+    processes = []
 
     def fake_ffmpeg(command, **kwargs):
-        return real_popen([sys.executable, "-c", script], **kwargs)
+        process = real_popen([sys.executable, "-c", script], **kwargs)
+        processes.append(process)
+        return process
 
     monkeypatch.setattr(
         "src.instagram_video_bot.services.audio_conversion.subprocess.Popen",
         fake_ffmpeg,
     )
-    started = time.monotonic()
     with pytest.raises(asyncio.TimeoutError):
         await convert_video_to_mp3(
             tmp_path / "source.mp4", tmp_path / "output.mp3", timeout_seconds=0.1
         )
 
-    assert time.monotonic() - started < 1.5
-    await asyncio.sleep(2.1)
-    assert not marker.exists()
+    assert len(processes) == 1
+    assert processes[0].poll() == -signal.SIGKILL

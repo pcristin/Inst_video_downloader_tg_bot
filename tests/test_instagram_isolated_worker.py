@@ -1,7 +1,10 @@
-import asyncio
+import io
+import json
+import signal
+import subprocess
 import sys
-import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +14,9 @@ from src.instagram_video_bot.services.download_models import (
     DownloadError,
     MediaItem,
     VideoInfo,
+)
+from src.instagram_video_bot.services.instagram_fast_extractor import (
+    InstagramFastExtractorError,
 )
 from src.instagram_video_bot.services.video_downloader import (
     InstagramProviderTimeoutError,
@@ -28,23 +34,70 @@ def test_worker_result_round_trips_media_paths(tmp_path):
     assert isinstance(decoded.media_items[0].file_path, Path)
 
 
+def test_fast_extractor_failure_preserves_telemetry(monkeypatch, tmp_path):
+    result_path = tmp_path / "worker-result.json"
+    failure = InstagramFastExtractorError("fast_path_budget_exhausted")
+    failure.endpoint_timings = [{"endpoint": "public", "status": "miss"}]
+    failure.budget_exhausted = True
+
+    def fail_fast(_payload):
+        raise failure
+
+    monkeypatch.setattr(worker, "execute_payload", fail_fast)
+    monkeypatch.setattr(
+        worker.sys,
+        "stdin",
+        SimpleNamespace(
+            buffer=io.BytesIO(json.dumps({"_result_file": str(result_path)}).encode())
+        ),
+    )
+
+    worker.main()
+
+    response = json.loads(result_path.read_text(encoding="utf-8"))
+    restored = worker.decode_error(response)
+    assert isinstance(restored, InstagramFastExtractorError)
+    assert restored.endpoint_timings == failure.endpoint_timings
+    assert restored.budget_exhausted is True
+
+
+def test_worker_reports_malformed_payload_when_result_path_is_available(
+    monkeypatch, tmp_path
+):
+    result_path = tmp_path / "worker-result.json"
+    monkeypatch.setenv("IG_WORKER_RESULT_PATH", str(result_path))
+    monkeypatch.setattr(worker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"{")))
+
+    worker.main()
+
+    response = json.loads(result_path.read_text(encoding="utf-8"))
+    assert response["ok"] is False
+    assert response["error_type"] == "JSONDecodeError"
+
+
 @pytest.mark.asyncio
-async def test_timed_out_worker_is_terminated(monkeypatch, tmp_path):
-    marker = tmp_path / "finished"
-    script = f"import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).write_text('done')"
+async def test_timed_out_worker_is_terminated(monkeypatch):
+    script = "import time; time.sleep(60)"
+    processes = []
+    real_popen = subprocess.Popen
+
+    def track_process(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
     monkeypatch.setattr(
         worker, "worker_command", lambda: [sys.executable, "-c", script]
     )
+    monkeypatch.setattr(worker.subprocess, "Popen", track_process)
 
-    started = time.monotonic()
     with pytest.raises(InstagramProviderTimeoutError):
         await worker.run_isolated_instagram_operation(
             {"action": "fast"}, timeout_seconds=0.1
         )
 
-    assert time.monotonic() - started < 1.5
-    await asyncio.sleep(2.1)
-    assert not marker.exists()
+    assert len(processes) == 1
+    assert processes[0].poll() == -signal.SIGKILL
 
 
 @pytest.mark.asyncio
@@ -124,6 +177,7 @@ async def test_killed_account_worker_releases_lease(monkeypatch, tmp_path):
     class Manager:
         def __init__(self):
             self.releases = []
+            self.failures = []
 
         def get_available_accounts(self):
             return [account]
@@ -133,6 +187,10 @@ async def test_killed_account_worker_releases_lease(monkeypatch, tmp_path):
 
         def release_account(self, value):
             self.releases.append(value)
+
+        def record_account_failure(self, value, reason):
+            self.failures.append((value, reason))
+            return None
 
     manager = Manager()
 
@@ -155,3 +213,4 @@ async def test_killed_account_worker_releases_lease(monkeypatch, tmp_path):
         )
 
     assert manager.releases == [account]
+    assert manager.failures == [(account, "provider_timeout")]

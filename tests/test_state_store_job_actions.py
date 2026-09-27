@@ -1,4 +1,7 @@
 import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from src.instagram_video_bot.services.state_store import StateStore
 
@@ -21,6 +24,39 @@ def test_state_store_allows_health_reader_during_writer_transaction(tmp_path):
     finally:
         writer.rollback()
         reader.close()
+        writer.close()
+
+
+def test_state_store_writer_waits_for_lock_then_commits(tmp_path):
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.create_job("job-1", 77, "https://example.com/video", "instagram", "queued")
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000
+    writer = sqlite3.connect(db_path)
+    started = threading.Event()
+
+    def update_status():
+        started.set()
+        store.update_job_status("job-1", "running")
+
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("UPDATE jobs SET status = 'queued' WHERE job_id = 'job-1'")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(update_status)
+            assert started.wait(timeout=1)
+            time.sleep(0.1)
+            assert not future.done()
+            writer.commit()
+            future.result(timeout=2)
+        assert (
+            writer.execute("SELECT status FROM jobs WHERE job_id = 'job-1'").fetchone()[
+                0
+            ]
+            == "running"
+        )
+    finally:
+        writer.rollback()
         writer.close()
 
 

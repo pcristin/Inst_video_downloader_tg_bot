@@ -6,6 +6,8 @@ import pytest
 from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
 from src.instagram_video_bot.services.video_downloader import VideoDownloader
 
+pytestmark = pytest.mark.usefixtures("in_process_provider_for_unit_tests")
+
 
 def _photo_result(tmp_path) -> VideoInfo:
     path = tmp_path / "photo.jpg"
