@@ -125,11 +125,11 @@ accounts-export-auth: ## Export fast fallback cookies from configured Instagram 
 
 accounts-prewarm: ## Validate and prewarm every candidate, preserving successful sessions
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
-	uv run --no-sync python rotate_accounts.py prewarm --candidates "$(CANDIDATES)" $(if $(SEED_SESSIONS),--seed-sessions "$(SEED_SESSIONS)",)
+	uv run --frozen python rotate_accounts.py prewarm --candidates "$(CANDIDATES)" $(if $(SEED_SESSIONS),--seed-sessions "$(SEED_SESSIONS)",)
 
 accounts-activate: ## Stop bot, install checked roster, then restart
 	@test -n "$(CANDIDATES)" || { echo 'Set CANDIDATES=/absolute/path/to/accounts-file'; exit 2; }
-	@docker compose stop instagram-video-bot && { uv run --no-sync python rotate_accounts.py activate --candidates "$(CANDIDATES)"; result=$$?; docker compose up -d instagram-video-bot || exit $$?; exit $$result; }
+	@docker compose stop instagram-video-bot && { uv run --frozen python rotate_accounts.py activate --candidates "$(CANDIDATES)"; result=$$?; docker compose up -d instagram-video-bot || exit $$?; exit $$result; }
 
 # Session Management Commands
 sessions-clean: ## Clean all session files (forces fresh login for all accounts)

@@ -46,6 +46,7 @@ def test_prewarm_reuses_seeded_session_and_records_failure(tmp_path, monkeypatch
     seeded = tmp_path / "seeded"
     seeded.mkdir()
     (seeded / "first.json").write_text(json.dumps(SESSION))
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: True)
     monkeypatch.setattr(
         rotate_accounts.subprocess,
         "run",
@@ -80,13 +81,15 @@ def test_activate_requires_every_account_attempted(tmp_path):
         rotate_accounts.activate(candidates, tmp_path / "stage", tmp_path / "project")
 
 
-def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path):
+def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: True)
     project = tmp_path / "project"
     (project / "sessions").mkdir(parents=True)
     (project / "account-state").mkdir()
     (project / "secrets").mkdir()
     (project / "accounts.txt").write_text(f"old|old-password|{SEED}\n")
     (project / "sessions" / "old.json").write_text(json.dumps(SESSION))
+    (project / "sessions" / "second.json").write_text(json.dumps(SESSION))
     (project / "account-state" / "accounts_state.json").write_text(
         '{"accounts":[{"username":"old","password":"old-password"}]}'
     )
@@ -110,6 +113,7 @@ def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path):
         project / "accounts.txt"
     ).read_text() == f"first|pw1|{SEED}\nsecond|pw2|{SEED}\n"
     assert not (project / "sessions" / "old.json").exists()
+    assert not (project / "sessions" / "second.json").exists()
     assert (project / "sessions" / "first.json").exists()
     state = json.loads((project / "account-state" / "accounts_state.json").read_text())
     assert state["accounts"][1]["is_banned"] is True
@@ -127,6 +131,7 @@ def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path):
 
 
 def test_activate_restores_old_files_if_write_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: True)
     project = tmp_path / "project"
     (project / "sessions").mkdir(parents=True)
     (project / "account-state").mkdir()
@@ -163,3 +168,23 @@ def test_activate_restores_old_files_if_write_fails(tmp_path, monkeypatch):
     assert old_session.exists()
     assert not (project / "sessions" / "first.json").exists()
     assert auth.read_text() == '{"instagram":["old-cookie"]}'
+
+
+def test_activate_rejects_unverified_identity_before_mutation(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    roster = project / "accounts.txt"
+    roster.write_text(f"old|old-password|{SEED}\n")
+    candidates_file = tmp_path / "new.txt"
+    candidates_file.write_text(f"first|pw1|{SEED}\n")
+    candidates = rotate_accounts.read_candidates(candidates_file)
+    stage = rotate_accounts._stage_for(tmp_path / "stage", candidates)
+    (stage / "sessions").mkdir(parents=True)
+    (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
+    rotate_accounts._write_results(stage, candidates, {"0": "success"})
+    monkeypatch.setattr(rotate_accounts, "_verify_session", lambda *_args: False)
+
+    with pytest.raises(ValueError, match="could not authenticate"):
+        rotate_accounts.activate(candidates_file, tmp_path / "stage", project)
+
+    assert roster.read_text() == f"old|old-password|{SEED}\n"

@@ -170,6 +170,10 @@ def login_worker(path: Path, index: int, stage: Path) -> int:
             verification_code=pyotp.TOTP(candidate.totp_secret).now(),
         )
         if success:
+            identity = client.account_info()
+            if identity.username.casefold() != candidate.username.casefold():
+                print(json.dumps({"result": "identity_mismatch"}))
+                return 1
             target = stage / "sessions" / f"{candidate.username}.json"
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             client.dump_settings(target)
@@ -184,6 +188,59 @@ def login_worker(path: Path, index: int, stage: Path) -> int:
     return 1
 
 
+def verify_worker(path: Path, index: int, stage: Path) -> int:
+    """Check saved session authority and identity against Instagram."""
+    from instagrapi import Client
+
+    candidate = read_candidates(path)[index]
+    session_file = stage / "sessions" / f"{candidate.username}.json"
+    if not _session_is_usable(session_file):
+        print(json.dumps({"result": "session_missing"}))
+        return 1
+    proxies = settings.get_proxy_list()
+    client = Client()
+    if proxies:
+        client.set_proxy(proxies[index % len(proxies)])
+    try:
+        client.load_settings(session_file)
+        identity = client.account_info()
+        cookies = client.get_settings().get("cookies", {})
+        if identity.username.casefold() == candidate.username.casefold() and str(
+            identity.pk
+        ) == str(cookies.get("ds_user_id")):
+            print(json.dumps({"result": "success"}))
+            return 0
+        print(json.dumps({"result": "identity_mismatch"}))
+    except Exception as error:
+        print(json.dumps({"result": type(error).__name__}))
+    return 1
+
+
+def _verify_session(path: Path, index: int, stage: Path, timeout: int = 45) -> bool:
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "verify",
+                "--candidates",
+                str(path),
+                "--index",
+                str(index),
+                "--stage-root",
+                str(stage),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+        return completed.returncode == 0 and payload.get("result") == "success"
+    except (subprocess.TimeoutExpired, ValueError, IndexError, KeyError):
+        return False
+
+
 def prewarm(
     path: Path, root: Path, seed_sessions: Path | None = None, timeout: int = 100
 ) -> dict[str, int]:
@@ -196,7 +253,11 @@ def prewarm(
     for index, candidate in enumerate(candidates):
         key = str(index)
         session = stage / "sessions" / f"{candidate.username}.json"
-        if results.get(key) == "success" and _session_is_usable(session):
+        if (
+            results.get(key) == "success"
+            and _session_is_usable(session)
+            and _verify_session(path, index, stage)
+        ):
             continue
         if seed_sessions is not None:
             seeded = seed_sessions / f"{candidate.username}.json"
@@ -204,9 +265,10 @@ def prewarm(
                 session.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 shutil.copyfile(seeded, session)
                 os.chmod(session, 0o600)
-                results[key] = "success"
-                _write_results(stage, candidates, results)
-                continue
+                if _verify_session(path, index, stage):
+                    results[key] = "success"
+                    _write_results(stage, candidates, results)
+                    continue
         try:
             completed = subprocess.run(
                 [
@@ -260,9 +322,12 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
     ]
     if not successful:
         raise ValueError("no successful sessions; refusing activation")
-    for candidate in successful:
-        if not _session_is_usable(stage / "sessions" / f"{candidate.username}.json"):
-            raise ValueError("successful account is missing a usable session")
+    for index, candidate in enumerate(candidates):
+        if results[str(index)] == "success" and (
+            not _session_is_usable(stage / "sessions" / f"{candidate.username}.json")
+            or not _verify_session(path, index, stage)
+        ):
+            raise ValueError("staged session could not authenticate as candidate")
 
     sessions = project / "sessions"
     sessions.mkdir(exist_ok=True)
@@ -298,7 +363,7 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
         )
         _private_write(auth_file, (json.dumps(AUTH_EMPTY) + "\n").encode(), owner)
         _private_write(current_roster, roster, owner)
-        active = {candidate.username for candidate in candidates}
+        active = {candidate.username for candidate in successful}
         for old in sessions.glob("*.json"):
             if old.stem not in active:
                 old.unlink()
@@ -320,7 +385,7 @@ def activate(path: Path, root: Path, project: Path) -> dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["prewarm", "activate", "worker"])
+    parser.add_argument("command", choices=["prewarm", "activate", "worker", "verify"])
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--stage-root", type=Path, default=Path(".account-rotation"))
     parser.add_argument("--seed-sessions", type=Path)
@@ -332,6 +397,12 @@ def main() -> None:
             if args.index is None:
                 raise ValueError("worker requires --index")
             raise SystemExit(login_worker(args.candidates, args.index, args.stage_root))
+        if args.command == "verify":
+            if args.index is None:
+                raise ValueError("verify requires --index")
+            raise SystemExit(
+                verify_worker(args.candidates, args.index, args.stage_root)
+            )
         if args.command == "prewarm":
             summary = prewarm(args.candidates, args.stage_root, args.seed_sessions)
         else:
