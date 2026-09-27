@@ -37,8 +37,10 @@ def test_new_accounts_have_a_gradual_lease_cooldown(tmp_path):
 
     assert manager.get_next_account().username == "legacy"
     manager.accounts[1].is_banned = True
+    assert manager.next_account_ready_in() > 250
     assert manager.acquire_account() is None
     manager.accounts[0].last_used = now - timedelta(minutes=6)
+    assert manager.next_account_ready_in() == 0
     assert manager.acquire_account().username == "new"
     manager.release_account(manager.accounts[0])
     manager.accounts[0].activated_at = now - timedelta(hours=25)

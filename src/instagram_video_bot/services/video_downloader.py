@@ -413,7 +413,12 @@ class VideoDownloader:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            await asyncio.sleep(min(0.25, remaining))
+            next_ready = getattr(manager, "next_account_ready_in", lambda **_kwargs: None)(
+                excluded_usernames=tried_accounts
+            )
+            if next_ready is not None and next_ready > remaining:
+                return None
+            await asyncio.sleep(min(next_ready, remaining) if next_ready else min(0.25, remaining))
 
     async def _download_with_single_account(
         self, url: str, output_dir: Path, fast_error: Optional[Exception]

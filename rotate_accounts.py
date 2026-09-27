@@ -224,7 +224,7 @@ def _validate_canary_url(url: str) -> None:
     if (
         parsed.scheme != "https"
         or parsed.hostname not in {"instagram.com", "www.instagram.com"}
-        or not re.fullmatch(r"/(p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path)
+        or not re.fullmatch(r"/(?:share/)?(?:p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path)
     ):
         raise ValueError("canary URL must be a public Instagram post or reel URL")
 
@@ -311,13 +311,18 @@ def canary_worker(path: Path, index: int, stage: Path, url: str) -> int:
         media = client.media_info(media_pk)
         with tempfile.TemporaryDirectory() as folder:
             if media.media_type == 1:
-                output = client.photo_download(media_pk, folder=Path(folder))
+                outputs = [client.photo_download(media_pk, folder=Path(folder))]
             elif media.media_type == 2:
-                output = client.video_download(media_pk, folder=Path(folder))
+                outputs = [client.video_download(media_pk, folder=Path(folder))]
+            elif media.media_type == 8:
+                outputs = client.album_download(media_pk, folder=Path(folder))
             else:
                 print(json.dumps({"result": "unsupported_media_type"}))
                 return 1
-            if Path(output).is_file() and Path(output).stat().st_size > 0:
+            if any(
+                Path(output).is_file() and Path(output).stat().st_size > 0
+                for output in outputs
+            ):
                 print(json.dumps({"result": "success"}))
                 return 0
         print(json.dumps({"result": "empty_download"}))

@@ -270,17 +270,21 @@ def test_activate_rejects_session_replaced_during_verification(tmp_path, monkeyp
     assert roster.read_text() == f"old|pw|{SEED}\n"
 
 
-def test_canary_checks_saved_session_and_downloads_media(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("media_type", [1, 8])
+def test_canary_checks_saved_session_and_downloads_media(
+    tmp_path, monkeypatch, capsys, media_type
+):
     candidate_file = tmp_path / "new.txt"
     candidate_file.write_text(f"first|pw1|{SEED}\n")
     stage = tmp_path / "stage"
     (stage / "sessions").mkdir(parents=True)
     (stage / "sessions" / "first.json").write_text(json.dumps(SESSION))
     monkeypatch.setattr(rotate_accounts, "account_proxy", lambda _index: None)
+    loaded = []
 
     class FakeClient:
-        def load_settings(self, _path):
-            pass
+        def load_settings(self, path):
+            loaded.append(path)
 
         def account_info(self):
             return SimpleNamespace(username="first", pk="123")
@@ -292,12 +296,15 @@ def test_canary_checks_saved_session_and_downloads_media(tmp_path, monkeypatch, 
             return "456"
 
         def media_info(self, _pk):
-            return SimpleNamespace(media_type=1)
+            return SimpleNamespace(media_type=media_type)
 
         def photo_download(self, _pk, folder):
             output = folder / "sample.jpg"
             output.write_bytes(b"image")
             return output
+
+        def album_download(self, _pk, folder):
+            return [self.photo_download(_pk, folder)]
 
     monkeypatch.setattr(instagrapi, "Client", FakeClient)
     assert (
@@ -307,6 +314,7 @@ def test_canary_checks_saved_session_and_downloads_media(tmp_path, monkeypatch, 
         == 0
     )
     assert json.loads(capsys.readouterr().out)["result"] == "success"
+    assert loaded == [stage / "sessions" / "first.json"]
 
 
 def test_canary_records_success_for_exact_session_and_skips_failed_logins(
@@ -381,6 +389,10 @@ def test_canary_rejects_session_replaced_during_worker(tmp_path, monkeypatch):
 def test_canary_rejects_non_media_urls(tmp_path, url):
     with pytest.raises(ValueError, match="canary URL"):
         rotate_accounts.canary(tmp_path / "missing", tmp_path / "stage", url)
+
+
+def test_canary_accepts_instagram_share_reel_url():
+    rotate_accounts._validate_canary_url("https://www.instagram.com/share/reel/ABC123/")
 
 
 def test_activate_replaces_old_roster_state_auth_and_sessions(tmp_path, monkeypatch):

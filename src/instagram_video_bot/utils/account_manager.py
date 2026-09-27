@@ -311,16 +311,32 @@ class AccountManager:
             )
 
     @staticmethod
-    def _ramp_allows(account: Account) -> bool:
-        """Limit first use volume for newly activated accounts."""
+    def _ramp_wait_seconds(account: Account, now: Optional[datetime] = None) -> float:
+        """Seconds until a newly activated account can take another lease."""
         if account.activated_at is None or account.last_used is None:
-            return True
-        now = datetime.now()
+            return 0.0
+        now = now or datetime.now()
         age = now - account.activated_at
         for until, interval in NEW_ACCOUNT_RAMP:
             if age < until:
-                return now - account.last_used >= interval
-        return True
+                return max(0.0, (interval - (now - account.last_used)).total_seconds())
+        return 0.0
+
+    @classmethod
+    def _ramp_allows(cls, account: Account) -> bool:
+        return cls._ramp_wait_seconds(account) == 0.0
+
+    def next_account_ready_in(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[float]:
+        """Return the next ramp delay, or None if a lease may release sooner."""
+        excluded_usernames = excluded_usernames or set()
+        with self._lock:
+            available = [
+                account for account in self.get_available_accounts()
+                if account.username not in excluded_usernames
+            ]
+            if any(account.username in self._leased_accounts for account in available):
+                return None
+            return min((self._ramp_wait_seconds(account) for account in available), default=0.0)
     
     def get_next_account(self, excluded_usernames: Optional[Set[str]] = None) -> Optional[Account]:
         """Get the next available account for rotation."""

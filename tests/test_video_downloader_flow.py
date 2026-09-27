@@ -2086,6 +2086,30 @@ async def test_acquire_account_with_wait_fails_promptly_when_all_accounts_exclud
 
 
 @pytest.mark.asyncio
+async def test_acquire_account_with_wait_returns_promptly_when_ramp_exceeds_wait(monkeypatch):
+    downloader = VideoDownloader()
+
+    class CoolingManager:
+        def acquire_account(self, excluded_usernames=None):
+            return None
+
+        def get_eligible_account_count(self, excluded_usernames=None):
+            return 1
+
+        def next_account_ready_in(self, excluded_usernames=None):
+            return 300.0
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.video_downloader.settings.INSTAGRAM_ACCOUNT_LEASE_WAIT_SECONDS", 1.0
+    )
+
+    account = await asyncio.wait_for(
+        downloader._acquire_account_with_wait(CoolingManager(), set()), timeout=0.5
+    )
+    assert account is None
+
+
+@pytest.mark.asyncio
 async def test_acquire_account_with_wait_waits_for_temporarily_leased_account(monkeypatch):
     downloader = VideoDownloader()
     manager = _TemporarilyLeasedManager([_Account("acc_wait")])
