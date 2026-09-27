@@ -5,6 +5,24 @@ from types import SimpleNamespace
 import manage_accounts
 
 
+def test_list_command_redacts_proxy_credentials(monkeypatch, capsys):
+    manager = SimpleNamespace(
+        accounts=[
+            SimpleNamespace(
+                username="first", proxy="http://user:secret@proxy.test:8080"
+            )
+        ]
+    )
+    monkeypatch.setattr(manage_accounts, "get_account_manager", lambda: manager)
+
+    manage_accounts.list_command()
+
+    output = capsys.readouterr().out
+    assert "first" in output
+    assert "proxy.test:8080" in output
+    assert "user:secret" not in output
+
+
 def test_export_auth_command_exports_all_configured_accounts(monkeypatch, tmp_path):
     accounts = [
         SimpleNamespace(username="first"),
@@ -59,9 +77,10 @@ def test_main_accepts_export_auth_options(monkeypatch, tmp_path):
     output_path = tmp_path / "instagram_auth.json"
     called = {}
 
-    def fake_export_auth_command(*, output_path, available_only):
+    def fake_export_auth_command(*, output_path, available_only, runtime_uid):
         called["output_path"] = output_path
         called["available_only"] = available_only
+        called["runtime_uid"] = runtime_uid
 
     monkeypatch.setattr(
         sys,
@@ -80,4 +99,8 @@ def test_main_accepts_export_auth_options(monkeypatch, tmp_path):
 
     manage_accounts.main()
 
-    assert called == {"output_path": output_path, "available_only": True}
+    assert called == {
+        "output_path": output_path,
+        "available_only": True,
+        "runtime_uid": None,
+    }

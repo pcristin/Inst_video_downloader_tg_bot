@@ -51,10 +51,6 @@ class Account:
         """Convert to dictionary for JSON serialization."""
         return {
             'username': self.username,
-            'password': self.password,
-            'totp_secret': self.totp_secret,
-            'proxy': self.proxy,
-            'session_file': str(self.session_file) if self.session_file else None,
             'is_banned': self.is_banned,
             'ban_reason': self.ban_reason,
             'banned_at': self.banned_at.isoformat() if self.banned_at else None,
@@ -69,7 +65,7 @@ class Account:
         """Create from dictionary (for JSON deserialization)."""
         account = cls(
             username=data['username'],
-            password=data['password'],
+            password=data.get('password', ''),
             totp_secret=data.get('totp_secret', ''),
             proxy=data.get('proxy'),
             session_file=Path(data['session_file']) if data.get('session_file') else None,
@@ -223,6 +219,12 @@ class AccountManager:
                         if saved_account.get('proxy'):
                             account.proxy = saved_account['proxy']
                         break
+            if any(
+                isinstance(saved_account, dict)
+                and any(key in saved_account for key in ('password', 'totp_secret', 'proxy'))
+                for saved_account in state.get('accounts', [])
+            ):
+                self._save_state()
                         
         except Exception as error:
             logger.error("Failed to load state (type=%s)", type(error).__name__)
