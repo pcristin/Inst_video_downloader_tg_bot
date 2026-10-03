@@ -12,6 +12,7 @@ from time import monotonic
 from typing import Any, Awaitable, Callable
 
 from ..config.settings import settings
+from .execution_limits import get_global_execution_semaphore
 from .job_states import (
     FailureDetails,
     FailureStage,
@@ -62,6 +63,8 @@ class SharedJob:
     delivery_request_id: str | None = None
     last_delivery_error: Exception | None = None
     failure: FailureDetails | None = None
+    first_media_sent_monotonic: float | None = None
+    all_media_sent_monotonic: float | None = None
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,6 @@ class JobManager:
 
     def __init__(self, store: StateStore):
         self.store = store
-        self._global_semaphore = asyncio.Semaphore(settings.GLOBAL_MAX_CONCURRENT_JOBS)
         self._chat_semaphores: dict[int, asyncio.Semaphore] = {}
         self._user_semaphores: dict[tuple[int, int], asyncio.Semaphore] = {}
         self._provider_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -239,7 +241,7 @@ class JobManager:
                 job.result_future.set_exception(error)
             await self._set_state(job, JobState.FAILED)
         finally:
-            self._active_jobs.pop((job.chat_id, job.normalized_url), None)
+            self._remove_active_job(job)
 
     async def _set_state(self, job: SharedJob, state: JobState) -> None:
         job.state = state
@@ -281,8 +283,6 @@ class JobManager:
                     and not job.delivery_future.done()
                 ):
                     self._handoff_delivery(job, request_id, asyncio.CancelledError())
-                elif job.delivery_request_id == request_id:
-                    self._promote_delivery_request(job)
                 if not any(item.active for item in job.requesters.values()):
                     if job.state not in TERMINAL_JOB_STATES:
                         job.state = JobState.CANCELLED
@@ -298,9 +298,7 @@ class JobManager:
                         job.delivery_future.set_result(False)
                     if job.task and not job.task.done():
                         job.task.cancel()
-                    self._active_jobs.pop(
-                        (job.chat_id, job.normalized_url), None
-                    )
+                    self._remove_active_job(job)
                 return job
         return None
 
@@ -349,7 +347,7 @@ class JobManager:
 
     async def wait_for_delivery(self, job: SharedJob) -> bool:
         if job.delivery_future:
-            return await job.delivery_future
+            return await asyncio.shield(job.delivery_future)
         return False
 
     def mark_delivery_completed(self, job: SharedJob) -> None:
@@ -509,6 +507,11 @@ class JobManager:
         job.delivery_future = asyncio.get_running_loop().create_future()
         return True
 
+    def _remove_active_job(self, job: SharedJob) -> None:
+        key = (job.chat_id, job.normalized_url)
+        if self._active_jobs.get(key) is job:
+            self._active_jobs.pop(key)
+
     def _get_chat_semaphore(self, chat_id: int) -> asyncio.Semaphore:
         limits = self.store.get_queue_limits(chat_id)
         limit = limits["chat_max_concurrent_jobs"]
@@ -542,14 +545,14 @@ class JobManager:
     def _job_semaphores(self, job: SharedJob) -> list[asyncio.Semaphore]:
         # Acquire local limits before provider/global so local waiters do not hold scarce slots.
         semaphores = [
-            self._get_chat_semaphore(job.chat_id),
             self._get_user_semaphore(job.chat_id, job.submitter_user_id),
+            self._get_chat_semaphore(job.chat_id),
         ]
         # Instagram account waits happen inside the downloader. Its provider gate is taken only
         # around actual provider calls so account waiters do not block fast-path jobs.
         if job.provider != "instagram":
             semaphores.append(self._get_provider_semaphore(job.provider))
-            semaphores.append(self._global_semaphore)
+            semaphores.append(get_global_execution_semaphore())
         return semaphores
 
     @staticmethod

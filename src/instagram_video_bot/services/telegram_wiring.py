@@ -103,6 +103,8 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
 
     async def _post_stop(_application: Application) -> None:
         nonlocal post_deploy_task
+        from .instagram_delivery_race import drain_race_cleanup
+        await drain_race_cleanup()
         if post_deploy_task is None:
             return
         if not post_deploy_task.done():

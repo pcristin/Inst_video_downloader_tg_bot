@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from time import perf_counter
+from collections.abc import Callable
 
 from telegram import Message
 
@@ -23,4 +26,17 @@ class RequestContext:
     joined_existing: bool
     chaos_enabled: bool = False
     language_code: str = "ru"
+    received_monotonic: float = field(default_factory=perf_counter)
+    received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    first_media_sent_monotonic: float | None = None
+    all_media_sent_monotonic: float | None = None
+    on_all_media_sent: Callable[[], None] | None = field(default=None, repr=False)
 
+    def mark_first_media_sent(self) -> None:
+        if self.first_media_sent_monotonic is None:
+            self.first_media_sent_monotonic = perf_counter()
+
+    def mark_all_media_sent(self) -> None:
+        self.all_media_sent_monotonic = perf_counter()
+        if self.on_all_media_sent is not None:
+            self.on_all_media_sent()

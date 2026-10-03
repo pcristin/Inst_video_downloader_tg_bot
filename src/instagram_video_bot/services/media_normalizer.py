@@ -5,16 +5,33 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from ..config.settings import settings
 from .download_models import MediaItem, VideoInfo
 
 logger = logging.getLogger(__name__)
 
 _COMMAND_TIMEOUT_SECONDS = 300
+_FFMPEG_THREADS = 2
+_normalization_deadline: ContextVar[float | None] = ContextVar(
+    "normalization_deadline", default=None
+)
+
+
+def _remaining_timeout() -> float:
+    deadline = _normalization_deadline.get()
+    remaining = (
+        _COMMAND_TIMEOUT_SECONDS if deadline is None else deadline - perf_counter()
+    )
+    if remaining <= 0:
+        raise TimeoutError("normalization deadline exceeded")
+    return remaining
 
 
 @dataclass(frozen=True)
@@ -72,37 +89,52 @@ def normalize_instagram_media(video_info: VideoInfo) -> VideoInfo:
 
 def _normalize_video_item(item: MediaItem) -> MediaItem:
     source = item.file_path
-    candidate = source.with_name(f"{source.stem}.ios.mp4")
+    destination = source.with_name(f"{source.stem}.ios.mp4")
+    candidate: Path | None = None
     started_at = perf_counter()
     outcome = "normalization_failed"
     reason = "unknown"
 
+    token = _normalization_deadline.set(started_at + _COMMAND_TIMEOUT_SECONDS)
     try:
         source_probe = _probe_video(source)
-        source_decodes = _decode_is_valid(source)
-        remux = source_probe.is_ios_compatible and source_decodes
+        remux = source_probe.is_ios_compatible
         outcome = "remuxed" if remux else "transcoded"
         reason = (
-            "compatible_streams"
-            if remux
-            else _compatibility_reason(source_probe, source_decodes)
+            "compatible_streams" if remux else _compatibility_reason(source_probe, True)
         )
-        candidate.unlink(missing_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{source.stem}.ios-",
+            suffix=".mp4",
+            dir=source.parent,
+            delete=False,
+        ) as temporary:
+            candidate = Path(temporary.name)
 
-        command = _remux_command(source) if remux else _transcode_command(source)
-        if not _run_ffmpeg(command, candidate):
-            raise RuntimeError("ffmpeg command failed")
-        if not candidate.exists() or candidate.stat().st_size <= 0:
-            raise RuntimeError("ffmpeg produced an empty output")
-
-        candidate_probe = _probe_video(candidate)
-        if source_probe.audio_codecs and not candidate_probe.audio_codecs:
-            reason = "output_audio_missing"
-            raise RuntimeError("normalized output lost source audio")
-        if not candidate_probe.is_ios_compatible:
-            raise RuntimeError("normalized output is not iOS compatible")
-        if not _decode_is_valid(candidate):
-            raise RuntimeError("normalized output failed decode validation")
+        # Verify the finished payload once. A failed remux decode is repaired by
+        # transcoding, then verified again; compatible metadata alone is never trusted.
+        for use_remux in ([True, False] if remux else [False]):
+            command = (
+                _remux_command(source) if use_remux else _transcode_command(source)
+            )
+            if not _run_ffmpeg(command, candidate):
+                raise RuntimeError("ffmpeg command failed")
+            if not candidate.exists() or candidate.stat().st_size <= 0:
+                raise RuntimeError("ffmpeg produced an empty output")
+            candidate_probe = _probe_video(candidate)
+            if source_probe.audio_codecs and not candidate_probe.audio_codecs:
+                reason = "output_audio_missing"
+                raise RuntimeError("normalized output lost source audio")
+            if not candidate_probe.is_ios_compatible:
+                raise RuntimeError("normalized output is not iOS compatible")
+            if _decode_is_valid(candidate):
+                break
+            if not use_remux:
+                raise RuntimeError("normalized output failed decode validation")
+            outcome = "transcoded"
+            reason = "remux_decode_failed"
+        _remaining_timeout()
+        candidate.replace(destination)
 
         logger.info(
             "Instagram video normalization completed",
@@ -111,19 +143,20 @@ def _normalize_video_item(item: MediaItem) -> MediaItem:
                 "normalization_reason": reason,
                 "normalization_duration_ms": int((perf_counter() - started_at) * 1000),
                 "input_size_bytes": source.stat().st_size,
-                "output_size_bytes": candidate.stat().st_size,
+                "output_size_bytes": destination.stat().st_size,
             },
         )
         return replace(
             item,
-            file_path=candidate,
+            file_path=destination,
             duration=candidate_probe.duration,
             width=candidate_probe.width,
             height=candidate_probe.height,
             telegram_file_id=None,
         )
     except Exception as error:
-        candidate.unlink(missing_ok=True)
+        if candidate is not None:
+            candidate.unlink(missing_ok=True)
         logger.warning(
             "Instagram video normalization failed; using original media",
             extra={
@@ -134,6 +167,8 @@ def _normalize_video_item(item: MediaItem) -> MediaItem:
             },
         )
         return item
+    finally:
+        _normalization_deadline.reset(token)
 
 
 def _probe_video(path: Path) -> VideoProbe:
@@ -150,7 +185,7 @@ def _probe_video(path: Path) -> VideoProbe:
         ],
         capture_output=True,
         text=True,
-        timeout=_COMMAND_TIMEOUT_SECONDS,
+        timeout=_remaining_timeout(),
         check=False,
     )
     if result.returncode != 0:
@@ -202,16 +237,23 @@ def _decode_is_valid(path: Path) -> bool:
                 "ffmpeg",
                 "-v",
                 "error",
+                "-xerror",
+                "-threads",
+                str(_FFMPEG_THREADS),
                 "-i",
                 str(path),
                 "-map",
                 "0:v:0",
+                "-map",
+                "0:a?",
+                "-threads",
+                str(_FFMPEG_THREADS),
                 "-f",
                 "null",
                 "-",
             ],
             capture_output=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
+            timeout=_remaining_timeout(),
             check=False,
         )
         return result.returncode == 0
@@ -225,6 +267,10 @@ def _remux_command(source: Path) -> list[str]:
         "-v",
         "error",
         "-y",
+        "-threads",
+        str(_FFMPEG_THREADS),
+        "-filter_threads",
+        str(_FFMPEG_THREADS),
         "-i",
         str(source),
         "-map",
@@ -246,6 +292,10 @@ def _transcode_command(source: Path) -> list[str]:
         "-v",
         "error",
         "-y",
+        "-threads",
+        str(_FFMPEG_THREADS),
+        "-filter_threads",
+        str(_FFMPEG_THREADS),
         "-i",
         str(source),
         "-map",
@@ -254,12 +304,14 @@ def _transcode_command(source: Path) -> list[str]:
         "0:a?",
         "-c:v",
         "libx264",
+        "-threads",
+        str(_FFMPEG_THREADS),
         "-profile:v",
         "high",
         "-pix_fmt",
         "yuv420p",
         "-preset",
-        "medium",
+        settings.INSTAGRAM_NORMALIZATION_PRESET,
         "-crf",
         "20",
         "-c:a",
@@ -278,7 +330,7 @@ def _run_ffmpeg(command: list[str], output_path: Path) -> bool:
         result = subprocess.run(
             [*command, str(output_path)],
             capture_output=True,
-            timeout=_COMMAND_TIMEOUT_SECONDS,
+            timeout=_remaining_timeout(),
             check=False,
         )
         return result.returncode == 0

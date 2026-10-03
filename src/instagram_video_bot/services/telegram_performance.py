@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .chaos_text import ChaosText
-
+from .instagram_auth_pool import load_configured_instagram_auth_pool
 
 def format_performance_summary(performance: dict[str, Any]) -> str:
     """Format state-store performance metrics for owner-facing admin status."""
@@ -23,6 +23,28 @@ def format_performance_summary(performance: dict[str, Any]) -> str:
         f"- Telegram delivery avg: {int(performance.get('avg_delivery_ms', 0) or 0)}мс",
     ]
 
+    latency = performance.get("latency", {})
+
+    def duration(value: Any) -> str:
+        return "нет данных" if value is None else f"{int(value)}мс"
+
+    lines.extend(
+        [
+            f"- Receipt → all media p50/p95: {duration(latency.get('p50_ms'))} / {duration(latency.get('p95_ms'))}",
+            f"- Receipt → first media p50/p95: {duration(latency.get('first_media_p50_ms'))} / {duration(latency.get('first_media_p95_ms'))}",
+            f"- Storage upload avg: {int(performance.get('avg_storage_upload_ms', 0) or 0)}мс",
+            f"- Delivery outcomes: delivered {latency.get('delivered', 0)}, failed {latency.get('failed', 0)}, unknown {latency.get('unknown', 0)}, cancelled {latency.get('cancelled', 0)}, pending {latency.get('pending', 0)}",
+        ]
+    )
+    phases = performance.get("provider_phases", {})
+    throughput = performance.get("storage_upload_bytes_per_second")
+    if throughput is not None:
+        lines.append(f"- Storage upload throughput: {throughput / 1_000_000:.2f} MB/s")
+    if phases:
+        lines.append(
+            f"- Extraction/download/normalization avg: {phases.get('provider_extraction_ms', 0)}/{phases.get('provider_download_ms', 0)}/{phases.get('media_normalization_ms', 0)}мс"
+        )
+
     providers = performance.get("providers", {})
     if providers:
         for provider, provider_summary in sorted(providers.items()):
@@ -38,6 +60,11 @@ def format_performance_summary(performance: dict[str, Any]) -> str:
         lines.append("- Провайдеры: нет данных")
 
     instagram = performance.get("instagram", {})
+    auth = performance.get("instagram_auth")
+    if auth is not None:
+        lines.append(
+            f"- Instagram fast-extractor auth contexts: configured {auth['configured']}, available {auth['available']}, cooling {auth['cooling_down']}"
+        )
     lines.append(
         "- Instagram fast-path: "
         f"ошибок {int(instagram.get('fast_failed', 0) or 0)}, "
@@ -70,6 +97,7 @@ def build_admin_performance_summary(
     """Merge base state-store performance metrics with admin-status context."""
 
     performance = state_store.get_performance_summary(chat_id, limit=50)
+    performance["instagram_auth"] = load_configured_instagram_auth_pool().health()
     performance["duplicate_joins"] = duplicate_joins
     performance["failure_classes"] = list(performance.get("failure_classes", [])) + [
         error_class

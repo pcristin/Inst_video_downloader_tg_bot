@@ -89,6 +89,17 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
             delivery_error_class TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS request_latency (
+            request_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            first_media_ms INTEGER,
+            total_duration_ms INTEGER,
+            finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_request_latency_job ON request_latency(job_id);
+
         CREATE TABLE IF NOT EXISTS delivery_attempts (
             attempt_id TEXT PRIMARY KEY,
             job_id TEXT NOT NULL,
@@ -298,6 +309,14 @@ def initialize_state_schema(conn: sqlite3.Connection) -> None:
         "instagram_metadata_reused",
         "instagram_metadata_reused INTEGER NOT NULL DEFAULT 0",
     )
+    for column in (
+        "provider_extraction_ms",
+        "provider_download_ms",
+        "media_normalization_ms",
+    ):
+        add_column_if_missing(conn, "performance_metrics", column, f"{column} INTEGER")
+    for column in ("media_bytes", "media_count"):
+        add_column_if_missing(conn, "delivery_attempts", column, f"{column} INTEGER")
     add_column_if_missing(conn, "inline_one_time_payments", "provider", "provider TEXT")
     add_column_if_missing(
         conn, "inline_one_time_payments", "normalized_url", "normalized_url TEXT"

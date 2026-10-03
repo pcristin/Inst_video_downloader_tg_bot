@@ -1,19 +1,21 @@
 # src/instagram_video_bot/config/settings.py
 """Application settings and configuration management."""
+
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     """Application settings."""
-    
+
     # Development mode
     DEV_MODE: bool = False
-    
+
     # Bot settings
     BOT_TOKEN: str = ""
     BOT_TOKEN_FILE: Optional[Path] = None
@@ -30,15 +32,45 @@ class Settings(BaseSettings):
     ACCOUNT_FAILURE_THRESHOLD: int = 2
     ACCOUNT_LOW_WATERMARK: int = 3
     ACCOUNT_ALERT_COOLDOWN_SECONDS: int = 60 * 60
-    
+
     # Instagram credentials
     IG_USERNAME: str = ""
     IG_PASSWORD: str = ""
-    
+
     # Two-factor authentication
     TOTP_SECRET: Optional[str] = None
 
     # Fast Instagram extraction (primary path before authenticated fallback)
+    SQLITE_BUSY_TIMEOUT_SECONDS: float = 0.1
+    TELEGRAM_STATUS_TIMEOUT_SECONDS: float = 0.5
+    TELEGRAM_MEDIA_STAGE_CONCURRENCY: int = 2
+    IG_PUBLIC_METADATA_TIMEOUT_SECONDS: float = 15.0
+    INSTAGRAM_ACQUISITION_TIMEOUT_SECONDS: float = 300.0
+    INSTAGRAM_AUTH_FIRST_ENABLED: bool = True
+    INSTAGRAM_AUTH_FIRST_TIMEOUT_SECONDS: float = 20.0
+    INSTAGRAM_DELIVERY_RACE_ENABLED: bool = True
+    INSTAGRAM_DELIVERY_RACE_MAX_ACTIVE: int = 2
+    INSTAGRAM_NORMALIZATION_CONCURRENCY: int = 1
+    INSTAGRAM_NORMALIZATION_PRESET: Literal[
+        "ultrafast",
+        "superfast",
+        "veryfast",
+        "faster",
+        "fast",
+        "medium",
+        "slow",
+        "slower",
+        "veryslow",
+        "placebo",
+    ] = "veryfast"
+    IG_FAST_FAILURE_THRESHOLD: int = 3
+    IG_FAST_CIRCUIT_COOLDOWN_SECONDS: float = 300.0
+    IG_PUBLIC_PREFER_COMPATIBLE_FORMATS: bool = True
+    IG_PUBLIC_PREFER_SMALLER_FORMATS: bool = True
+    IG_PUBLIC_MAX_HEIGHT: int = 0  # Zero preserves source resolution.
+    IG_PUBLIC_MAX_SOURCE_BYTES: int = (
+        0  # Zero avoids selecting a lower-quality source by size.
+    )
     IG_FAST_METHOD_ENABLED: bool = True
     IG_FAST_TIMEOUT_CONNECT: int = 10
     IG_FAST_TIMEOUT_READ: int = 45
@@ -53,28 +85,29 @@ class Settings(BaseSettings):
     IG_AUTH_COOKIES_FILE: Optional[Path] = None
     IG_AUTH_MAX_CONTEXTS_PER_ATTEMPT: int = 2
     IG_AUTH_CONTEXT_COOLDOWN_SECONDS: float = 900.0
-    
+
     # Proxy settings (single proxy for backward compatibility)
     PROXY_HOST: Optional[str] = None
     PROXY_PORT: Optional[int] = None
     PROXY_USERNAME: Optional[str] = None
     PROXY_PASSWORD: Optional[str] = None
-    
+
     # Multiple proxy support (format: proxy1,proxy2,proxy3...)
     # Each proxy format: user:pass@host:port or host:port
     PROXIES: Optional[str] = None
-    
+
     # Paths - simplified
     BASE_DIR: Path = Path(__file__).parent.parent.parent.parent
-    TEMP_DIR: Path = Path(os.getenv('TEMP_DIR', BASE_DIR / "temp"))
-    CACHE_DIR: Path = Path(os.getenv('CACHE_DIR', TEMP_DIR / "result_cache"))
-    STATE_DB_PATH: Path = Path(os.getenv('STATE_DB_PATH', TEMP_DIR / "bot_state.sqlite3"))
-    ACCOUNT_STATE_FILE: Path = Path(
-        os.getenv("ACCOUNT_STATE_FILE", BASE_DIR / "accounts_state.json")
+    TEMP_DIR: Path = Path(os.getenv("TEMP_DIR", BASE_DIR / "temp"))
+    CACHE_DIR: Path = Path(os.getenv("CACHE_DIR", TEMP_DIR / "result_cache"))
+    STATE_DB_PATH: Path = Path(
+        os.getenv("STATE_DB_PATH", TEMP_DIR / "bot_state.sqlite3")
     )
-    
+    # BaseSettings resolves environment overrides at construction time.
+    ACCOUNT_STATE_FILE: Path = BASE_DIR / "accounts_state.json"
+
     # Note: No longer need COOKIES_FILE - instagrapi uses session files
-    
+
     # Logging
     LOG_LEVEL: str = "INFO"
 
@@ -122,32 +155,28 @@ class Settings(BaseSettings):
     TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS: int = 2
     TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS: float = 1.0
     TELEGRAM_MEDIA_STORAGE_CHAT_ID: Optional[int] = None
-    
+
     # Docker-specific settings
-    RUNNING_IN_DOCKER: bool = os.path.exists('/.dockerenv')
-    
+    RUNNING_IN_DOCKER: bool = os.path.exists("/.dockerenv")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         env_ignore_empty=True,
     )
-    
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         if self.BOT_TOKEN_FILE is not None:
             if self.BOT_TOKEN:
-                raise ValueError(
-                    "Configure only one of BOT_TOKEN and BOT_TOKEN_FILE"
-                )
+                raise ValueError("Configure only one of BOT_TOKEN and BOT_TOKEN_FILE")
             try:
                 token = self.BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
             except OSError as error:
                 raise ValueError("BOT_TOKEN_FILE is not readable") from error
             if not token or any(character.isspace() for character in token):
-                raise ValueError(
-                    "BOT_TOKEN_FILE must contain one non-empty token"
-                )
+                raise ValueError("BOT_TOKEN_FILE must contain one non-empty token")
             self.BOT_TOKEN = token
         # Ensure directories exist
         self.TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -156,14 +185,14 @@ class Settings(BaseSettings):
         (self.BASE_DIR / "sessions").mkdir(parents=True, exist_ok=True)
         self.STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         self.ACCOUNT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    
+
     def get_proxy_list(self) -> List[str]:
         """Get list of proxies from PROXIES setting."""
         if not self.PROXIES:
             return []
 
         proxies: List[str] = []
-        for raw_proxy in self.PROXIES.split(','):
+        for raw_proxy in self.PROXIES.split(","):
             raw_proxy = raw_proxy.strip()
             if not raw_proxy:
                 continue
@@ -172,18 +201,16 @@ class Settings(BaseSettings):
             if normalized:
                 proxies.append(normalized)
             else:
-                logging.getLogger(__name__).warning(
-                    "Skipping invalid proxy definition"
-                )
+                logging.getLogger(__name__).warning("Skipping invalid proxy definition")
         return proxies
-    
+
     def get_single_proxy(self) -> Optional[str]:
         """Get single proxy from old-style settings (backward compatibility)."""
         if self.PROXY_HOST and self.PROXY_PORT:
             if self.PROXY_USERNAME and self.PROXY_PASSWORD:
-                return f'http://{self.PROXY_USERNAME}:{self.PROXY_PASSWORD}@{self.PROXY_HOST}:{self.PROXY_PORT}'
+                return f"http://{self.PROXY_USERNAME}:{self.PROXY_PASSWORD}@{self.PROXY_HOST}:{self.PROXY_PORT}"
             else:
-                return f'http://{self.PROXY_HOST}:{self.PROXY_PORT}'
+                return f"http://{self.PROXY_HOST}:{self.PROXY_PORT}"
         return None
 
     @staticmethod
@@ -214,5 +241,6 @@ class Settings(BaseSettings):
             return f"{scheme}://{username}:{password}@{host}:{port}"
 
         return None
+
 
 settings = Settings()

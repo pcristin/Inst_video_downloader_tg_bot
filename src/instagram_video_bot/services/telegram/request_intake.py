@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from telegram import Message, Update
@@ -26,6 +28,8 @@ class TelegramRequestIntake:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming messages by queueing supported provider links."""
+        received_monotonic = perf_counter()
+        received_at = datetime.now(timezone.utc)
         bot = self._bot
         if (
             getattr(update, "edited_message", None)
@@ -75,6 +79,8 @@ class TelegramRequestIntake:
                 parsed_link,
                 group_settings=group_settings,
                 language_code=language_code,
+                received_monotonic=received_monotonic,
+                received_at=received_at,
             )
 
     async def submit_parsed_link(
@@ -87,10 +93,16 @@ class TelegramRequestIntake:
         language_code: str | None = None,
         status_message: Message | None = None,
         retry_of_request_id: str | None = None,
+        received_monotonic: float | None = None,
+        received_at: datetime | None = None,
     ) -> str | None:
         """Submit one parsed link, optionally reusing a failed status message."""
 
         bot = self._bot
+        received_monotonic = (
+            received_monotonic if received_monotonic is not None else perf_counter()
+        )
+        received_at = received_at or datetime.now(timezone.utc)
         message = update.effective_message
         chat = update.effective_chat
         request_user_id = bot._request_user_id(update)
@@ -112,6 +124,11 @@ class TelegramRequestIntake:
             duplicate_suppression=group_settings["duplicate_suppression"],
             retry_of_request_id=retry_of_request_id,
         )
+        bot.state_store.record_request_received(
+            request_id=submission.request_id,
+            job_id=submission.job.job_id,
+            received_at=received_at,
+        )
         text = bot._build_submission_message(
             parsed_link.provider_label,
             queue_position=submission.queue_position,
@@ -128,6 +145,13 @@ class TelegramRequestIntake:
                 status_message = await message.reply_text(text, reply_markup=markup)
             except (Exception, asyncio.CancelledError):
                 bot.job_manager.cancel_request(submission.request_id)
+                bot.state_store.record_request_outcome(
+                    submission.request_id,
+                    status="cancelled",
+                    total_duration_ms=round(
+                        (perf_counter() - received_monotonic) * 1000
+                    ),
+                )
                 raise
         else:
             await bot._safe_edit_text(
@@ -148,6 +172,8 @@ class TelegramRequestIntake:
             joined_existing=not submission.is_new_job,
             chaos_enabled=group_settings["chaos_mode_enabled"],
             language_code=language_code,
+            received_monotonic=received_monotonic,
+            received_at=received_at,
         )
         bot.request_contexts[submission.request_id] = request_context
         if submission.job.state is JobState.RUNNING:

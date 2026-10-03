@@ -128,6 +128,10 @@ class InstagramProviderAdapter:
             instagram_fallback_path=download_result.fallback_path,
             instagram_metadata_reused=bool(download_result.metadata_reused),
             instagram_success_path="yt_dlp_public",
+            provider_extraction_ms=getattr(
+                download_result, "provider_extraction_ms", None
+            ),
+            provider_download_ms=getattr(download_result, "provider_download_ms", None),
         )
 
     def download_with_instagram_client(

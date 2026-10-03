@@ -49,11 +49,6 @@ def classify_telegram_delivery_error(error: Exception) -> str:
     if isinstance(error, RetryAfter):
         return "telegram_retry_after"
     if isinstance(error, NetworkError):
-        text = str(error).lower()
-        if "readerror" in text:
-            return "telegram_network"
-        if "writeerror" in text or "writetimeout" in text:
-            return "telegram_network"
         return "telegram_network"
     return error.__class__.__name__
 
@@ -85,10 +80,16 @@ def _is_file_too_large_error(error: Exception) -> bool:
 def _safe_log_context(context: dict[str, Any] | None) -> dict[str, Any]:
     if context is None:
         return {}
-    return {key: value for key, value in context.items() if key not in _RESERVED_LOG_RECORD_KEYS}
+    return {
+        key: value
+        for key, value in context.items()
+        if key not in _RESERVED_LOG_RECORD_KEYS
+    }
 
 
-def _retry_sleep_seconds(error: Exception, *, backoff_seconds: float, attempt: int) -> float:
+def _retry_sleep_seconds(
+    error: Exception, *, backoff_seconds: float, attempt: int
+) -> float:
     generic_backoff = max(0.0, backoff_seconds) * (attempt + 1)
     if not isinstance(error, RetryAfter):
         return generic_backoff
@@ -107,6 +108,7 @@ async def call_telegram_with_retries(
     timeout_kwargs: dict[str, float],
     context: dict[str, Any] | None = None,
     retry_network_errors: bool = True,
+    on_retry_after: Callable[[float], None] | None = None,
 ) -> T:
     max_attempts = max(1, attempts)
     last_error: Exception | None = None
@@ -115,6 +117,12 @@ async def call_telegram_with_retries(
             return await operation(**timeout_kwargs)
         except Exception as error:
             last_error = error
+            if isinstance(error, RetryAfter) and on_retry_after is not None:
+                on_retry_after(
+                    _retry_sleep_seconds(
+                        error, backoff_seconds=backoff_seconds, attempt=attempt
+                    )
+                )
             if (
                 not is_retriable_telegram_delivery_error(
                     error, retry_network_errors=retry_network_errors
@@ -132,7 +140,9 @@ async def call_telegram_with_retries(
                 },
             )
             await asyncio.sleep(
-                _retry_sleep_seconds(error, backoff_seconds=backoff_seconds, attempt=attempt),
+                _retry_sleep_seconds(
+                    error, backoff_seconds=backoff_seconds, attempt=attempt
+                ),
             )
     assert last_error is not None
     raise last_error

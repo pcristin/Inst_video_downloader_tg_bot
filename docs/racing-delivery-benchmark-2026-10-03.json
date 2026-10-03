@@ -1,0 +1,3070 @@
+{
+  "date": "2026-10-03",
+  "status": "Throwaway feasibility experiment, not integrated or deployed. Earlier local implementation remains unchanged.",
+  "question": "Does a real first-success race of authenticated CDN-to-Telegram delivery and current acquisition/upload reduce completion latency while stopping losers?",
+  "method": {
+    "sample_count": 8,
+    "trial_count": 24,
+    "selection": "Fixed before running: previous sample IDs 1,2,4,7,8,10,11,12. Four reels (including 75s and 90s), one single photo, two-photo album, twelve-photo album, eleven-item mixed album. Includes previous failure cases.",
+    "modes": {
+      "current": "One current download/normalize/upload worker.",
+      "race": "Direct authenticated metadata/CDN URL worker and current worker start together.",
+      "hedged": "Direct starts immediately; current starts after 8 seconds, or immediately if direct fails sooner."
+    },
+    "order": "Rotate current/race/hedged order per sample. Three seconds between cases. One measured trial per URL/mode.",
+    "accounts": "16 distinct initially eligible saved-session accounts, separate pinned direct/current account per URL. Same per-branch account across modes, private state per branch, copied sessions; production state not changed.",
+    "isolation": "Single benchmark container, 2 CPUs, 1 GB RAM, instagrapi3.0.16 and current local source snapshot, production network namespace, configured storage chat only.",
+    "winner_contract": "All media must be staged with Telegram file IDs before a branch is ready. A failed branch never wins. Coordinator selects one ready result, stops/reaps running losers, then invokes the existing final sender once. It never switches winner after a final-send failure.",
+    "cancellation": "SIGTERM asks child coroutine to cancel and run existing subprocess cleanup; after 3 seconds hard-kill remaining tracked descendants, including workers in separate sessions. Record cleanup latency and remaining live processes.",
+    "timing": "Parent trial start through acknowledgement of all final sends, including worker startup/imports, bot setup, provider work, storage staging, loser cleanup and final sender. Excludes incoming Telegram update queue/intake.",
+    "validation_tests": "Eight controlled tests passed: first-success selection, failed branch, delayed backup, avoided backup, ties, all failures, deadlines, external cancellation/nested process cleanup, plus photo/video staging dispatch (some cases combined).",
+    "source_sha256": {
+      "race_core.py": "9c46e4d1fbee9536910bca4eb106619394d40f754ad3af0cab066490585d2797",
+      "race_benchmark.py": "4cabfd4a80d9edd05282329d58ee061db31a1d28c42f97e9366630b5edb6968a",
+      "test_race_core.py": "d6f75cdd8102839f6ad46c1f2039b3fe25bf1d277e1ca6081e9916b073256c64"
+    }
+  },
+  "excluded_pilot": {
+    "reason": "Photo/video dispatch indentation error in throwaway harness. Stopped, fixed and regression-tested before complete restart. Pilot results are not included in summaries.",
+    "completed_trials": 4
+  },
+  "limitations": [
+    "One small, deliberately mixed convenience sample; no confidence interval, production percentile guarantee or sustained multi-user load validation.",
+    "Current branch uses a different account from direct for concurrency safety. Account/proxy differences may affect relative performance; same branch account reused across modes.",
+    "Direct bypasses full decode/remux. Readiness confirms Telegram staging plus metadata compatibility, not physical-device playback or full source integrity.",
+    "Direct photos choose largest candidate; current photo dimensions were not measured. Photo quality is not identical across paths.",
+    "Repeated historical URLs may be warm in Telegram/CDN caches. Order rotates, but network/cache variance remains.",
+    "Cancellation proves local workers stopped. It cannot revoke a request already accepted by Telegram or Instagram; redundant storage-chat staging can remain.",
+    "One coordinator final-send invocation prevents competing branches from sending. It does not establish distributed exactly-once delivery after network timeouts or process crashes.",
+    "Benchmark private per-process account/concurrency state is not a production-wide governor. Integration needs shared account leases, provider/upload limits and a cap on speculative jobs.",
+    "Successful-only latency summaries exclude failures; all trial failures remain in results.",
+    "Outer process startup is included here, unlike the preceding 12-link benchmark. Compare modes within this experiment."
+  ],
+  "official_constraints": [
+    {
+      "url": "https://core.telegram.org/bots/api#sending-files",
+      "fact": "Telegram documents HTTP URL sending limits of 5 MB for photos and 20 MB for other content, correct MIME type, and no changing media type when resending file IDs. Exact applicability/error cause in local Bot API must be verified from returned errors."
+    }
+  ],
+  "summary": {
+    "current": {
+      "statuses": {
+        "delivered": 8
+      },
+      "successful_delivery": {
+        "n": 8,
+        "median_s": 21.577,
+        "p90_nearest_rank_s": 47.706,
+        "max_s": 47.706
+      },
+      "winners": {
+        "current": 8
+      },
+      "branches_started": 8,
+      "backups_not_started": 0,
+      "cancelled_branches": 0,
+      "cleanup": {
+        "n": 0
+      },
+      "remaining_live_processes_after_cleanup": 0,
+      "final_send_invocations": 8
+    },
+    "race": {
+      "statuses": {
+        "delivered": 8
+      },
+      "successful_delivery": {
+        "n": 8,
+        "median_s": 9.692,
+        "p90_nearest_rank_s": 52.333,
+        "max_s": 52.333
+      },
+      "winners": {
+        "direct": 5,
+        "current": 3
+      },
+      "branches_started": 16,
+      "backups_not_started": 0,
+      "cancelled_branches": 5,
+      "cleanup": {
+        "n": 5,
+        "median_s": 0.229,
+        "p90_nearest_rank_s": 0.2494,
+        "max_s": 0.2494
+      },
+      "remaining_live_processes_after_cleanup": 0,
+      "final_send_invocations": 8
+    },
+    "hedged": {
+      "statuses": {
+        "delivered": 7,
+        "failed": 1
+      },
+      "successful_delivery": {
+        "n": 7,
+        "median_s": 8.528,
+        "p90_nearest_rank_s": 58.205,
+        "max_s": 58.205
+      },
+      "winners": {
+        "direct": 5,
+        "current": 2
+      },
+      "branches_started": 13,
+      "backups_not_started": 3,
+      "cancelled_branches": 2,
+      "cleanup": {
+        "n": 2,
+        "median_s": 0.022,
+        "p90_nearest_rank_s": 0.0219,
+        "max_s": 0.0219
+      },
+      "remaining_live_processes_after_cleanup": 0,
+      "final_send_invocations": 7
+    }
+  },
+  "paired_comparisons": {
+    "race": {
+      "pairs": [
+        {
+          "sample": 1,
+          "current_s": 13.359,
+          "candidate_s": 7.552,
+          "reduction_pct": 43.47
+        },
+        {
+          "sample": 2,
+          "current_s": 16.536,
+          "candidate_s": 8.08,
+          "reduction_pct": 51.14
+        },
+        {
+          "sample": 4,
+          "current_s": 47.706,
+          "candidate_s": 45.2,
+          "reduction_pct": 5.25
+        },
+        {
+          "sample": 7,
+          "current_s": 25.45,
+          "candidate_s": 21.141,
+          "reduction_pct": 16.93
+        },
+        {
+          "sample": 8,
+          "current_s": 17.704,
+          "candidate_s": 9.547,
+          "reduction_pct": 46.07
+        },
+        {
+          "sample": 10,
+          "current_s": 41.684,
+          "candidate_s": 52.333,
+          "reduction_pct": -25.55
+        },
+        {
+          "sample": 11,
+          "current_s": 30.254,
+          "candidate_s": 6.847,
+          "reduction_pct": 77.37
+        },
+        {
+          "sample": 12,
+          "current_s": 11.952,
+          "candidate_s": 9.836,
+          "reduction_pct": 17.7
+        }
+      ],
+      "median_paired_reduction_pct": 30.59
+    },
+    "hedged": {
+      "pairs": [
+        {
+          "sample": 1,
+          "current_s": 13.359,
+          "candidate_s": 7.835,
+          "reduction_pct": 41.35
+        },
+        {
+          "sample": 2,
+          "current_s": 16.536,
+          "candidate_s": 8.528,
+          "reduction_pct": 48.43
+        },
+        {
+          "sample": 4,
+          "current_s": 47.706,
+          "candidate_s": 58.205,
+          "reduction_pct": -22.01
+        },
+        {
+          "sample": 7,
+          "current_s": 25.45,
+          "candidate_s": 28.947,
+          "reduction_pct": -13.74
+        },
+        {
+          "sample": 8,
+          "current_s": 17.704,
+          "candidate_s": 7.738,
+          "reduction_pct": 56.29
+        },
+        {
+          "sample": 11,
+          "current_s": 30.254,
+          "candidate_s": 6.126,
+          "reduction_pct": 79.75
+        },
+        {
+          "sample": 12,
+          "current_s": 11.952,
+          "candidate_s": 9.02,
+          "reduction_pct": 24.53
+        }
+      ],
+      "median_paired_reduction_pct": 41.35
+    }
+  },
+  "per_sample": [
+    {
+      "sample": 1,
+      "current": {
+        "status": "delivered",
+        "total_s": 13.359,
+        "winner": "current"
+      },
+      "race": {
+        "status": "delivered",
+        "total_s": 7.552,
+        "winner": "direct"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 7.835,
+        "winner": "direct"
+      }
+    },
+    {
+      "sample": 2,
+      "race": {
+        "status": "delivered",
+        "total_s": 8.08,
+        "winner": "direct"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 8.528,
+        "winner": "direct"
+      },
+      "current": {
+        "status": "delivered",
+        "total_s": 16.536,
+        "winner": "current"
+      }
+    },
+    {
+      "sample": 4,
+      "hedged": {
+        "status": "delivered",
+        "total_s": 58.205,
+        "winner": "current"
+      },
+      "current": {
+        "status": "delivered",
+        "total_s": 47.706,
+        "winner": "current"
+      },
+      "race": {
+        "status": "delivered",
+        "total_s": 45.2,
+        "winner": "current"
+      }
+    },
+    {
+      "sample": 7,
+      "current": {
+        "status": "delivered",
+        "total_s": 25.45,
+        "winner": "current"
+      },
+      "race": {
+        "status": "delivered",
+        "total_s": 21.141,
+        "winner": "current"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 28.947,
+        "winner": "current"
+      }
+    },
+    {
+      "sample": 8,
+      "race": {
+        "status": "delivered",
+        "total_s": 9.547,
+        "winner": "direct"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 7.738,
+        "winner": "direct"
+      },
+      "current": {
+        "status": "delivered",
+        "total_s": 17.704,
+        "winner": "current"
+      }
+    },
+    {
+      "sample": 10,
+      "hedged": {
+        "status": "failed",
+        "total_s": null,
+        "winner": null
+      },
+      "current": {
+        "status": "delivered",
+        "total_s": 41.684,
+        "winner": "current"
+      },
+      "race": {
+        "status": "delivered",
+        "total_s": 52.333,
+        "winner": "current"
+      }
+    },
+    {
+      "sample": 11,
+      "current": {
+        "status": "delivered",
+        "total_s": 30.254,
+        "winner": "current"
+      },
+      "race": {
+        "status": "delivered",
+        "total_s": 6.847,
+        "winner": "direct"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 6.126,
+        "winner": "direct"
+      }
+    },
+    {
+      "sample": 12,
+      "race": {
+        "status": "delivered",
+        "total_s": 9.836,
+        "winner": "direct"
+      },
+      "hedged": {
+        "status": "delivered",
+        "total_s": 9.02,
+        "winner": "direct"
+      },
+      "current": {
+        "status": "delivered",
+        "total_s": 11.952,
+        "winner": "current"
+      }
+    }
+  ],
+  "results": [
+    {
+      "sample": 1,
+      "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 1,
+          "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 11.208,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "album",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 0,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 162690,
+          "media_count": 2,
+          "media_types": [
+            "photo",
+            "photo"
+          ],
+          "storage_s": 0.178,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 13.128
+        }
+      },
+      "coordinator_s": 13.128,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 12.918,
+      "final_send_invocations": 1,
+      "first_media_s": 13.359,
+      "total_s": 13.359,
+      "media_count": 2,
+      "media_types": [
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 1,
+      "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 1,
+          "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 3.878,
+          "media_count": 2,
+          "media_types": [
+            "photo",
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 1440,
+              "height": 1440
+            },
+            {
+              "width": 1440,
+              "height": 1440
+            }
+          ],
+          "prepare_s": 3.878,
+          "bytes": 417606,
+          "storage_s": 1.642,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 7.144
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 0.0,
+          "cleanup_s": 0.2297,
+          "remaining_live_processes": 0,
+          "tracked_processes": 2,
+          "last_progress": {
+            "sample": 1,
+            "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+            "mode": "current",
+            "status": "running",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16"
+          }
+        }
+      },
+      "coordinator_s": 7.374,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 6.975,
+      "final_send_invocations": 1,
+      "first_media_s": 7.552,
+      "total_s": 7.552,
+      "media_count": 2,
+      "media_types": [
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 1,
+      "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 1,
+          "url": "https://www.instagram.com/p/DdmIuZ0iKwI/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 3.918,
+          "media_count": 2,
+          "media_types": [
+            "photo",
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 1440,
+              "height": 1440
+            },
+            {
+              "width": 1440,
+              "height": 1440
+            }
+          ],
+          "prepare_s": 3.918,
+          "bytes": 417606,
+          "storage_s": 2.037,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 7.657
+        },
+        "current": {
+          "branch": "current",
+          "status": "not_started"
+        }
+      },
+      "coordinator_s": 7.657,
+      "branches_started": 1,
+      "winner": "direct",
+      "winner_ready_s": 7.521,
+      "final_send_invocations": 1,
+      "first_media_s": 7.835,
+      "total_s": 7.835,
+      "media_count": 2,
+      "media_types": [
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 2,
+      "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 2,
+          "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.196,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 14.184535
+            }
+          ],
+          "prepare_s": 4.883,
+          "bytes": 1580338,
+          "storage_s": 1.174,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 7.669
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 0.0,
+          "cleanup_s": 0.2494,
+          "remaining_live_processes": 0,
+          "tracked_processes": 2,
+          "last_progress": {
+            "sample": 2,
+            "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+            "mode": "current",
+            "status": "running",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16"
+          }
+        }
+      },
+      "coordinator_s": 7.918,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 7.521,
+      "final_send_invocations": 1,
+      "first_media_s": 8.08,
+      "total_s": 8.08,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 2,
+      "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 2,
+          "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.803,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 14.184535
+            }
+          ],
+          "prepare_s": 5.5,
+          "bytes": 1580338,
+          "storage_s": 1.154,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 8.3
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 8.016,
+          "cleanup_s": 0.0219,
+          "remaining_live_processes": 0,
+          "tracked_processes": 1
+        }
+      },
+      "coordinator_s": 8.322,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 8.105,
+      "final_send_invocations": 1,
+      "first_media_s": 8.528,
+      "total_s": 8.528,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 2,
+      "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 2,
+          "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 12.41,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 1063,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 1580589,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 1.968,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 16.377
+        }
+      },
+      "coordinator_s": 16.377,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 16.202,
+      "final_send_invocations": 1,
+      "first_media_s": 16.536,
+      "total_s": 16.536,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 4,
+      "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 4,
+          "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "metadata_or_acquisition",
+          "instagrapi": "3.0.16",
+          "error_class": "UnknownError",
+          "elapsed_s": 4.781,
+          "error_frames": [
+            {
+              "file": "private.py",
+              "function": "private_request",
+              "line": 727
+            },
+            {
+              "file": "private.py",
+              "function": "private_request",
+              "line": 710
+            },
+            {
+              "file": "private.py",
+              "function": "_send_private_request",
+              "line": 612
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 6.533
+        },
+        "current": {
+          "sample": 4,
+          "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 28.788,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": "failed",
+            "instagram_fast_duration_ms": 4268,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": true,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "yt_dlp_public",
+            "instagram_fallback_path": "yt_dlp_public",
+            "provider_extraction_ms": 2859,
+            "provider_download_ms": 6387,
+            "media_normalization_ms": 0,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 1461095,
+          "media_count": 12,
+          "media_types": [
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "storage_s": 13.163,
+          "branch": "current",
+          "launch_s": 6.554,
+          "observed_s": 50.503
+        }
+      },
+      "coordinator_s": 50.503,
+      "branches_started": 2,
+      "winner": "current",
+      "winner_ready_s": 50.307,
+      "final_send_invocations": 1,
+      "first_media_s": 50.865,
+      "total_s": 58.205,
+      "media_count": 12,
+      "media_types": [
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 4,
+      "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 4,
+          "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 25.236,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": "failed",
+            "instagram_fast_duration_ms": 4144,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": true,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "yt_dlp_public",
+            "instagram_fallback_path": "yt_dlp_public",
+            "provider_extraction_ms": 2928,
+            "provider_download_ms": 6502,
+            "media_normalization_ms": 0,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 1461095,
+          "media_count": 12,
+          "media_types": [
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "storage_s": 13.139,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 40.015
+        }
+      },
+      "coordinator_s": 40.015,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 39.82,
+      "final_send_invocations": 1,
+      "first_media_s": 40.363,
+      "total_s": 47.706,
+      "media_count": 12,
+      "media_types": [
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 4,
+      "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 4,
+          "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "metadata_or_acquisition",
+          "instagrapi": "3.0.16",
+          "error_class": "UnknownError",
+          "elapsed_s": 4.473,
+          "error_frames": [
+            {
+              "file": "private.py",
+              "function": "private_request",
+              "line": 727
+            },
+            {
+              "file": "private.py",
+              "function": "private_request",
+              "line": 710
+            },
+            {
+              "file": "private.py",
+              "function": "_send_private_request",
+              "line": 612
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 6.118
+        },
+        "current": {
+          "sample": 4,
+          "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 24.834,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": "failed",
+            "instagram_fast_duration_ms": 3659,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": true,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "yt_dlp_public",
+            "instagram_fallback_path": "yt_dlp_public",
+            "provider_extraction_ms": 2597,
+            "provider_download_ms": 6391,
+            "media_normalization_ms": 0,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 1461095,
+          "media_count": 12,
+          "media_types": [
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "storage_s": 10.991,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 37.519
+        }
+      },
+      "coordinator_s": 37.519,
+      "branches_started": 2,
+      "winner": "current",
+      "winner_ready_s": 37.319,
+      "final_send_invocations": 1,
+      "first_media_s": 37.856,
+      "total_s": 45.2,
+      "media_count": 12,
+      "media_types": [
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 7,
+      "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 7,
+          "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 21.814,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 6498,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 24190666,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 1.716,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 25.291
+        }
+      },
+      "coordinator_s": 25.291,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 25.115,
+      "final_send_invocations": 1,
+      "first_media_s": 25.45,
+      "total_s": 25.45,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 7,
+      "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 7,
+          "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.065,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 90.438866
+            }
+          ],
+          "prepare_s": 4.99,
+          "error_class": "BadRequest",
+          "elapsed_s": 5.876,
+          "telegram_error": "Failed to get http url content",
+          "error_frames": [
+            {
+              "file": "_bot.py",
+              "function": "_do_post",
+              "line": 741
+            },
+            {
+              "file": "_baserequest.py",
+              "function": "post",
+              "line": 198
+            },
+            {
+              "file": "_baserequest.py",
+              "function": "_request_wrapper",
+              "line": 375
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 7.702
+        },
+        "current": {
+          "sample": 7,
+          "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 17.841,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 6227,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 24190666,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 1.469,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 20.982
+        }
+      },
+      "coordinator_s": 20.982,
+      "branches_started": 2,
+      "winner": "current",
+      "winner_ready_s": 20.829,
+      "final_send_invocations": 1,
+      "first_media_s": 21.141,
+      "total_s": 21.141,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 7,
+      "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 7,
+          "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.812,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 90.438866
+            }
+          ],
+          "prepare_s": 5.675,
+          "error_class": "BadRequest",
+          "elapsed_s": 6.521,
+          "telegram_error": "Failed to get http url content",
+          "error_frames": [
+            {
+              "file": "_bot.py",
+              "function": "_do_post",
+              "line": 741
+            },
+            {
+              "file": "_baserequest.py",
+              "function": "post",
+              "line": 198
+            },
+            {
+              "file": "_baserequest.py",
+              "function": "_request_wrapper",
+              "line": 375
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 8.381
+        },
+        "current": {
+          "sample": 7,
+          "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 17.223,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 6290,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 24190666,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 1.881,
+          "branch": "current",
+          "launch_s": 8.016,
+          "observed_s": 28.793
+        }
+      },
+      "coordinator_s": 28.793,
+      "branches_started": 2,
+      "winner": "current",
+      "winner_ready_s": 28.599,
+      "final_send_invocations": 1,
+      "first_media_s": 28.947,
+      "total_s": 28.947,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 8,
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 8,
+          "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 5.396,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 74.900042
+            }
+          ],
+          "prepare_s": 6.341,
+          "bytes": 4319979,
+          "storage_s": 1.317,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 9.205
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 0.0,
+          "cleanup_s": 0.1876,
+          "remaining_live_processes": 0,
+          "tracked_processes": 2,
+          "last_progress": {
+            "sample": 8,
+            "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+            "mode": "current",
+            "status": "running",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16"
+          }
+        }
+      },
+      "coordinator_s": 9.393,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 9.047,
+      "final_send_invocations": 1,
+      "first_media_s": 9.547,
+      "total_s": 9.547,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 8,
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 8,
+          "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.169,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 74.900042
+            }
+          ],
+          "prepare_s": 5.019,
+          "bytes": 4319979,
+          "storage_s": 0.936,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 7.568
+        },
+        "current": {
+          "branch": "current",
+          "status": "not_started"
+        }
+      },
+      "coordinator_s": 7.568,
+      "branches_started": 1,
+      "winner": "direct",
+      "winner_ready_s": 7.405,
+      "final_send_invocations": 1,
+      "first_media_s": 7.738,
+      "total_s": 7.738,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 8,
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 8,
+          "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 14.713,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 2721,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 4320206,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 1.116,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 17.55
+        }
+      },
+      "coordinator_s": 17.55,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 17.368,
+      "final_send_invocations": 1,
+      "first_media_s": 17.704,
+      "total_s": 17.704,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 10,
+      "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+      "mode": "hedged",
+      "status": "failed",
+      "branches": {
+        "direct": {
+          "sample": 10,
+          "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.106,
+          "media_count": 11,
+          "media_types": [
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 900,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [],
+              "duration": 24.166667
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 720,
+              "height": 900,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [],
+              "duration": 17.633333
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            }
+          ],
+          "prepare_s": 6.648,
+          "error_class": "RuntimeError",
+          "elapsed_s": 8.23,
+          "reason": "TelegramReturnedNonVideo",
+          "error_frames": [
+            {
+              "file": "benchmark.py",
+              "function": "trial",
+              "line": 103
+            },
+            {
+              "file": "benchmark.py",
+              "function": "stage",
+              "line": 98
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 9.979
+        },
+        "current": {
+          "sample": 10,
+          "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+          "mode": "current",
+          "status": "failed",
+          "stage": "metadata_or_acquisition",
+          "instagrapi": "3.0.16",
+          "error_class": "DownloadError",
+          "elapsed_s": 28.186,
+          "error_frames": [
+            {
+              "file": "video_downloader.py",
+              "function": "_download_instagram_media",
+              "line": 248
+            },
+            {
+              "file": "video_downloader.py",
+              "function": "_acquire_instagram_media",
+              "line": 363
+            },
+            {
+              "file": "video_downloader.py",
+              "function": "_raise_final_download_error",
+              "line": 779
+            }
+          ],
+          "branch": "current",
+          "launch_s": 8.015,
+          "observed_s": 37.799
+        }
+      },
+      "coordinator_s": 37.819,
+      "branches_started": 2,
+      "elapsed_s": 37.819
+    },
+    {
+      "sample": 10,
+      "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 10,
+          "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 20.823,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "album",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 2074,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 6577694,
+          "media_count": 11,
+          "media_types": [
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "storage_s": 11.515,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 34.019
+        }
+      },
+      "coordinator_s": 34.02,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 33.812,
+      "final_send_invocations": 1,
+      "first_media_s": 34.368,
+      "total_s": 41.684,
+      "media_count": 11,
+      "media_types": [
+        "video",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "video",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 10,
+      "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 10,
+          "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+          "mode": "direct",
+          "status": "failed",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.408,
+          "media_count": 11,
+          "media_types": [
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 900,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [],
+              "duration": 24.166667
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 720,
+              "height": 900,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [],
+              "duration": 17.633333
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            },
+            {
+              "width": 1080,
+              "height": 1350
+            }
+          ],
+          "prepare_s": 5.905,
+          "error_class": "RuntimeError",
+          "elapsed_s": 6.899,
+          "reason": "TelegramReturnedNonVideo",
+          "error_frames": [
+            {
+              "file": "benchmark.py",
+              "function": "trial",
+              "line": 103
+            },
+            {
+              "file": "benchmark.py",
+              "function": "stage",
+              "line": 98
+            }
+          ],
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 8.564
+        },
+        "current": {
+          "sample": 10,
+          "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 20.355,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "album",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 2129,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 6577694,
+          "media_count": 11,
+          "media_types": [
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "video",
+            "photo",
+            "photo",
+            "photo",
+            "photo",
+            "photo"
+          ],
+          "storage_s": 21.689,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 43.69
+        }
+      },
+      "coordinator_s": 43.69,
+      "branches_started": 2,
+      "winner": "current",
+      "winner_ready_s": 43.512,
+      "final_send_invocations": 1,
+      "first_media_s": 47.113,
+      "total_s": 52.333,
+      "media_count": 11,
+      "media_types": [
+        "video",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "video",
+        "photo",
+        "photo",
+        "photo",
+        "photo",
+        "photo"
+      ]
+    },
+    {
+      "sample": 11,
+      "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 11,
+          "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 28.336,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": "failed",
+            "instagram_fast_duration_ms": 3679,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": true,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "yt_dlp_public",
+            "instagram_fallback_path": "yt_dlp_public",
+            "provider_extraction_ms": 2346,
+            "provider_download_ms": 535,
+            "media_normalization_ms": 0,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 129309,
+          "media_count": 1,
+          "media_types": [
+            "photo"
+          ],
+          "storage_s": 0.13,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 30.094
+        }
+      },
+      "coordinator_s": 30.094,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 29.924,
+      "final_send_invocations": 1,
+      "first_media_s": 30.254,
+      "total_s": 30.254,
+      "media_count": 1,
+      "media_types": [
+        "photo"
+      ]
+    },
+    {
+      "sample": 11,
+      "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 11,
+          "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 4.411,
+          "media_count": 1,
+          "media_types": [
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 1080,
+              "height": 1347
+            }
+          ],
+          "prepare_s": 4.411,
+          "bytes": 230337,
+          "storage_s": 0.444,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 6.483
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 0.0,
+          "cleanup_s": 0.2076,
+          "remaining_live_processes": 0,
+          "tracked_processes": 2,
+          "last_progress": {
+            "sample": 11,
+            "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+            "mode": "current",
+            "status": "running",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16"
+          }
+        }
+      },
+      "coordinator_s": 6.691,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 6.314,
+      "final_send_invocations": 1,
+      "first_media_s": 6.847,
+      "total_s": 6.847,
+      "media_count": 1,
+      "media_types": [
+        "photo"
+      ]
+    },
+    {
+      "sample": 11,
+      "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 11,
+          "url": "https://www.instagram.com/p/DdW7jKKBuie/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 3.819,
+          "media_count": 1,
+          "media_types": [
+            "photo"
+          ],
+          "media_specs": [
+            {
+              "width": 1080,
+              "height": 1347
+            }
+          ],
+          "prepare_s": 3.819,
+          "bytes": 230337,
+          "storage_s": 0.426,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 5.972
+        },
+        "current": {
+          "branch": "current",
+          "status": "not_started"
+        }
+      },
+      "coordinator_s": 5.972,
+      "branches_started": 1,
+      "winner": "direct",
+      "winner_ready_s": 5.784,
+      "final_send_invocations": 1,
+      "first_media_s": 6.126,
+      "total_s": 6.126,
+      "media_count": 1,
+      "media_types": [
+        "photo"
+      ]
+    },
+    {
+      "sample": 12,
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "mode": "race",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 12,
+          "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 5.776,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 8.960045
+            }
+          ],
+          "prepare_s": 6.679,
+          "bytes": 1231005,
+          "storage_s": 1.195,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 9.451
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 0.0,
+          "cleanup_s": 0.2289,
+          "remaining_live_processes": 0,
+          "tracked_processes": 2,
+          "last_progress": {
+            "sample": 12,
+            "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+            "mode": "current",
+            "status": "running",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16"
+          }
+        }
+      },
+      "coordinator_s": 9.681,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 9.273,
+      "final_send_invocations": 1,
+      "first_media_s": 9.836,
+      "total_s": 9.836,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 12,
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "mode": "hedged",
+      "status": "delivered",
+      "branches": {
+        "direct": {
+          "sample": 12,
+          "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+          "mode": "direct",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "metadata_s": 5.368,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "media_specs": [
+            {
+              "width": 720,
+              "height": 1280,
+              "video_codec": "h264",
+              "pixel_format": "yuv420p",
+              "audio_codecs": [
+                "aac"
+              ],
+              "duration": 8.960045
+            }
+          ],
+          "prepare_s": 6.186,
+          "bytes": 1231005,
+          "storage_s": 0.975,
+          "branch": "direct",
+          "launch_s": 0.0,
+          "observed_s": 8.843
+        },
+        "current": {
+          "branch": "current",
+          "status": "cancelled",
+          "launch_s": 8.013,
+          "cleanup_s": 0.0214,
+          "remaining_live_processes": 0,
+          "tracked_processes": 1
+        }
+      },
+      "coordinator_s": 8.864,
+      "branches_started": 2,
+      "winner": "direct",
+      "winner_ready_s": 8.654,
+      "final_send_invocations": 1,
+      "first_media_s": 9.02,
+      "total_s": 9.02,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    },
+    {
+      "sample": 12,
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "mode": "current",
+      "status": "delivered",
+      "branches": {
+        "current": {
+          "sample": 12,
+          "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+          "mode": "current",
+          "status": "ready",
+          "stage": "storage_upload",
+          "instagrapi": "3.0.16",
+          "prepare_s": 9.348,
+          "provider_metrics": {
+            "provider": "instagram",
+            "retry_count": 0,
+            "failure_class": null,
+            "instagram_fast_status": null,
+            "instagram_fast_duration_ms": null,
+            "instagram_fast_budget_exhausted": false,
+            "instagram_fallback_attempted": false,
+            "instagram_account_attempts": 1,
+            "instagram_account_retries": 0,
+            "instagram_auth_failures": 0,
+            "instagram_success_path": "authenticated_first",
+            "instagram_fallback_path": "raw_direct",
+            "provider_extraction_ms": null,
+            "provider_download_ms": null,
+            "media_normalization_ms": 798,
+            "instagram_metadata_reused": true
+          },
+          "bytes": 1231240,
+          "media_count": 1,
+          "media_types": [
+            "video"
+          ],
+          "storage_s": 0.913,
+          "branch": "current",
+          "launch_s": 0.0,
+          "observed_s": 11.799
+        }
+      },
+      "coordinator_s": 11.799,
+      "branches_started": 1,
+      "winner": "current",
+      "winner_ready_s": 11.594,
+      "final_send_invocations": 1,
+      "first_media_s": 11.952,
+      "total_s": 11.952,
+      "media_count": 1,
+      "media_types": [
+        "video"
+      ]
+    }
+  ],
+  "total_valid_live_trials": 30,
+  "targeted_three_way_follow_up": {
+    "method": "After the 24-trial comparison, add a third immediately-started public-only yt-dlp download/normalize/upload worker on four selected URLs. Uses same eight-sample account assignment, copied fresh state, same two-CPU container budget. Public worker never acquires/logs into an account. Current branch still has its own sequential public fallback, so duplicate public work is possible.",
+    "results": [
+      {
+        "sample": 4,
+        "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+        "mode": "public_race",
+        "status": "delivered",
+        "branches": {
+          "direct": {
+            "sample": 4,
+            "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+            "mode": "direct",
+            "status": "failed",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16",
+            "error_class": "UnknownError",
+            "elapsed_s": 5.008,
+            "error_frames": [
+              {
+                "file": "private.py",
+                "function": "private_request",
+                "line": 727
+              },
+              {
+                "file": "private.py",
+                "function": "private_request",
+                "line": 710
+              },
+              {
+                "file": "private.py",
+                "function": "_send_private_request",
+                "line": 612
+              }
+            ],
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 7.592
+          },
+          "public": {
+            "sample": 4,
+            "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+            "mode": "public",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "prepare_s": 10.458,
+            "provider_metrics": {
+              "provider": "instagram",
+              "retry_count": 0,
+              "failure_class": null,
+              "instagram_fast_status": null,
+              "instagram_fast_duration_ms": null,
+              "instagram_fast_budget_exhausted": false,
+              "instagram_fallback_attempted": false,
+              "instagram_account_attempts": 0,
+              "instagram_account_retries": 0,
+              "instagram_auth_failures": 0,
+              "instagram_success_path": "yt_dlp_public",
+              "instagram_fallback_path": null,
+              "provider_extraction_ms": 2525,
+              "provider_download_ms": 6339,
+              "media_normalization_ms": 0,
+              "instagram_metadata_reused": false
+            },
+            "bytes": 1461095,
+            "media_count": 12,
+            "media_types": [
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo"
+            ],
+            "storage_s": 13.165,
+            "branch": "public",
+            "launch_s": 0.0,
+            "observed_s": 26.178
+          },
+          "current": {
+            "branch": "current",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 0.209,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 4,
+              "url": "https://www.instagram.com/p/DdWEYNuje1_/",
+              "mode": "current",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          }
+        },
+        "coordinator_s": 26.388,
+        "branches_started": 3,
+        "winner": "public",
+        "winner_ready_s": 25.993,
+        "media_dimensions": [
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 26.775,
+        "total_s": 31.021,
+        "media_count": 12,
+        "media_types": [
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo"
+        ]
+      },
+      {
+        "sample": 7,
+        "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+        "mode": "public_race",
+        "status": "delivered",
+        "branches": {
+          "direct": {
+            "sample": 7,
+            "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+            "mode": "direct",
+            "status": "failed",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "metadata_s": 3.999,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "media_specs": [
+              {
+                "width": 720,
+                "height": 1280,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [
+                  "aac"
+                ],
+                "duration": 90.438866
+              }
+            ],
+            "prepare_s": 4.859,
+            "error_class": "BadRequest",
+            "elapsed_s": 5.546,
+            "telegram_error": "Failed to get http url content",
+            "error_frames": [
+              {
+                "file": "_bot.py",
+                "function": "_do_post",
+                "line": 741
+              },
+              {
+                "file": "_baserequest.py",
+                "function": "post",
+                "line": 198
+              },
+              {
+                "file": "_baserequest.py",
+                "function": "_request_wrapper",
+                "line": 375
+              }
+            ],
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 8.174
+          },
+          "current": {
+            "sample": 7,
+            "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+            "mode": "current",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "prepare_s": 28.87,
+            "provider_metrics": {
+              "provider": "instagram",
+              "retry_count": 0,
+              "failure_class": null,
+              "instagram_fast_status": null,
+              "instagram_fast_duration_ms": null,
+              "instagram_fast_budget_exhausted": false,
+              "instagram_fallback_attempted": false,
+              "instagram_account_attempts": 1,
+              "instagram_account_retries": 0,
+              "instagram_auth_failures": 0,
+              "instagram_success_path": "authenticated_first",
+              "instagram_fallback_path": "raw_direct",
+              "provider_extraction_ms": null,
+              "provider_download_ms": null,
+              "media_normalization_ms": 17467,
+              "instagram_metadata_reused": true
+            },
+            "bytes": 24190666,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "storage_s": 4.311,
+            "branch": "current",
+            "launch_s": 0.0,
+            "observed_s": 36.027
+          },
+          "public": {
+            "branch": "public",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 3.0215,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 7,
+              "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+              "mode": "public",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          }
+        },
+        "coordinator_s": 39.049,
+        "branches_started": 3,
+        "winner": "current",
+        "winner_ready_s": 35.556,
+        "media_dimensions": [
+          {
+            "width": 720,
+            "height": 1280
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 39.217,
+        "total_s": 39.217,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ]
+      },
+      {
+        "sample": 8,
+        "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+        "mode": "public_race",
+        "status": "delivered",
+        "branches": {
+          "direct": {
+            "sample": 8,
+            "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+            "mode": "direct",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "metadata_s": 5.176,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "media_specs": [
+              {
+                "width": 720,
+                "height": 1280,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [
+                  "aac"
+                ],
+                "duration": 74.900042
+              }
+            ],
+            "prepare_s": 6.018,
+            "bytes": 4319979,
+            "storage_s": 0.957,
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 9.601
+          },
+          "current": {
+            "branch": "current",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 0.5049,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 8,
+              "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+              "mode": "current",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          },
+          "public": {
+            "branch": "public",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 3.0158,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 8,
+              "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+              "mode": "public",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          }
+        },
+        "coordinator_s": 13.122,
+        "branches_started": 3,
+        "winner": "direct",
+        "winner_ready_s": 9.241,
+        "media_dimensions": [
+          {
+            "width": 720,
+            "height": 1280
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 13.304,
+        "total_s": 13.304,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ]
+      },
+      {
+        "sample": 10,
+        "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+        "mode": "public_race",
+        "status": "delivered",
+        "branches": {
+          "public": {
+            "sample": 10,
+            "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+            "mode": "public",
+            "status": "failed",
+            "stage": "metadata_or_acquisition",
+            "instagrapi": "3.0.16",
+            "error_class": "RuntimeError",
+            "elapsed_s": 4.435,
+            "reason": "PublicUnavailable",
+            "error_frames": [
+              {
+                "file": "benchmark.py",
+                "function": "trial",
+                "line": 56
+              }
+            ],
+            "branch": "public",
+            "launch_s": 0.0,
+            "observed_s": 6.979
+          },
+          "direct": {
+            "sample": 10,
+            "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+            "mode": "direct",
+            "status": "failed",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "metadata_s": 4.65,
+            "media_count": 11,
+            "media_types": [
+              "video",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "video",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo"
+            ],
+            "media_specs": [
+              {
+                "width": 720,
+                "height": 900,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [],
+                "duration": 24.166667
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 720,
+                "height": 900,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [],
+                "duration": 17.633333
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              },
+              {
+                "width": 1080,
+                "height": 1350
+              }
+            ],
+            "prepare_s": 6.05,
+            "telegram_response_types": [
+              "animation",
+              "document"
+            ],
+            "error_class": "RuntimeError",
+            "elapsed_s": 7.626,
+            "reason": "TelegramReturnedNonVideo",
+            "error_frames": [
+              {
+                "file": "benchmark.py",
+                "function": "trial",
+                "line": 112
+              },
+              {
+                "file": "benchmark.py",
+                "function": "stage",
+                "line": 107
+              }
+            ],
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 10.215
+          },
+          "current": {
+            "sample": 10,
+            "url": "https://www.instagram.com/p/DdBovKSDQQX/",
+            "mode": "current",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "prepare_s": 21.929,
+            "provider_metrics": {
+              "provider": "instagram",
+              "retry_count": 0,
+              "failure_class": null,
+              "instagram_fast_status": null,
+              "instagram_fast_duration_ms": null,
+              "instagram_fast_budget_exhausted": false,
+              "instagram_fallback_attempted": false,
+              "instagram_account_attempts": 1,
+              "instagram_account_retries": 0,
+              "instagram_auth_failures": 0,
+              "instagram_success_path": "authenticated_first",
+              "instagram_fallback_path": "album",
+              "provider_extraction_ms": null,
+              "provider_download_ms": null,
+              "media_normalization_ms": 2319,
+              "instagram_metadata_reused": true
+            },
+            "bytes": 6577694,
+            "media_count": 11,
+            "media_types": [
+              "video",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "video",
+              "photo",
+              "photo",
+              "photo",
+              "photo",
+              "photo"
+            ],
+            "storage_s": 15.874,
+            "branch": "current",
+            "launch_s": 0.0,
+            "observed_s": 40.403
+          }
+        },
+        "coordinator_s": 40.403,
+        "branches_started": 3,
+        "winner": "current",
+        "winner_ready_s": 40.213,
+        "media_dimensions": [
+          {
+            "width": 720,
+            "height": 900
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": 720,
+            "height": 900
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          },
+          {
+            "width": null,
+            "height": null
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 40.734,
+        "total_s": 45.955,
+        "media_count": 11,
+        "media_types": [
+          "video",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "video",
+          "photo",
+          "photo",
+          "photo",
+          "photo",
+          "photo"
+        ]
+      }
+    ],
+    "limitations": "Targeted follow-up, not a complete eight-link comparison or a repeated randomized trial. Increased concurrent normalization can compete for two allocated CPUs.",
+    "source_sha256": "be4cdda57ee5240ed01bf171b4fc1a1d9023e9eb311154f60219ad7097998e0e"
+  },
+  "overlapping_delivery_and_cleanup_follow_up": {
+    "method": "Repeat the two video cases with the same three branches. Start loser shutdown tasks together and let the single final-send callback run concurrently; retain all worker ownership and wait for cleanup before returning from the coordinator. Only cleanup/delivery scheduling changed.",
+    "tests": "All eight original coordinator/staging tests plus two overlap tests passed: ten tests. A controlled worker ignoring SIGTERM proves final sending starts while cleanup waits, and all-failed candidates never invoke final delivery.",
+    "results": [
+      {
+        "sample": 7,
+        "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+        "mode": "public_race",
+        "status": "delivered",
+        "winner": "current",
+        "winner_ready_s": 34.406,
+        "media_dimensions": [
+          {
+            "width": 720,
+            "height": 1280
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 35.092,
+        "total_s": 35.092,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ],
+        "branches": {
+          "direct": {
+            "sample": 7,
+            "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+            "mode": "direct",
+            "status": "failed",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "metadata_s": 4.266,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "media_specs": [
+              {
+                "width": 720,
+                "height": 1280,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [
+                  "aac"
+                ],
+                "duration": 90.438866
+              }
+            ],
+            "prepare_s": 5.269,
+            "error_class": "BadRequest",
+            "elapsed_s": 6.115,
+            "telegram_error": "Failed to get http url content",
+            "error_frames": [
+              {
+                "file": "_bot.py",
+                "function": "_do_post",
+                "line": 741
+              },
+              {
+                "file": "_baserequest.py",
+                "function": "post",
+                "line": 198
+              },
+              {
+                "file": "_baserequest.py",
+                "function": "_request_wrapper",
+                "line": 375
+              }
+            ],
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 8.641
+          },
+          "current": {
+            "sample": 7,
+            "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+            "mode": "current",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "prepare_s": 29.791,
+            "provider_metrics": {
+              "provider": "instagram",
+              "retry_count": 0,
+              "failure_class": null,
+              "instagram_fast_status": null,
+              "instagram_fast_duration_ms": null,
+              "instagram_fast_budget_exhausted": false,
+              "instagram_fallback_attempted": false,
+              "instagram_account_attempts": 1,
+              "instagram_account_retries": 0,
+              "instagram_auth_failures": 0,
+              "instagram_success_path": "authenticated_first",
+              "instagram_fallback_path": "raw_direct",
+              "provider_extraction_ms": null,
+              "provider_download_ms": null,
+              "media_normalization_ms": 16667,
+              "instagram_metadata_reused": true
+            },
+            "bytes": 24190666,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "storage_s": 2.279,
+            "branch": "current",
+            "launch_s": 0.0,
+            "observed_s": 34.731
+          },
+          "public": {
+            "branch": "public",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 3.0198,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 7,
+              "url": "https://www.instagram.com/reel/Dd2LPLfOMB2/",
+              "mode": "public",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          }
+        },
+        "coordinator_s": 37.751,
+        "branches_started": 3
+      },
+      {
+        "sample": 8,
+        "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+        "mode": "public_race",
+        "status": "delivered",
+        "winner": "direct",
+        "winner_ready_s": 7.448,
+        "media_dimensions": [
+          {
+            "width": 720,
+            "height": 1280
+          }
+        ],
+        "final_send_invocations": 1,
+        "first_media_s": 7.844,
+        "total_s": 7.844,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ],
+        "branches": {
+          "direct": {
+            "sample": 8,
+            "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+            "mode": "direct",
+            "status": "ready",
+            "stage": "storage_upload",
+            "instagrapi": "3.0.16",
+            "metadata_s": 2.994,
+            "media_count": 1,
+            "media_types": [
+              "video"
+            ],
+            "media_specs": [
+              {
+                "width": 720,
+                "height": 1280,
+                "video_codec": "h264",
+                "pixel_format": "yuv420p",
+                "audio_codecs": [
+                  "aac"
+                ],
+                "duration": 74.900042
+              }
+            ],
+            "prepare_s": 3.841,
+            "bytes": 4319979,
+            "storage_s": 0.881,
+            "branch": "direct",
+            "launch_s": 0.0,
+            "observed_s": 7.68
+          },
+          "current": {
+            "branch": "current",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 0.2904,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 8,
+              "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+              "mode": "current",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          },
+          "public": {
+            "branch": "public",
+            "status": "cancelled",
+            "launch_s": 0.0,
+            "cleanup_s": 0.2442,
+            "remaining_live_processes": 0,
+            "tracked_processes": 2,
+            "last_progress": {
+              "sample": 8,
+              "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+              "mode": "public",
+              "status": "running",
+              "stage": "metadata_or_acquisition",
+              "instagrapi": "3.0.16"
+            }
+          }
+        },
+        "coordinator_s": 7.971,
+        "branches_started": 3
+      }
+    ],
+    "source_sha256": {
+      "race_core_overlap.py": "b4796ec88979856dd1b0eac4c2de23dae484100be360bbdc8fe751ba1b1e2edd",
+      "overlap_race_benchmark.py": "08710be3f689d90157f65b13757520b232f7401172585dfc6d91accb58f12bbb",
+      "test_race_overlap.py": "6c59c139a710496a0dfb83a8d92fe7ce0ee21897dbb41605e6c41ad506f17f30"
+    },
+    "interpretation": "In the 90-second reel trial final Telegram acknowledgement occurred at35.092s, while coordinator cleanup finished at37.751s; this directly demonstrates 2.659s of cleanup kept out of recipient latency. Total differences against earlier trials also include network/provider variability and must not be attributed solely to scheduling."
+  },
+  "findings": [
+    "Two-way immediate race delivered8/8 versus current8/8. Successful medians9.692s versus21.577s; median paired percentage reduction30.59%. Worst case increased52.333s versus47.706s. These statistics describe this sample only.",
+    "Eight-second hedge launched13 candidate jobs versus16 for immediate racing (18.75% fewer), delivered7/8, and had58.205s worst successful delivery. One failed mixed-album trial does not establish a failure-rate estimate or prove delay caused failure.",
+    "Two-way winners: direct5, current3. Five losing current workers stopped in0.1876\u20130.2494s, with zero remaining live tracked processes. One coordinator final-send invocation per successful trial; no competing branch final sends.",
+    "Three-way race improved the12-photo album from45.2s (two-way) to31.021s (public won), but worsened the90-second reel from21.141s to39.217s. Current-path normalization increased from6.227s to17.467s under the extra branch; consistent with CPU contention, not a controlled causal isolation.",
+    "Silent MP4s in the mixed album produced Telegram animation/document fields and no video field via URL. They were rejected as unusable video candidates before final delivery. Current local upload delivered the complete album in some trials. Racing cannot treat every successful Telegram response as the required media type.",
+    "The90-second reel repeatedly received Telegram Failed to get http url content for URL fetch. Its local normalized payload was24,190,666bytes, above the documented20MB URL limit; size is a plausible explanation, not independently proven by the generic error.",
+    "Delivery can overlap losing-worker cleanup safely within the prototype single-committer contract. Resource slots/leases must remain owned until workers actually stop. This removes cleanup from recipient latency without promising remote cancellation or distributed exactly-once delivery."
+  ],
+  "recommendation": {
+    "approach": "Proceed toward a bounded, media-aware first-success race; do not unconditionally launch three full pipelines or adopt an untested universal eight-second hedge.",
+    "requirements": [
+      "Only one coordinator can invoke final delivery; select complete staged media, ignore branch failures, and do not switch after ambiguous/partial final sends.",
+      "Start loser cancellation and final delivery concurrently, but release worker capacity/account leases only after shutdown completes.",
+      "Check URL-fetch size, media type and compatibility before any album staging; route silent-video/oversized cases to local upload.",
+      "Use independent public extraction selectively to avoid waiting through a failing authenticated chain; share extraction results so branches cannot repeat the same public work.",
+      "Share account leases, Telegram flood/backoff limits and provider capacity across branches; cap expensive normalization, and reuse already staged matching items rather than uploading them again.",
+      "Validate sustained multi-user load, account health and device playback before deployment."
+    ],
+    "status": "Recommendation and throwaway experiments only; no production integration or deployment in this turn."
+  }
+}

@@ -1958,7 +1958,7 @@ async def test_leased_auth_challenge_failure_class_rotates_account(monkeypatch, 
 
     assert info.file_path == expected_path
     assert downloader.last_provider_metrics.instagram_auth_failures == 1
-    assert downloader.last_provider_metrics.failure_class == "auth_challenge"
+    assert downloader.last_provider_metrics.failure_class is None
     assert manager.failures == [("acc_challenge", "auth_challenge")]
     assert manager.successes == ["acc_ok"]
 
@@ -1989,7 +1989,7 @@ async def test_leased_manual_verification_records_hard_account_reason(monkeypatc
 
     assert info.file_path == expected_path
     assert downloader.last_provider_metrics.instagram_auth_failures == 1
-    assert downloader.last_provider_metrics.failure_class == "auth_challenge"
+    assert downloader.last_provider_metrics.failure_class is None
     assert manager.failures == [("acc_checkpoint", "manual_verification")]
     assert manager.successes == ["acc_ok"]
 

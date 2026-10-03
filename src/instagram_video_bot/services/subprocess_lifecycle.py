@@ -23,12 +23,28 @@ async def wait_for_process(
 
 
 async def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    """Kill the process group of a child started with start_new_session=True."""
+    """Kill the entire session group and defer cancellation until leader reaping.
+
+    Callers retain their provider/account capacity while cleanup runs, including
+    when a timeout and subsequent race cancellation both cancel the caller.
+    """
     try:
+        # Descendants may survive their leader, so never gate this on poll().
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + 1
-    while process.poll() is None and loop.time() < deadline:
-        await asyncio.sleep(0.05)
+
+    async def reap() -> None:
+        while process.poll() is None:
+            await asyncio.sleep(0.05)
+
+    cleanup = asyncio.create_task(reap())
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    cleanup.result()
+    if cancelled:
+        raise asyncio.CancelledError

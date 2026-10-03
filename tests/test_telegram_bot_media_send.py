@@ -1244,6 +1244,9 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
         "Instagram: отправляю в Telegram.",
     ]
     assert update.message.status_messages[0].deleted is True
+    latency = telegram_bot.state_store.get_performance_summary(77)["latency"]
+    assert latency["delivered"] == 1
+    assert latency["p50_ms"] >= latency["first_media_p50_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -1490,6 +1493,61 @@ async def test_handle_message_ignores_edited_message_links(monkeypatch, tmp_path
         ).fetchone()[0]
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_post_send_metrics_does_not_replay_media(
+    monkeypatch, tmp_path
+):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    telegram = _FakeBot()
+    ready = asyncio.Event()
+    recording = asyncio.Event()
+    release = asyncio.Event()
+    media = tmp_path / "shared.mp4"
+    media.write_bytes(b"video")
+
+    async def download(self, url, output_dir):
+        await ready.wait()
+        return VideoInfo(
+            file_path=media,
+            title="shared",
+            media_items=[MediaItem(file_path=media, media_type="video")],
+        )
+
+    async def delayed_state(operation, *args, **kwargs):
+        if operation.__name__ == "record_delivery_metrics":
+            recording.set()
+            await release.wait()
+        return operation(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        download,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.call_state", delayed_state
+    )
+    monkeypatch.setattr(settings, "RESULT_CACHE_ENABLED", False)
+    await bot.handle_message(
+        _FakeUpdate("https://www.instagram.com/reel/race/", user_id=1001),
+        _FakeContext(telegram),
+    )
+    owner = next(iter(bot.active_request_tasks))
+    owner_task = bot.active_request_tasks[owner]
+    await bot.handle_message(
+        _FakeUpdate("https://www.instagram.com/reel/race/", user_id=1002),
+        _FakeContext(telegram),
+    )
+    tasks = list(bot.active_request_tasks.values())
+    ready.set()
+    await asyncio.wait_for(recording.wait(), 1)
+    owner_task.cancel()
+    bot.job_manager.cancel_request(owner)
+    release.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(telegram.video_calls) == 1
+    assert bot.state_store.get_performance_summary(77)["latency"]["delivered"] == 2
 
 
 @pytest.mark.asyncio

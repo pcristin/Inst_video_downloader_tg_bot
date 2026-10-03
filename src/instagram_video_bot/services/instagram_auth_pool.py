@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -19,6 +20,7 @@ AuthContextKind = Literal["cookie", "bearer"]
 _SAFE_HTTP_REASON = re.compile(r"^http_[0-9]{3}$")
 _ConfiguredPoolCacheKey = tuple[str | None, int, float, int]
 _configured_pool_cache_lock = threading.Lock()
+_configured_pool_versions: dict[_ConfiguredPoolCacheKey, tuple | None] = {}
 _configured_pool_cache: dict[_ConfiguredPoolCacheKey, "InstagramAuthPool"] = {}
 
 
@@ -151,6 +153,47 @@ class InstagramAuthPool:
                 reason=_redact_reason(reason),
             )
 
+    def health(self) -> dict[str, int | str | None]:
+        """Return counts and redacted configuration health, never credentials."""
+        with self._lock:
+            usable = self._usable_contexts_locked()
+            return {
+                "configured": len(self._contexts),
+                "available": len(usable),
+                "cooling_down": len(self._contexts) - len(usable),
+                "disabled_reason": self._disabled_reason,
+            }
+
+    @staticmethod
+    def _context_key(context: InstagramAuthContext) -> str:
+        return hashlib.sha256(f"{context.kind}:{context.value}".encode()).hexdigest()
+
+    def export_cooldowns(self) -> dict[str, float]:
+        with self._lock:
+            self._usable_contexts_locked()
+            return {
+                self._context_key(context): self._cooldowns[
+                    context.context_id
+                ].expires_at
+                for context in self._contexts
+                if context.context_id in self._cooldowns
+            }
+
+    def import_cooldowns(self, state: dict[str, float]) -> None:
+        with self._lock:
+            ids = {
+                self._context_key(context): context.context_id
+                for context in self._contexts
+            }
+            for fingerprint, expires_at in state.items():
+                key = ids.get(fingerprint)
+                if key is not None and expires_at > self._now_fn():
+                    previous = self._cooldowns.get(key)
+                    self._cooldowns[key] = _Cooldown(
+                        max(expires_at, previous.expires_at if previous else 0),
+                        "classified_failure",
+                    )
+
     def _usable_contexts_locked(self) -> list[InstagramAuthContext]:
         now = self._now_fn()
         expired = [
@@ -210,9 +253,17 @@ def load_configured_instagram_auth_pool(
         cooldown_seconds,
         id(now_fn),
     )
+    try:
+        stat = Path(path).stat() if path else None
+        version = (stat.st_ino, stat.st_mtime_ns, stat.st_size) if stat else None
+    except OSError:
+        version = None
     with _configured_pool_cache_lock:
         cached_pool = _configured_pool_cache.get(cache_key)
-        if cached_pool is not None:
+        if (
+            cached_pool is not None
+            and _configured_pool_versions.get(cache_key) == version
+        ):
             return cached_pool
 
         pool = load_instagram_auth_pool(
@@ -222,6 +273,7 @@ def load_configured_instagram_auth_pool(
             now_fn=now_fn,
         )
         _configured_pool_cache[cache_key] = pool
+        _configured_pool_versions[cache_key] = version
         return pool
 
 

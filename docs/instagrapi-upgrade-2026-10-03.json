@@ -1,0 +1,97 @@
+{
+  "date_london": "2026-10-03",
+  "upgrade": {
+    "from": "3.0.14",
+    "to": "3.0.16",
+    "local_installed": "3.0.16",
+    "production_unchanged": true,
+    "other_locked_dependency_changes": false
+  },
+  "validation": {
+    "regression_passed": 761,
+    "regression_skipped": 5,
+    "lock_check": "passed",
+    "real_ffmpeg_passed": 28
+  },
+  "canaries": [
+    {
+      "mode": "authenticated",
+      "sample": 1,
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "instagrapi": "3.0.16",
+      "saved_session_present": true,
+      "assigned_proxy": true,
+      "session_validation_s": 6.678,
+      "failure_class": null,
+      "acquisition_s": 9.732,
+      "path": "raw_direct",
+      "download_bytes": 1231005,
+      "normalization_s": 1.027,
+      "prepared_bytes": 1231240,
+      "prepared_total_s": 10.759,
+      "status": "success"
+    },
+    {
+      "mode": "public",
+      "sample": 1,
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "instagrapi": "3.0.16",
+      "acquisition_s": 4.461,
+      "path": "yt_dlp_public",
+      "download_bytes": 1351080,
+      "normalization_s": 7.781,
+      "prepared_bytes": 3479159,
+      "prepared_total_s": 12.243,
+      "status": "success"
+    },
+    {
+      "mode": "authenticated",
+      "sample": 2,
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "instagrapi": "3.0.16",
+      "saved_session_present": true,
+      "assigned_proxy": true,
+      "session_validation_s": 6.471,
+      "failure_class": null,
+      "acquisition_s": 9.254,
+      "path": "raw_direct",
+      "download_bytes": 4319979,
+      "normalization_s": 3.102,
+      "prepared_bytes": 4320206,
+      "prepared_total_s": 12.356,
+      "status": "success"
+    },
+    {
+      "mode": "public",
+      "sample": 2,
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "instagrapi": "3.0.16",
+      "acquisition_s": 4.872,
+      "path": "yt_dlp_public",
+      "download_bytes": 4449273,
+      "normalization_s": 33.577,
+      "prepared_bytes": 8452579,
+      "prepared_total_s": 38.449,
+      "status": "success"
+    }
+  ],
+  "method": "Two distinct roster accounts eligible under stored state and ramp checks, using saved sessions mounted at /app/sessions and assigned proxies. Existing-session validation followed by the actual client media download and normalization. No fresh login, no auth export, no Telegram sends, no production session/state writes. Public comparison used identical links and normalization preset.",
+  "output_resolution": {
+    "authenticated": [
+      720,
+      1280
+    ],
+    "public": [
+      1080,
+      1920
+    ]
+  },
+  "limitations": [
+    "Times end at media preparation, not Telegram delivery.",
+    "Different source resolutions: this is not an equal-quality comparison.",
+    "Two successful saved-session samples do not prove all34sessions healthy or recover the6prewarm failures.",
+    "No paired3.0.14canary; cannot attribute speed improvements to the dependency upgrade.",
+    "Fresh-login CAA verification branch was not exercised."
+  ],
+  "routing_recommendation": "For latency-focused mode, try one eligible saved-session account with a bounded attempt before public yt-dlp. Preserve account proxy/ramp/cooldown policy and public fallback. Make720p/full-resolution tradeoff explicit. Routing order remains unchanged pending this policy decision."
+}
