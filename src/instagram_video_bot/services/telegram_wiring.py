@@ -104,16 +104,17 @@ def _configure_post_init(builder: Any, bot: Any) -> Any:
     async def _post_stop(_application: Application) -> None:
         nonlocal post_deploy_task
         from .instagram_delivery_race import drain_race_cleanup
+        if post_deploy_task is not None:
+            if not post_deploy_task.done():
+                post_deploy_task.cancel()
+            try:
+                await post_deploy_task
+            except asyncio.CancelledError:
+                pass
+            post_deploy_task = None
+        # Finish notification bookkeeping even if a killed worker is stuck in
+        # kernel I/O. Race cleanup retains ownership until workers really stop.
         await drain_race_cleanup()
-        if post_deploy_task is None:
-            return
-        if not post_deploy_task.done():
-            post_deploy_task.cancel()
-        try:
-            await post_deploy_task
-        except asyncio.CancelledError:
-            pass
-        post_deploy_task = None
 
     async def _run_post_deploy_tasks_safely(application: Application) -> None:
         try:

@@ -3,9 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+from pathlib import Path
 import signal
 import subprocess
+
+
+logger = logging.getLogger(__name__)
+_PROC_ROOT = Path("/proc")
+_REAP_WARNING_SECONDS = 2.0
+
+
+def _group_has_live_members(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    # Linux retains orphaned zombies until their new parent reaps them. They
+    # cannot execute or write files, so they need not retain worker capacity.
+    # Without procfs, conservatively wait until the group disappears.
+    if not _PROC_ROOT.is_dir():
+        return True
+    for entry in _PROC_ROOT.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError:
+            # An unreadable status is not proof that workers stopped.
+            return True
+        if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
+            return True
+    return False
 
 
 async def wait_for_process(
@@ -23,7 +55,7 @@ async def wait_for_process(
 
 
 async def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    """Kill the entire session group and defer cancellation until leader reaping.
+    """Kill the entire session group and defer cancellation until all workers stop.
 
     Callers retain their provider/account capacity while cleanup runs, including
     when a timeout and subsequent race cancellation both cancel the caller.
@@ -35,7 +67,18 @@ async def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         pass
 
     async def reap() -> None:
-        while process.poll() is None:
+        loop = asyncio.get_running_loop()
+        warning_at = loop.time() + _REAP_WARNING_SECONDS
+        warned = False
+        while process.poll() is None or _group_has_live_members(process.pid):
+            if not warned and loop.time() >= warning_at:
+                logger.warning(
+                    "Killed process group is still active; retaining worker capacity",
+                    extra={"process_group": process.pid},
+                )
+                warned = True
+            # A time limit here would release capacity while a killed worker
+            # remains alive (for example in uninterruptible kernel I/O).
             await asyncio.sleep(0.05)
 
     cleanup = asyncio.create_task(reap())

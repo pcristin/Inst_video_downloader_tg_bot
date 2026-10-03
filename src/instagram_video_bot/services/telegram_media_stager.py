@@ -26,6 +26,7 @@ class _UploadState:
     semaphore: asyncio.Semaphore
     chat_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
     chat_ready_at: dict[int, float] = field(default_factory=dict)
+    chat_waiters: dict[int, int] = field(default_factory=dict)
 
     def defer(self, chat_id: int, seconds: float) -> None:
         now = asyncio.get_running_loop().time()
@@ -34,21 +35,33 @@ class _UploadState:
         )
 
     async def wait(self, chat_id: int) -> None:
-        async with self.chat_locks.setdefault(chat_id, asyncio.Lock()):
-            loop = asyncio.get_running_loop()
-            while (delay := self.chat_ready_at.get(chat_id, 0) - loop.time()) > 0:
-                await asyncio.sleep(delay)
-            if chat_id in self.chat_ready_at:
-                # Stagger release after a flood limit instead of waking all uploads.
-                self.chat_ready_at[chat_id] = loop.time() + 1.0
-
-
-# Loop ownership prevents sharing asyncio primitives between independent runtimes.
-_upload_states: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+        self.chat_waiters[chat_id] = self.chat_waiters.get(chat_id, 0) + 1
+        try:
+            async with self.chat_locks.setdefault(chat_id, asyncio.Lock()):
+                loop = asyncio.get_running_loop()
+                while (delay := self.chat_ready_at.get(chat_id, 0) - loop.time()) > 0:
+                    await asyncio.sleep(delay)
+                if chat_id in self.chat_ready_at:
+                    if self.chat_waiters[chat_id] > 1:
+                        # Stagger queued uploads only for this flood-recovery batch.
+                        self.chat_ready_at[chat_id] = loop.time() + 1.0
+                    else:
+                        self.chat_ready_at.pop(chat_id, None)
+        finally:
+            self.chat_waiters[chat_id] -= 1
+            if not self.chat_waiters[chat_id]:
+                self.chat_waiters.pop(chat_id)
+                self.chat_locks.pop(chat_id, None)
 
 
 def _upload_state(bot: Any) -> _UploadState:
-    states = _upload_states.setdefault(asyncio.get_running_loop(), {})
+    # The loop owns its state: bound primitives may point back to it, but no
+    # global value keeps that cycle alive after a short-lived runtime closes.
+    loop = asyncio.get_running_loop()
+    states = getattr(loop, "_telegram_media_upload_states", None)
+    if states is None:
+        states = {}
+        setattr(loop, "_telegram_media_upload_states", states)
     key = id(bot)
     if key not in states:
         try:
@@ -109,11 +122,14 @@ class TelegramMediaStager:
             if media_item.remote_url:
                 if media_item.media_type == "video":
                     return await bot.send_video(
-                        chat_id=self.storage_chat_id, video=media_item.remote_url,
-                        **self._video_kwargs(media_item), **timeout_kwargs,
+                        chat_id=self.storage_chat_id,
+                        video=media_item.remote_url,
+                        **self._video_kwargs(media_item),
+                        **timeout_kwargs,
                     )
                 return await bot.send_photo(
-                    chat_id=self.storage_chat_id, photo=media_item.remote_url,
+                    chat_id=self.storage_chat_id,
+                    photo=media_item.remote_url,
                     **timeout_kwargs,
                 )
             with media_input(

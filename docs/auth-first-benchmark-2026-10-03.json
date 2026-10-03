@@ -1,7 +1,7 @@
 {
   "date_london": "2026-10-03",
   "deployment_status": "Local implementation only; production unchanged.",
-  "policy": "One immediately eligible managed saved-session account before fast/public extraction,20s acquisition budget, no fresh login, no second roster loop. Stories/single-account/legacy-thread routing preserved.",
+  "policy": "One immediately eligible managed saved-session account before fast/public extraction, 20 s acquisition budget, no fresh login, no second roster loop. Stories, single-account deployments without an account roster, and legacy-thread routing preserved.",
   "live_canary": {
     "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
     "instagrapi": "3.0.16",
@@ -33,11 +33,11 @@
     "status": "delivered_to_storage_chat"
   },
   "limitations": [
-    "Uncached bot-side request replay against existing-image dependencies plus updated source and instagrapi3.0.16.",
+    "Uncached bot-side request replay against existing-image dependencies plus updated source and instagrapi 3.0.16.",
     "Separate writable session/account/cache copies with proper relative session mount; original production state unchanged.",
-    "Both storage upload and final fileIDsend used the configured storage chat, not an end-user chat.",
+    "Both storage upload and final file-ID send used the configured storage chat, not an end-user chat.",
     "Starts at downloader invocation; excludes polling, admission queue, status messages and client rendering.",
-    "Authenticated source720x1280, versus1080x1920 public source in prior tests; quality differs.",
+    "Authenticated source 720x1280, versus 1080x1920 public source in prior tests; quality differs.",
     "A single successful live sample is not a latency guarantee; network and Telegram-side caching vary."
   ],
   "validation": {

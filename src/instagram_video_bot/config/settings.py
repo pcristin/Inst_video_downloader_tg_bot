@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # Fast Instagram extraction (primary path before authenticated fallback)
     SQLITE_BUSY_TIMEOUT_SECONDS: float = 0.1
     TELEGRAM_STATUS_TIMEOUT_SECONDS: float = 0.5
-    TELEGRAM_MEDIA_STAGE_CONCURRENCY: int = 2
+    TELEGRAM_MEDIA_STAGE_CONCURRENCY: int = Field(default=2, ge=1)
     IG_PUBLIC_METADATA_TIMEOUT_SECONDS: float = 15.0
     INSTAGRAM_ACQUISITION_TIMEOUT_SECONDS: float = 300.0
     INSTAGRAM_AUTH_FIRST_ENABLED: bool = True

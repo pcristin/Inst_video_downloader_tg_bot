@@ -25,6 +25,7 @@ from .rich_text import RichText, media_caption_rich_text
 from .state_store import StateStore
 from .telegram_media_files import (
     cleanup_large_staged_files,
+    cleanup_media_files,
     effective_upload_limit_bytes,
     media_input,
     validate_media_path,
@@ -502,12 +503,8 @@ class TelegramMediaSender:
 
     @staticmethod
     def cleanup_files(files: list[Path]) -> None:
-        """Delete downloaded files safely."""
-        for file_path in files:
-            try:
-                file_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Failed to clean up file %s: %s", file_path, exc)
+        """Delete downloaded files and their empty owned staging directories."""
+        cleanup_media_files(files)
 
     @classmethod
     def build_caption_text(cls, title: str) -> str:

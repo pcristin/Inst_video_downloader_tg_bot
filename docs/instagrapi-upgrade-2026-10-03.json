@@ -89,9 +89,9 @@
   "limitations": [
     "Times end at media preparation, not Telegram delivery.",
     "Different source resolutions: this is not an equal-quality comparison.",
-    "Two successful saved-session samples do not prove all34sessions healthy or recover the6prewarm failures.",
-    "No paired3.0.14canary; cannot attribute speed improvements to the dependency upgrade.",
+    "Two successful saved-session samples do not prove all 34 sessions healthy or recover the 6 prewarm failures.",
+    "No paired 3.0.14 canary; cannot attribute speed improvements to the dependency upgrade.",
     "Fresh-login CAA verification branch was not exercised."
   ],
-  "routing_recommendation": "For latency-focused mode, try one eligible saved-session account with a bounded attempt before public yt-dlp. Preserve account proxy/ramp/cooldown policy and public fallback. Make720p/full-resolution tradeoff explicit. Routing order remains unchanged pending this policy decision."
+  "routing_recommendation": "For latency-focused mode, try one eligible saved-session account with a bounded attempt before public yt-dlp. Preserve account proxy/ramp/cooldown policy and public fallback. Make the 720p/full-resolution tradeoff explicit. Routing order remains unchanged pending this policy decision."
 }

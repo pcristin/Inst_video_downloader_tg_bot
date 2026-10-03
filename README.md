@@ -431,8 +431,9 @@ including provider-slot waits, throttling and session validation, and never
 starts a fresh login. Account leases, assigned proxies and ramp/cooldown rules
 still apply. If the attempt fails or no eligible saved session is available,
 the fast extractor and public yt-dlp remain available; the request does not then
-cycle through the account roster again. Stories and deployments using only a
-single configured account retain their existing flows.
+cycle through the account roster again. Stories and single-account deployments
+without an account roster retain their existing flows. A roster containing one
+account still uses auth-first ordering.
 This policy requires isolated workers; legacy thread mode retains the previous
 provider order. Set `INSTAGRAM_AUTH_FIRST_ENABLED=false` to restore the previous
 order, or tune `INSTAGRAM_AUTH_FIRST_TIMEOUT_SECONDS` to change the attempt budget.
@@ -502,8 +503,17 @@ account or exhausted race capacity, the usual sequential path runs.
 Direct candidates undergo whole-album checks before staging: known JPEG/MP4
 sizes within Telegram URL-fetch limits, valid dimensions, and H.264/yuv420p video
 with AAC audio. Silent videos, oversized files and uncertain sources use the
-local candidate. Only a metadata failure permits the direct candidate to try
-public extraction, with shared ownership preventing duplicate public fallbacks.
+local candidate. Direct metadata, authentication/session, and transport failures
+can trigger public extraction, with shared ownership preventing duplicate public
+fallbacks.
+
+Private staging is durable storage: winning media IDs remain available for reuse.
+Speculative or ambiguously cancelled uploads can leave additional messages in the
+private storage chat, as upload retries can. Cancellation cannot reliably delete
+sends whose message IDs were never received. Final user delivery has one owner;
+the race bounds and disable flag control speculative overhead. Automatic private
+storage message cleanup is not provided.
+
 Telegram upload limits and flood backoff apply to both candidates. Rejected
 cached file IDs trigger local reacquisition and one safe retry.
 
@@ -515,7 +525,9 @@ winners have no local source for the audio button. These source defaults have
 not been deployed. Earlier prototype measurements are recorded in
 [the race benchmark](docs/racing-delivery-benchmark-2026-10-03.json); integrated
 measurements are [recorded separately](docs/integrated-delivery-race-2026-10-03.json)
-to avoid mixing different implementations.
+to avoid mixing different implementations. These historical measurements have
+[known harness limitations](docs/experiments/2026-10-03-media-race/README.md#review-correction-and-historical-evidence)
+and do not validate the corrected harness.
 
 ## License
 

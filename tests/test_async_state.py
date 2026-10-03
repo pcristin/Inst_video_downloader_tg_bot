@@ -14,7 +14,7 @@ async def test_state_call_keeps_loop_responsive_and_drains_cancelled_write():
 
     def write():
         started.set()
-        release.wait(timeout=2)
+        release.wait()
         committed.append(True)
 
     task = asyncio.create_task(call_state(write))

@@ -142,7 +142,9 @@ def test_cooldown_reason_is_redacted():
 
     pool.mark_cooldown(context, "http_403 sid=super-secret")
 
-    rendered = repr(pool._cooldowns)  # noqa: SLF001 - regression coverage for repr leakage.
+    rendered = repr(
+        pool._cooldowns
+    )  # noqa: SLF001 - regression coverage for repr leakage.
     assert "super-secret" not in rendered
     assert "sessionid" not in rendered
     assert pool._cooldowns["cookie:0"].reason == "classified_failure"  # noqa: SLF001
@@ -258,4 +260,49 @@ def test_configured_loader_uses_settings_values(monkeypatch, tmp_path):
 
     pool = load_configured_instagram_auth_pool()
 
-    assert [context.context_id for context in pool.get_contexts_for_attempt()] == ["cookie:0"]
+    assert [context.context_id for context in pool.get_contexts_for_attempt()] == [
+        "cookie:0"
+    ]
+
+
+def test_duplicate_cooldowns_import_to_all_matching_credentials():
+    contexts = [InstagramAuthContext(f"cookie:{i}", "cookie", "same") for i in range(2)]
+    pool = InstagramAuthPool(contexts, now_fn=lambda: 100)
+    pool.mark_cooldown(contexts[0], "http_429")
+    pool.import_cooldowns(pool.export_cooldowns())
+    assert pool.get_contexts_for_attempt() == []
+    assert pool.health()["cooling_down"] == 2
+
+
+def test_duplicate_cooldowns_export_latest_expiry():
+    now = [100.0]
+    contexts = [InstagramAuthContext(f"cookie:{i}", "cookie", "same") for i in range(2)]
+    pool = InstagramAuthPool(contexts, cooldown_seconds=30, now_fn=lambda: now[0])
+    pool.mark_cooldown(contexts[1], "http_429")
+    now[0] = 110
+    pool.mark_cooldown(contexts[0], "http_429")
+    assert list(pool.export_cooldowns().values()) == [140]
+
+
+def test_configured_reload_keeps_unchanged_cooldown_after_reordering(
+    monkeypatch, tmp_path
+):
+    from src.instagram_video_bot.config.settings import settings
+
+    auth_file = tmp_path / "auth.json"
+    _write_auth_file(auth_file, {"instagram": ["unchanged", "old"]})
+    monkeypatch.setattr(settings, "IG_AUTH_COOKIES_FILE", auth_file)
+    monkeypatch.setattr(settings, "IG_AUTH_CONTEXT_COOLDOWN_SECONDS", 30)
+    now = [100.0]
+    clock = lambda: now[0]
+    before = load_configured_instagram_auth_pool(now_fn=clock)
+    for context in before.get_contexts_for_attempt():
+        before.mark_cooldown(context, "http_429")
+    _write_auth_file(auth_file, {"instagram": ["replacement", "unchanged"]})
+    after = load_configured_instagram_auth_pool(now_fn=clock)
+    assert after is not before
+    assert [context.value for context in after.get_contexts_for_attempt()] == [
+        "replacement"
+    ]
+    now[0] = 131
+    assert len(after.get_contexts_for_attempt()) == 2

@@ -1115,12 +1115,18 @@ class TelegramBot:
         try:
             await context.bot.edit_message_media(
                 inline_message_id=query.inline_message_id,
-                media=build_inline_input_media(InlineCachedMediaItem(**cached["media_items"][index])),
-                reply_markup=inline_gallery_keyboard(session_token, index, len(cached["media_items"])),
+                media=build_inline_input_media(
+                    InlineCachedMediaItem(**cached["media_items"][index])
+                ),
+                reply_markup=inline_gallery_keyboard(
+                    session_token, index, len(cached["media_items"])
+                ),
             )
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
-                logger.warning("Inline gallery edit rejected for session %s", session_token)
+                logger.warning(
+                    "Inline gallery edit rejected for session %s", session_token
+                )
         except TelegramError:
             logger.warning("Inline gallery edit failed for session %s", session_token)
 
@@ -1951,6 +1957,7 @@ class TelegramBot:
         job: SharedJob,
     ) -> None:
         """Wait for a shared job result and deliver it to one requester."""
+
         def acknowledge_delivery() -> None:
             job.all_media_sent_monotonic = (
                 request_context.all_media_sent_monotonic or time.perf_counter()
@@ -2299,9 +2306,13 @@ class TelegramBot:
             try:
                 if parsed_link.provider == "instagram":
                     from .instagram_delivery_race import prepare_instagram_delivery
+
                     video_info = await prepare_instagram_delivery(
-                        downloader, parsed_link.original_url, output_dir,
-                        context.bot, getattr(self, "media_stager", None),
+                        downloader,
+                        parsed_link.original_url,
+                        output_dir,
+                        context.bot,
+                        getattr(self, "media_stager", None),
                     )
                 else:
                     video_info = await downloader.download_video(
@@ -2543,83 +2554,104 @@ class TelegramBot:
             if getattr(error, "telegram_user_send_ambiguous", False):
                 raise
             restage_started_at = time.perf_counter()
-            recovered_info = None
-            if any(not item.file_path.is_file() for item in video_info.media_items):
-                # Direct URL winners retain durable IDs but no local files. Once
-                # an ID is definitively rejected, do not serve this cache again.
-                await call_state(
-                    self.state_store.invalidate_cached_result,
-                    request_context.chat_id,
-                    request_context.normalized_url,
-                )
-                recovery_dir = Path(
-                    tempfile.mkdtemp(
-                        prefix="telegram-restage-", dir=settings.TEMP_DIR
-                    )
-                )
-                recovered_info = await VideoDownloader().download_video(
-                    request_context.original_url, recovery_dir
-                )
+            recovery_dir = None
+            recovery_complete = False
             try:
-                staged_items = await self.media_stager.stage_media(
-                    context.bot,
-                    (recovered_info or video_info).media_items,
-                    force=True,
-                )
-            except Exception as error:
-                setattr(error, "telegram_storage_upload_attempted", True)
-                raise
-            if recovered_info is not None:
-                recovered_info.media_items = staged_items
-                # Keep the shared job result current for subsequent delivery
-                # owners, including a changed album length or media type.
-                vars(video_info).update(vars(recovered_info))
-                if settings.RESULT_CACHE_ENABLED:
-                    parsed = RequestParser._parse_supported_url(
-                        request_context.original_url
-                    )
+                recovered_info = None
+                if any(not item.file_path.is_file() for item in video_info.media_items):
+                    # Direct URL winners retain durable IDs but no local files. Once
+                    # an ID is definitively rejected, do not serve this cache again.
                     await call_state(
-                        self.state_store.save_cached_result,
-                        chat_id=request_context.chat_id,
-                        normalized_url=request_context.normalized_url,
-                        provider=parsed.provider if parsed else "unknown",
-                        title=video_info.title,
-                        media_items=[
-                            {
-                                "file_path": str(item.file_path),
-                                "media_type": item.media_type,
-                                "caption": item.caption,
-                                "duration": item.duration,
-                                "width": item.width,
-                                "height": item.height,
-                                "telegram_file_id": item.telegram_file_id,
-                            }
-                            for item in staged_items
-                        ],
-                        ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
+                        self.state_store.invalidate_cached_result,
+                        request_context.chat_id,
+                        request_context.normalized_url,
                     )
-            else:
-                video_info.media_items = staged_items
-                await call_state(
-                    self.state_store.update_cached_telegram_file_ids,
-                    request_context.chat_id,
-                    request_context.normalized_url,
-                    [item.telegram_file_id for item in staged_items],
-                )
-            restage_duration_ms = self._elapsed_ms(restage_started_at)
-            try:
-                await self.media_sender.send_media(
-                    context,
-                    request_context,
-                    replace(video_info, media_items=staged_items),
-                    fallback_to_local_on_rejected_file_id=False,
-                )
-            except Exception as error:
-                setattr(
-                    error, "telegram_storage_upload_duration_ms", restage_duration_ms
-                )
-                raise
-            return restage_duration_ms
+                    recovery_dir = Path(
+                        tempfile.mkdtemp(
+                            prefix="telegram-restage-", dir=settings.TEMP_DIR
+                        )
+                    )
+                    recovered_info = await VideoDownloader().download_video(
+                        request_context.original_url, recovery_dir
+                    )
+                try:
+                    staged_items = await self.media_stager.stage_media(
+                        context.bot,
+                        (recovered_info or video_info).media_items,
+                        force=True,
+                    )
+                except Exception as error:
+                    setattr(error, "telegram_storage_upload_attempted", True)
+                    raise
+                if recovered_info is not None:
+                    recovered_info.media_items = staged_items
+                    # Keep the shared job result current for subsequent delivery
+                    # owners, including a changed album length or media type.
+                    vars(video_info).update(vars(recovered_info))
+                    if settings.RESULT_CACHE_ENABLED:
+                        parsed = RequestParser._parse_supported_url(
+                            request_context.original_url
+                        )
+                        await call_state(
+                            self.state_store.save_cached_result,
+                            chat_id=request_context.chat_id,
+                            normalized_url=request_context.normalized_url,
+                            provider=parsed.provider if parsed else "unknown",
+                            title=video_info.title,
+                            media_items=[
+                                {
+                                    "file_path": str(item.file_path),
+                                    "media_type": item.media_type,
+                                    "caption": item.caption,
+                                    "duration": item.duration,
+                                    "width": item.width,
+                                    "height": item.height,
+                                    "telegram_file_id": item.telegram_file_id,
+                                }
+                                for item in staged_items
+                            ],
+                            ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
+                        )
+                else:
+                    video_info.media_items = staged_items
+                    await call_state(
+                        self.state_store.update_cached_telegram_file_ids,
+                        request_context.chat_id,
+                        request_context.normalized_url,
+                        [item.telegram_file_id for item in staged_items],
+                    )
+                restage_duration_ms = self._elapsed_ms(restage_started_at)
+                try:
+                    await self.media_sender.send_media(
+                        context,
+                        request_context,
+                        replace(video_info, media_items=staged_items),
+                        fallback_to_local_on_rejected_file_id=False,
+                    )
+                except Exception as error:
+                    setattr(
+                        error,
+                        "telegram_storage_upload_duration_ms",
+                        restage_duration_ms,
+                    )
+                    raise
+                recovery_complete = True
+                return restage_duration_ms
+            finally:
+                if recovery_dir is not None and (
+                    not recovery_complete or not settings.RESULT_CACHE_ENABLED
+                ):
+                    try:
+                        if not recovery_complete:
+                            await call_state(
+                                self.state_store.invalidate_cached_result,
+                                request_context.chat_id,
+                                request_context.normalized_url,
+                            )
+                    finally:
+                        await call_state(
+                            shutil.rmtree, recovery_dir, ignore_errors=True
+                        )
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:

@@ -84,7 +84,7 @@ async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
             ) as result_file:
                 result_path = Path(result_file.name)
             # A regular file used as stdin avoids blocking the event loop on a
-            # full pipe for large albums. No credentials enter this payload.
+            # full pipe for large albums. Media metadata includes remote URLs.
             with tempfile.TemporaryFile(dir=settings.TEMP_DIR) as input_file:
                 input_file.write(
                     json.dumps(

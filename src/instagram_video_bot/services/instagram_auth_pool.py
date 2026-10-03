@@ -90,7 +90,9 @@ class InstagramAuthPool:
             raw_payload = auth_path.read_text(encoding="utf-8")
             payload = json.loads(raw_payload)
         except OSError as exc:
-            raise InstagramAuthConfigError("unable to read Instagram auth file") from exc
+            raise InstagramAuthConfigError(
+                "unable to read Instagram auth file"
+            ) from exc
         except json.JSONDecodeError:
             raise InstagramAuthConfigError("invalid Instagram auth JSON") from None
 
@@ -126,8 +128,7 @@ class InstagramAuthPool:
 
             limit = min(self._max_contexts_per_attempt, len(usable))
             selected = [
-                usable[(self._cursor + offset) % len(usable)]
-                for offset in range(limit)
+                usable[(self._cursor + offset) % len(usable)] for offset in range(limit)
             ]
             self._cursor = (self._cursor + limit) % len(usable)
             return list(selected)
@@ -171,25 +172,24 @@ class InstagramAuthPool:
     def export_cooldowns(self) -> dict[str, float]:
         with self._lock:
             self._usable_contexts_locked()
-            return {
-                self._context_key(context): self._cooldowns[
-                    context.context_id
-                ].expires_at
-                for context in self._contexts
-                if context.context_id in self._cooldowns
-            }
+            state: dict[str, float] = {}
+            for context in self._contexts:
+                cooldown = self._cooldowns.get(context.context_id)
+                if cooldown is not None:
+                    fingerprint = self._context_key(context)
+                    state[fingerprint] = max(
+                        state.get(fingerprint, 0), cooldown.expires_at
+                    )
+            return state
 
     def import_cooldowns(self, state: dict[str, float]) -> None:
         with self._lock:
-            ids = {
-                self._context_key(context): context.context_id
-                for context in self._contexts
-            }
-            for fingerprint, expires_at in state.items():
-                key = ids.get(fingerprint)
-                if key is not None and expires_at > self._now_fn():
-                    previous = self._cooldowns.get(key)
-                    self._cooldowns[key] = _Cooldown(
+            now = self._now_fn()
+            for context in self._contexts:
+                expires_at = state.get(self._context_key(context), 0)
+                if expires_at > now:
+                    previous = self._cooldowns.get(context.context_id)
+                    self._cooldowns[context.context_id] = _Cooldown(
                         max(expires_at, previous.expires_at if previous else 0),
                         "classified_failure",
                     )
@@ -272,6 +272,8 @@ def load_configured_instagram_auth_pool(
             cooldown_seconds=cooldown_seconds,
             now_fn=now_fn,
         )
+        if cached_pool is not None:
+            pool.import_cooldowns(cached_pool.export_cooldowns())
         _configured_pool_cache[cache_key] = pool
         _configured_pool_versions[cache_key] = version
         return pool

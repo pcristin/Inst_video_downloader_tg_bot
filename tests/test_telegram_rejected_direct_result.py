@@ -138,6 +138,7 @@ async def test_failed_reacquisition_invalidates_bad_cache_without_user_retry(rec
         await env.bot._send_staged_media(env.context, env.request, env.info)
     assert env.store.get_cached_result(77, env.request.normalized_url) is None
     assert env.sends == [["invalid-id"]]
+    assert not list(settings.TEMP_DIR.glob("telegram-restage-*"))
     env.bot.media_stager.stage_media.assert_not_awaited()
 
 
@@ -185,7 +186,8 @@ async def test_rejected_reacquired_id_has_only_one_user_retry(recovery):
     assert env.downloader.download_video.await_count == 1
     assert env.bot.media_stager.stage_media.await_count == 1
     assert env.bot.media_sender.send_media.await_count == 2
-    assert all(item.file_path.is_file() for item in env.info.media_items)
+    assert not any(item.file_path.is_file() for item in env.info.media_items)
+    assert env.store.get_cached_result(77, env.request.normalized_url) is None
 
 
 @pytest.mark.asyncio
@@ -196,3 +198,39 @@ async def test_failed_private_restage_keeps_rejected_cache_invalid(recovery):
         await env.bot._send_staged_media(env.context, env.request, env.info)
     assert env.store.get_cached_result(77, env.request.normalized_url) is None
     assert env.sends == [["invalid-id"]]
+
+
+@pytest.mark.asyncio
+async def test_failed_restage_removes_partial_recovery_directory(recovery):
+    env = recovery
+    env.bot.media_stager.stage_media.side_effect = DownloadError("storage unavailable")
+    with pytest.raises(DownloadError):
+        await env.bot._send_staged_media(env.context, env.request, env.info)
+    assert not list(settings.TEMP_DIR.glob("telegram-restage-*"))
+
+
+@pytest.mark.asyncio
+async def test_successful_uncached_recovery_releases_files(recovery, monkeypatch):
+    monkeypatch.setattr(settings, "RESULT_CACHE_ENABLED", False)
+    env = recovery
+    await env.bot._send_staged_media(env.context, env.request, env.info)
+    assert len(env.sends) == 2
+    assert not list(settings.TEMP_DIR.glob("telegram-restage-*"))
+    assert env.store.get_cached_result(77, env.request.normalized_url) is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recovery_removes_partial_download(recovery):
+    import asyncio
+
+    env = recovery
+
+    async def cancelled_download(url, output_dir):
+        (output_dir / "partial.mp4").write_bytes(b"partial")
+        raise asyncio.CancelledError
+
+    env.downloader.download_video.side_effect = cancelled_download
+    with pytest.raises(asyncio.CancelledError):
+        await env.bot._send_staged_media(env.context, env.request, env.info)
+    assert not list(settings.TEMP_DIR.glob("telegram-restage-*"))
+    assert env.store.get_cached_result(77, env.request.normalized_url) is None

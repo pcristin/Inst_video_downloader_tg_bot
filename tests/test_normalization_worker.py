@@ -11,6 +11,15 @@ import pytest
 from src.instagram_video_bot.services.download_models import MediaItem, VideoInfo
 
 
+_SLEEPING_WORKER = """
+import json, os, sys, time
+from pathlib import Path
+payload = json.load(sys.stdin)
+Path(payload["info"]["file_path"] + ".pid").write_text(str(os.getpid()))
+time.sleep(60)
+"""
+
+
 @pytest.fixture
 def worker(monkeypatch, tmp_path):
     module = importlib.import_module(
@@ -82,13 +91,7 @@ async def test_cancel_keeps_shared_slot_until_process_reaped(
     stub_worker(
         worker,
         monkeypatch,
-        """
-import json, os, sys, time
-from pathlib import Path
-payload = json.load(sys.stdin)
-Path(payload["info"]["file_path"] + ".pid").write_text(str(os.getpid()))
-time.sleep(60)
-""",
+        _SLEEPING_WORKER,
     )
     real_terminate = worker.terminate_process_group
     cleanup_started, allow_cleanup = asyncio.Event(), asyncio.Event()
@@ -105,7 +108,7 @@ time.sleep(60)
         await wait_until(lambda: first_info.file_path.with_suffix(".mp4.pid").exists())
         pid = int(first_info.file_path.with_suffix(".mp4.pid").read_text())
         first.cancel()
-        await cleanup_started.wait()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=5)
         second = asyncio.create_task(worker.normalize_media_isolated(second_info))
         first.cancel()  # Repeated cancellation cannot abandon child cleanup.
         await asyncio.sleep(0.08)
@@ -132,14 +135,15 @@ async def test_timeout_kills_worker_and_returns_original(worker, monkeypatch, tm
     stub_worker(
         worker,
         monkeypatch,
-        """
-import json, os, sys, time
-from pathlib import Path
-payload = json.load(sys.stdin)
-Path(payload["info"]["file_path"] + ".pid").write_text(str(os.getpid()))
-time.sleep(60)
-""",
+        _SLEEPING_WORKER,
     )
+    real_wait = worker.wait_for_process
+
+    async def wait_after_startup(process, **kwargs):
+        await wait_until(original.file_path.with_suffix(".mp4.pid").exists)
+        await real_wait(process, **kwargs)
+
+    monkeypatch.setattr(worker, "wait_for_process", wait_after_startup)
     monkeypatch.setattr(worker, "_SECONDS_PER_VIDEO", 0.2)
     assert await worker.normalize_media_isolated(original) is original
     pid = int(original.file_path.with_suffix(".mp4.pid").read_text())
@@ -213,9 +217,14 @@ time.sleep(60)
             await task
         # Grandchildren can remain zombies until the host init reaps them.
         status = Path(f"/proc/{pid}/stat")
-        await wait_until(
-            lambda: not status.exists() or status.read_text().split()[2] == "Z"
-        )
+        def is_gone_or_zombie():
+            try:
+                return status.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+            except FileNotFoundError:
+                return True
+
+        # Cleanup itself must guarantee this before releasing capacity.
+        assert is_gone_or_zombie()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

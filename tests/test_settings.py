@@ -56,7 +56,9 @@ def test_local_telegram_api_settings_have_safe_defaults():
         Settings.model_fields["TELEGRAM_BOT_API_BASE_FILE_URL"].default
         == "http://telegram-bot-api:8081/file/bot"
     )
-    assert Settings.model_fields["TELEGRAM_MAX_UPLOAD_BYTES"].default == 500 * 1024 * 1024
+    assert (
+        Settings.model_fields["TELEGRAM_MAX_UPLOAD_BYTES"].default == 500 * 1024 * 1024
+    )
     assert (
         Settings.model_fields["TELEGRAM_LARGE_FILE_CACHE_THRESHOLD_BYTES"].default
         == 50 * 1024 * 1024
@@ -80,8 +82,7 @@ def test_local_telegram_api_settings_parse_environment(monkeypatch, tmp_path):
 
 def test_settings_does_not_eagerly_load_dotenv() -> None:
     settings_source = (
-        Path(__file__).parents[1]
-        / "src/instagram_video_bot/config/settings.py"
+        Path(__file__).parents[1] / "src/instagram_video_bot/config/settings.py"
     ).read_text()
 
     assert "load_dotenv()" not in settings_source
@@ -178,3 +179,12 @@ def test_invalid_proxy_definition_is_not_logged(monkeypatch, tmp_path, caplog):
     assert "SECRET_PASS" not in caplog.text
     assert "secret-proxy.example" not in caplog.text
     assert "Skipping invalid proxy definition" in caplog.text
+
+
+@pytest.mark.parametrize("concurrency", [0, -1])
+def test_stage_concurrency_must_be_positive(concurrency):
+    from pydantic import ValidationError
+    from src.instagram_video_bot.config.settings import Settings
+
+    with pytest.raises(ValidationError, match="TELEGRAM_MEDIA_STAGE_CONCURRENCY"):
+        Settings(TELEGRAM_MEDIA_STAGE_CONCURRENCY=concurrency)

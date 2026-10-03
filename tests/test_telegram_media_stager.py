@@ -130,6 +130,8 @@ async def test_staging_partial_success_survives_failure_and_siblings_cancel(tmp_
     from telegram.error import BadRequest
 
     saved = asyncio.Event()
+    sibling_started = asyncio.Event()
+    cancelled = []
 
     class Bot:
         async def send_video(self, **kwargs):
@@ -137,8 +139,16 @@ async def test_staging_partial_success_survives_failure_and_siblings_cancel(tmp_
             if name == "0":
                 saved.set()
                 return SimpleNamespace(video=SimpleNamespace(file_id="saved"))
-            await saved.wait()
-            raise BadRequest("failed")
+            if name == "1":
+                await saved.wait()
+                await sibling_started.wait()
+                raise BadRequest("failed")
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(name)
+                raise
 
     items = []
     for i in range(3):
@@ -146,8 +156,9 @@ async def test_staging_partial_success_survives_failure_and_siblings_cancel(tmp_
         path.write_bytes(b"video")
         items.append(MediaItem(file_path=path, media_type="video"))
     with pytest.raises(BadRequest):
-        await TelegramMediaStager(-1001).stage_media(Bot(), items)
+        await asyncio.wait_for(TelegramMediaStager(-1001).stage_media(Bot(), items), 1)
     assert items[0].telegram_file_id == "saved"
+    assert cancelled == ["2"]
 
 
 @pytest.mark.asyncio
@@ -209,3 +220,68 @@ async def test_retry_after_pauses_other_requests_even_after_final_attempt(
         bot, [MediaItem(file_path=path, media_type="video")]
     )
     assert times[1] - times[0] >= 0.045
+
+
+@pytest.mark.asyncio
+async def test_flood_recovery_staggers_waiters_then_restores_normal_rate():
+    import asyncio
+    from src.instagram_video_bot.services.telegram_media_stager import _UploadState
+
+    state = _UploadState(asyncio.Semaphore(2))
+    state.defer(-1001, 0.02)
+    released = []
+
+    async def wait():
+        await state.wait(-1001)
+        released.append(asyncio.get_running_loop().time())
+
+    await asyncio.gather(wait(), wait())
+    assert released[1] - released[0] >= 0.95
+    assert -1001 not in state.chat_ready_at
+    # A fresh batch has no historical one-second penalty.
+    await asyncio.wait_for(asyncio.gather(wait(), wait()), 0.2)
+    assert -1001 not in state.chat_locks
+    assert -1001 not in state.chat_waiters
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_preserves_active_flood_deadline():
+    import asyncio
+    from src.instagram_video_bot.services.telegram_media_stager import _UploadState
+
+    state = _UploadState(asyncio.Semaphore(2))
+    state.defer(-1001, 30)
+    deadline = state.chat_ready_at[-1001]
+    task = asyncio.create_task(state.wait(-1001))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert state.chat_ready_at[-1001] == deadline
+
+
+def test_closed_loop_upload_state_is_collectable_after_contention(monkeypatch):
+    import asyncio
+    import gc
+    import weakref
+    from src.instagram_video_bot.config.settings import settings
+    from src.instagram_video_bot.services.telegram_media_stager import _upload_state
+
+    monkeypatch.setattr(settings, "TELEGRAM_MEDIA_STAGE_CONCURRENCY", 1)
+    bot = SimpleNamespace()
+
+    async def contend():
+        loop_ref = weakref.ref(asyncio.get_running_loop())
+        state = _upload_state(bot)
+        await state.semaphore.acquire()
+        waiter = asyncio.create_task(state.semaphore.acquire())
+        await asyncio.sleep(0)
+        state.semaphore.release()
+        await waiter
+        state.semaphore.release()
+        return loop_ref, weakref.ref(state)
+
+    loop_ref, state_ref = asyncio.run(contend())
+    gc.collect()
+    assert loop_ref() is None
+    assert state_ref() is None

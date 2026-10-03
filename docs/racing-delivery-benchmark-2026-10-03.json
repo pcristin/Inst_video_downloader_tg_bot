@@ -29,6 +29,7 @@
     "completed_trials": 4
   },
   "limitations": [
+    "Historical prototype only: later review found readiness published after teardown, incomplete cleanup of late-spawned descendants, and eligibility/state confounds. Its measurements and test counts are preserved as observations, not validation of the integrated coordinator. Prototype sources are archived in git commit 9996a40 and removed from the active tree.",
     "One small, deliberately mixed convenience sample; no confidence interval, production percentile guarantee or sustained multi-user load validation.",
     "Current branch uses a different account from direct for concurrency safety. Account/proxy differences may affect relative performance; same branch account reused across modes.",
     "Direct bypasses full decode/remux. Readiness confirms Telegram staging plus metadata compatibility, not physical-device playback or full source integrity.",

@@ -87,13 +87,16 @@ async def test_process_group_cleanup_runs_after_leader_exits(monkeypatch):
         def poll(self):
             return 0
 
-    monkeypatch.setattr(
-        subprocess_lifecycle.os, "killpg", lambda pid, sig: calls.append((pid, sig))
-    )
+    def killpg(pid, sig):
+        calls.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", killpg)
 
     await subprocess_lifecycle.terminate_process_group(ExitedLeader())
 
-    assert calls == [(12345, signal.SIGKILL)]
+    assert calls == [(12345, signal.SIGKILL), (12345, 0)]
 
 
 @pytest.mark.asyncio

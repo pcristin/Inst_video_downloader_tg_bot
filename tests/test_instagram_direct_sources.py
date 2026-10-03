@@ -265,7 +265,7 @@ def test_private_api_challenge_callback_cannot_attempt_recovery(source_env):
     from instagrapi.mixins.private import PrivateRequestMixin
 
     api = source_env.api
-    api.authorization = None
+    api.authorization = "test-authorization"
     api.delay_range = None
     api.private_requests_count = 0
     api.handle_exception = None
@@ -276,6 +276,7 @@ def test_private_api_challenge_callback_cannot_attempt_recovery(source_env):
     )
     with pytest.raises(InstagramAuthError, match="auth_challenge"):
         extract(source_env)
+    api._send_private_request.assert_called_once()
     api.challenge_resolve.assert_not_called()
 
 

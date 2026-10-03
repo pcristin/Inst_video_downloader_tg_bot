@@ -15,7 +15,9 @@
       "Production traffic, CDN speed and Telegram backoff uncontrolled.",
       "One mixed album failed in both modes; included in reliability count, excluded from successful latency median.",
       "Source may differ in resolution/compression.",
-      "Only one final sender invocation per delivered trial; cancelled private uploads may have reached Telegram."
+      "Only one final sender invocation per delivered trial; cancelled private uploads may have reached Telegram.",
+      "Historical harness did not assert actual race admission and reused mutable account state across modes; observations are preserved, but do not validate the corrected harness.",
+      "Ramp throttling ends after 72 hours; accounts activated six days earlier would not be ramp-limited, but per-account activation timestamps were not retained in this report."
     ]
   },
   "summary": {
@@ -688,5 +690,146 @@
     "final_sender_calls": "Exactly one per delivered trial; no tracked background race cleanup tasks after drain.",
     "live_total_trials": 18,
     "deployed": false
+  },
+  "review_fix_canary": {
+    "scope": "Four fresh trials across a two-photo album and short reel using corrected eligibility, independent per-mode account/session state and required race admission. These validate the corrected harness and revised staging/cleanup; they do not replace the historical eight-pair data or establish a general latency percentile.",
+    "trials": [
+      {
+        "sample": 1,
+        "mode": "current",
+        "status": "delivered",
+        "ready_s": 16.603,
+        "final_send_invocations": 1,
+        "first_media_s": 16.903,
+        "total_s": 16.903,
+        "media_count": 2,
+        "media_types": [
+          "photo",
+          "photo"
+        ],
+        "drained_s": 16.906,
+        "provider_metrics": {
+          "provider": "instagram",
+          "retry_count": 0,
+          "failure_class": null,
+          "instagram_fast_status": null,
+          "instagram_fast_duration_ms": null,
+          "instagram_fast_budget_exhausted": false,
+          "instagram_fallback_attempted": false,
+          "instagram_account_attempts": 1,
+          "instagram_account_retries": 0,
+          "instagram_auth_failures": 0,
+          "instagram_success_path": "authenticated_first",
+          "instagram_fallback_path": "album",
+          "provider_extraction_ms": null,
+          "provider_download_ms": null,
+          "media_normalization_ms": 2,
+          "instagram_metadata_reused": true
+        },
+        "remaining_background_cleanups": 0
+      },
+      {
+        "sample": 1,
+        "mode": "race",
+        "status": "delivered",
+        "race_admitted": true,
+        "ready_s": 14.062,
+        "final_send_invocations": 1,
+        "first_media_s": 14.269,
+        "total_s": 14.269,
+        "media_count": 2,
+        "media_types": [
+          "photo",
+          "photo"
+        ],
+        "drained_s": 14.271,
+        "provider_metrics": {
+          "provider": "instagram",
+          "retry_count": 0,
+          "failure_class": null,
+          "instagram_fast_status": null,
+          "instagram_fast_duration_ms": null,
+          "instagram_fast_budget_exhausted": false,
+          "instagram_fallback_attempted": false,
+          "instagram_account_attempts": 1,
+          "instagram_account_retries": 0,
+          "instagram_auth_failures": 0,
+          "instagram_success_path": "authenticated_first",
+          "instagram_fallback_path": "album",
+          "provider_extraction_ms": null,
+          "provider_download_ms": null,
+          "media_normalization_ms": 0,
+          "instagram_metadata_reused": true
+        },
+        "remaining_background_cleanups": 0
+      },
+      {
+        "sample": 2,
+        "mode": "race",
+        "status": "delivered",
+        "race_admitted": true,
+        "ready_s": 9.714,
+        "final_send_invocations": 1,
+        "first_media_s": 9.889,
+        "total_s": 9.889,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ],
+        "drained_s": 9.89,
+        "provider_metrics": {
+          "provider": "instagram",
+          "retry_count": 0,
+          "failure_class": null,
+          "instagram_fast_status": null,
+          "instagram_fast_duration_ms": null,
+          "instagram_fast_budget_exhausted": false,
+          "instagram_fallback_attempted": false,
+          "instagram_account_attempts": 1,
+          "instagram_account_retries": 0,
+          "instagram_auth_failures": 0,
+          "instagram_success_path": "race_direct",
+          "instagram_fallback_path": null,
+          "provider_extraction_ms": null,
+          "provider_download_ms": null,
+          "media_normalization_ms": null,
+          "instagram_metadata_reused": true
+        },
+        "remaining_background_cleanups": 0
+      },
+      {
+        "sample": 2,
+        "mode": "current",
+        "status": "delivered",
+        "ready_s": 18.674,
+        "final_send_invocations": 1,
+        "first_media_s": 18.859,
+        "total_s": 18.859,
+        "media_count": 1,
+        "media_types": [
+          "video"
+        ],
+        "drained_s": 18.86,
+        "provider_metrics": {
+          "provider": "instagram",
+          "retry_count": 0,
+          "failure_class": null,
+          "instagram_fast_status": null,
+          "instagram_fast_duration_ms": null,
+          "instagram_fast_budget_exhausted": false,
+          "instagram_fallback_attempted": false,
+          "instagram_account_attempts": 1,
+          "instagram_account_retries": 0,
+          "instagram_auth_failures": 0,
+          "instagram_success_path": "authenticated_first",
+          "instagram_fallback_path": "raw_direct",
+          "provider_extraction_ms": null,
+          "provider_download_ms": null,
+          "media_normalization_ms": 2719,
+          "instagram_metadata_reused": true
+        },
+        "remaining_background_cleanups": 0
+      }
+    ]
   }
 }

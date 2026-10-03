@@ -555,6 +555,7 @@ async def test_first_media_hook_runs_before_persistence(tmp_path, monkeypatch, c
     sender = TelegramMediaSender(SimpleNamespace())
 
     async def persist(*args):
+        assert "sent" in marks
         assert marks[-1] == "all"
 
     monkeypatch.setattr(sender, "_persist_telegram_file_ids", persist)
