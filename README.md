@@ -518,7 +518,9 @@ Telegram upload limits and flood backoff apply to both candidates. Rejected
 cached file IDs trigger local reacquisition and one safe retry.
 
 Acquisition deadlines exclude normalization and staging, which retain their own
-budgets. Race download timing excludes the winning upload. After workers drain,
+budgets. Race download timing includes normalization and excludes the winning
+upload; if both candidates fail, it records the longer preparation duration.
+After workers drain,
 the winning upload is recorded as `storage_upload`; other attempted uploads use
 `race_storage_upload_direct` or `race_storage_upload_local`, preserving their
 success, failure or cancellation status without mixing speculative work into

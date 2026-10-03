@@ -2312,7 +2312,7 @@ class TelegramBot:
                 await call_state(
                     self.state_store.record_delivery_attempt,
                     job_id=job.job_id,
-                    request_id=staging_request_id,
+                    request_id=job.delivery_request_id or staging_request_id,
                     **{
                         key: value
                         for key, value in attempt.items()
@@ -2321,11 +2321,11 @@ class TelegramBot:
                 )
 
             def provider_duration_ms():
-                acquisition_ms = getattr(
+                preparation_ms = getattr(
                     downloader, "last_race_download_duration_ms", None
                 )
-                if acquisition_ms is not None:
-                    return acquisition_ms
+                if preparation_ms is not None:
+                    return preparation_ms
                 return max(
                     0,
                     self._elapsed_ms(download_started_at)

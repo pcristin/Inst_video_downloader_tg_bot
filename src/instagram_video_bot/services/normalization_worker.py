@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from dataclasses import replace
 
 from ..config.settings import settings
+from .async_state import call_state
 from .download_models import VideoInfo
 from .subprocess_lifecycle import terminate_process_group, wait_for_process
 
@@ -60,6 +63,67 @@ async def _finish_process(process: subprocess.Popen[bytes]) -> None:
         raise asyncio.CancelledError
 
 
+def _workspace_inputs(info: VideoInfo, workspace: Path) -> VideoInfo:
+    """Link source inputs beside exclusively owned normalizer outputs."""
+    replacements = {}
+    items = []
+    for index, item in enumerate(info.media_items):
+        directory = workspace / str(index)
+        directory.mkdir()
+        source = directory / item.file_path.name
+        source.symlink_to(item.file_path.resolve())
+        replacements[item.file_path] = source
+        items.append(replace(item, file_path=source))
+    return replace(
+        info,
+        file_path=replacements.get(info.file_path, info.file_path),
+        media_items=items,
+    )
+
+
+def _publish_result(
+    result: VideoInfo, original: VideoInfo, workspace: Path, published: list[Path]
+) -> VideoInfo:
+    """Publish only returned outputs; never replace a pre-existing source/output."""
+    aliases = {
+        workspace / str(index) / item.file_path.name: item.file_path
+        for index, item in enumerate(original.media_items)
+    }
+    replacements = {}
+    items = []
+    for item in result.media_items:
+        source = item.file_path
+        if source in aliases:
+            destination = aliases[source]
+        elif source.is_relative_to(workspace):
+            # Per-item workspace directories retain the original output location.
+            index = int(source.relative_to(workspace).parts[0])
+            parent = original.media_items[index].file_path.parent
+            destination = parent / source.name
+            try:
+                with destination.open("xb"):
+                    pass
+            except FileExistsError:
+                with tempfile.NamedTemporaryFile(
+                    prefix=f"{source.stem}-",
+                    suffix=source.suffix,
+                    dir=parent,
+                    delete=False,
+                ) as output:
+                    destination = Path(output.name)
+            published.append(destination)
+            shutil.move(str(source), str(destination))
+        else:
+            destination = source
+        replacements[source] = destination
+        items.append(replace(item, file_path=destination))
+    return replace(
+        result,
+        file_path=replacements.get(result.file_path, result.file_path),
+        media_items=items,
+    )
+
+
 async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
     """Normalize under shared capacity; reap the child before releasing its slot.
 
@@ -75,7 +139,15 @@ async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
     async with _shared_semaphore():
         result_path: Path | None = None
         process: subprocess.Popen[bytes] | None = None
+        workspace: Path | None = None
+        published: list[Path] = []
+        completed = False
         try:
+            workspace = Path(
+                tempfile.mkdtemp(
+                    prefix="instagram-normalization-", dir=settings.TEMP_DIR
+                )
+            )
             with tempfile.NamedTemporaryFile(
                 prefix="instagram-normalization-",
                 suffix=".json",
@@ -88,7 +160,11 @@ async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
             with tempfile.TemporaryFile(dir=settings.TEMP_DIR) as input_file:
                 input_file.write(
                     json.dumps(
-                        {"info": encode_result(info), "_result_file": str(result_path)}
+                        {
+                            "info": encode_result(info),
+                            "_result_file": str(result_path),
+                            "_workspace": str(workspace),
+                        }
                     ).encode()
                 )
                 input_file.seek(0)
@@ -106,8 +182,19 @@ async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
             )
             if process.returncode != 0:
                 raise RuntimeError("Instagram normalization worker failed")
+            # Stop descendants before publishing or deleting anything they own.
+            await _finish_process(process)
+            process = None
             result = decode_result(json.loads(result_path.read_text(encoding="utf-8")))
-            return result if result is not None else info
+            if result is None:
+                return info
+            # Cross-filesystem publication may copy large outputs. Drain that
+            # disk operation before cancellation can remove its owned files.
+            result = await call_state(
+                _publish_result, result, info, workspace, published
+            )
+            completed = True
+            return result
         except Exception as error:
             logger.warning(
                 "Isolated Instagram normalization failed; using original media",
@@ -119,6 +206,11 @@ async def normalize_media_isolated(info: VideoInfo) -> VideoInfo:
                 if process is not None:
                     await _finish_process(process)
             finally:
+                if not completed:
+                    for path in published:
+                        path.unlink(missing_ok=True)
+                if workspace is not None:
+                    shutil.rmtree(workspace, ignore_errors=True)
                 if result_path is not None:
                     result_path.unlink(missing_ok=True)
 
@@ -131,6 +223,8 @@ def main() -> None:
     info = decode_result(payload["info"])
     if info is None:
         raise ValueError("Missing normalization media")
+    if "_workspace" in payload:
+        info = _workspace_inputs(info, Path(payload["_workspace"]))
     result = normalize_instagram_media(info)
     Path(payload["_result_file"]).write_text(
         json.dumps(encode_result(result)), encoding="utf-8"

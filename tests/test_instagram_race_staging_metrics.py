@@ -118,8 +118,9 @@ async def test_race_staging_records_winner_and_loser_after_resources_release(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["race", "failed_race", "sequential"])
+@pytest.mark.parametrize("owner_state", ["missing", "handoff", "cleared"])
 async def test_executor_separates_staging_from_provider_duration(
-    tmp_path, monkeypatch, outcome
+    tmp_path, monkeypatch, outcome, owner_state
 ):
     from src.instagram_video_bot.services import telegram_bot as module
 
@@ -138,6 +139,7 @@ async def test_executor_separates_staging_from_provider_duration(
 
     async def prepare(downloader, *args, on_staging_attempt, **kwargs):
         downloader.last_race_staging_duration_ms = 300
+        job.delivery_request_id = "replacement" if owner_state == "handoff" else None
         await on_staging_attempt(
             dict(
                 candidate="direct",
@@ -174,7 +176,10 @@ async def test_executor_separates_staging_from_provider_duration(
         original_url="https://example/media",
     )
     execute = bot._build_job_executor(1, link, SimpleNamespace(bot=object()))
-    job = SimpleNamespace(job_id="job", delivery_request_id=None)
+    job = SimpleNamespace(
+        job_id="job",
+        delivery_request_id=None if owner_state == "missing" else "origin",
+    )
     if outcome == "failed_race":
         with pytest.raises(DownloadError):
             await execute(job)
@@ -189,7 +194,14 @@ async def test_executor_separates_staging_from_provider_duration(
         }[outcome]
     )
     if outcome != "sequential":
-        assert attempts[0]["request_id"] == "job"
+        assert (
+            attempts[0]["request_id"]
+            == {
+                "missing": "job",
+                "handoff": "replacement",
+                "cleared": "origin",
+            }[owner_state]
+        )
         assert attempts[0]["stage"] == "storage_upload"
         assert "candidate" not in attempts[0]
 
@@ -293,3 +305,97 @@ def test_throughput_excludes_speculation_and_unknown_remote_bytes(tmp_path):
     summary = store.get_performance_summary(1)
     assert summary["storage_upload_bytes_per_second"] == 1000
     assert summary["avg_storage_upload_ms"] == 550
+
+
+@pytest.mark.asyncio
+async def test_failed_race_counts_slower_direct_preparation_and_normalization(
+    tmp_path, monkeypatch
+):
+    from contextlib import asynccontextmanager
+
+    clock = [0.0]
+    monkeypatch.setattr(race, "perf_counter", lambda: clock[0])
+    local_staging = asyncio.Event()
+    direct_staging = asyncio.Event()
+    observer_times = []
+
+    def info(name):
+        return VideoInfo(
+            tmp_path / name,
+            name,
+            media_items=[MediaItem(tmp_path / name, "video")],
+        )
+
+    @asynccontextmanager
+    async def slot():
+        yield
+
+    class Direct:
+        last_provider_metrics = ProviderExecutionMetrics(provider="instagram")
+        last_account_health_event = None
+        _instagram_provider_slot = staticmethod(slot)
+
+        async def _download_with_account_leases(self, *args, **kwargs):
+            raise DownloadError("metadata unavailable")
+
+        async def _run_instagram_operation(self, *args, **kwargs):
+            await local_staging.wait()
+            clock[0] = 2.0
+            return info("direct")
+
+        async def _normalize_instagram_result(self, result):
+            clock[0] += 3.0
+            return result
+
+    class Local:
+        last_provider_metrics = ProviderExecutionMetrics(
+            provider="instagram",
+            failure_class="baseline diagnosis",
+        )
+        last_account_health_event = None
+
+        async def download_video(self, *args):
+            clock[0] = 1.0
+            return info("local")
+
+    class Stager:
+        async def stage_media(self, bot, items):
+            if items[0].file_path.name == "local":
+                local_staging.set()
+                await direct_staging.wait()
+            else:
+                direct_staging.set()
+            clock[0] += 10.0
+            raise DownloadError("staging failed")
+
+    async def observer(attempt):
+        clock[0] += 100.0
+        observer_times.append(clock[0])
+
+    monkeypatch.setattr(race, "race_available", lambda *args: True)
+    monkeypatch.setattr(
+        race,
+        "_reserve_accounts",
+        lambda: (
+            SimpleNamespace(release_account=lambda account: None),
+            (object(), object()),
+        ),
+    )
+    local = Local()
+    workers = iter([Direct(), local])
+    monkeypatch.setattr(race.providers, "VideoDownloader", lambda: next(workers))
+    outer = SimpleNamespace()
+    with pytest.raises(DownloadError):
+        await race.prepare_instagram_delivery(
+            outer,
+            "url",
+            tmp_path,
+            object(),
+            Stager(),
+            on_staging_attempt=observer,
+        )
+    await race.drain_race_cleanup()
+    assert outer.last_race_download_duration_ms == 5000
+    assert outer.last_provider_metrics is local.last_provider_metrics
+    assert len(observer_times) == 2
+    assert clock[0] == 225.0

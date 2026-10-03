@@ -174,7 +174,7 @@ async def prepare_instagram_delivery(
             dirs[name] = Path(tempfile.mkdtemp(prefix=f"race-{name}-", dir=output_dir))
 
         staging_attempts = {}
-        local_acquisition_ms = None
+        preparation_durations_ms = {}
 
         async def stage(info, candidate):
             uploads = [item for item in info.media_items if not item.telegram_file_id]
@@ -218,7 +218,7 @@ async def prepare_instagram_delivery(
                 if uploads:
                     staging_attempts[candidate] = attempt
 
-        async def direct_or_public():
+        async def prepare_direct():
             try:
                 async with asyncio.timeout(
                     settings.INSTAGRAM_AUTH_FIRST_TIMEOUT_SECONDS
@@ -260,15 +260,26 @@ async def prepare_instagram_delivery(
                 direct.last_provider_metrics.failure_class = None
             else:
                 direct.last_provider_metrics.instagram_success_path = "race_direct"
+            return info
+
+        async def direct_or_public():
+            started = perf_counter()
+            try:
+                info = await prepare_direct()
+            finally:
+                preparation_durations_ms["direct"] = max(
+                    0, round((perf_counter() - started) * 1000)
+                )
             return await stage(info, "direct")
 
         async def local():
-            nonlocal local_acquisition_ms
             started = perf_counter()
             try:
                 info = await local_downloader.download_video(url, dirs["local"])
             finally:
-                local_acquisition_ms = max(0, round((perf_counter() - started) * 1000))
+                preparation_durations_ms["local"] = max(
+                    0, round((perf_counter() - started) * 1000)
+                )
             return await stage(info, "local")
 
         async def cleaned(winner):
@@ -332,8 +343,11 @@ async def prepare_instagram_delivery(
         if handed_off:
             # Both candidates have drained before a failed race propagates.
             # Preserve the baseline provider diagnosis for request metrics.
-            # Its acquisition duration excludes both upload work and loser cleanup.
-            downloader.last_race_download_duration_ms = local_acquisition_ms
+            # Preparation includes acquisition and normalization, matching the
+            # sequential download metric. Exclude staging and cleanup observers.
+            downloader.last_race_download_duration_ms = max(
+                preparation_durations_ms.values(), default=0
+            )
             downloader.last_provider_metrics = local_downloader.last_provider_metrics
             downloader.last_account_health_event = (
                 local_downloader.last_account_health_event
