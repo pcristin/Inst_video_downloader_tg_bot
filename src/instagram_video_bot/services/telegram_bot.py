@@ -2303,6 +2303,35 @@ class TelegramBot:
             )
             output_dir.mkdir(parents=True, exist_ok=True)
             download_started_at = time.perf_counter()
+
+            staging_request_id = job.delivery_request_id or next(
+                iter(getattr(job, "requesters", {})), job.job_id
+            )
+
+            async def record_race_staging(attempt):
+                await call_state(
+                    self.state_store.record_delivery_attempt,
+                    job_id=job.job_id,
+                    request_id=staging_request_id,
+                    **{
+                        key: value
+                        for key, value in attempt.items()
+                        if key != "candidate"
+                    },
+                )
+
+            def provider_duration_ms():
+                acquisition_ms = getattr(
+                    downloader, "last_race_download_duration_ms", None
+                )
+                if acquisition_ms is not None:
+                    return acquisition_ms
+                return max(
+                    0,
+                    self._elapsed_ms(download_started_at)
+                    - getattr(downloader, "last_race_staging_duration_ms", 0),
+                )
+
             try:
                 if parsed_link.provider == "instagram":
                     from .instagram_delivery_race import prepare_instagram_delivery
@@ -2313,6 +2342,10 @@ class TelegramBot:
                         output_dir,
                         context.bot,
                         getattr(self, "media_stager", None),
+                        on_staging_attempt=record_race_staging,
+                        on_account_health=lambda event: self._notify_owner_about_low_account_pool(
+                            context, event
+                        ),
                     )
                 else:
                     video_info = await downloader.download_video(
@@ -2323,7 +2356,7 @@ class TelegramBot:
                     self._record_provider_metrics,
                     job.job_id,
                     getattr(downloader, "last_provider_metrics", None),
-                    download_duration_ms=self._elapsed_ms(download_started_at),
+                    download_duration_ms=provider_duration_ms(),
                     failure_class=error.__class__.__name__,
                 )
                 await self._notify_owner_about_low_account_pool(
@@ -2335,7 +2368,7 @@ class TelegramBot:
                 self._record_provider_metrics,
                 job.job_id,
                 getattr(downloader, "last_provider_metrics", None),
-                download_duration_ms=self._elapsed_ms(download_started_at),
+                download_duration_ms=provider_duration_ms(),
             )
             if settings.RESULT_CACHE_ENABLED:
                 await call_state(

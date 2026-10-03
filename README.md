@@ -517,6 +517,14 @@ storage message cleanup is not provided.
 Telegram upload limits and flood backoff apply to both candidates. Rejected
 cached file IDs trigger local reacquisition and one safe retry.
 
+Acquisition deadlines exclude normalization and staging, which retain their own
+budgets. Race download timing excludes the winning upload. After workers drain,
+the winning upload is recorded as `storage_upload`; other attempted uploads use
+`race_storage_upload_direct` or `race_storage_upload_local`, preserving their
+success, failure or cancellation status without mixing speculative work into
+successful-delivery throughput. Remote URL fetch byte counts remain unknown.
+Account-health alerts from either candidate are forwarded after workers drain.
+
 `INSTAGRAM_DELIVERY_RACE_ENABLED=false` disables racing.
 `INSTAGRAM_DELIVERY_RACE_MAX_ACTIVE=2` bounds concurrent races, and
 `INSTAGRAM_NORMALIZATION_CONCURRENCY=1` limits isolated video processing across
