@@ -54,6 +54,8 @@ def test_modes_copy_account_health_and_sessions(tmp_path, monkeypatch):
         with support.isolated_account_state(
             manager, [account], tmp_path / f"{mode}.json"
         ) as trial:
+            assert trial.sessions_dir.stat().st_mode & 0o777 == 0o700
+            assert trial.accounts[0].session_file.stat().st_mode & 0o777 == 0o600
             assert trial.accounts[0].last_used is None
             assert trial.accounts[0].session_file.read_text() == "original"
             trial.accounts[0].last_used = datetime.now()

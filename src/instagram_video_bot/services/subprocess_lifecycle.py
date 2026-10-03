@@ -9,7 +9,6 @@ from pathlib import Path
 import signal
 import subprocess
 
-
 logger = logging.getLogger(__name__)
 _PROC_ROOT = Path("/proc")
 _REAP_WARNING_SECONDS = 2.0
@@ -29,7 +28,12 @@ def _group_has_live_members(pgid: int) -> bool:
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            fields = (
+                (entry / "stat")
+                .read_text(encoding="utf-8", errors="replace")
+                .rsplit(")", 1)[1]
+                .split()
+            )
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:

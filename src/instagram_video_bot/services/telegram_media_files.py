@@ -115,7 +115,13 @@ def cleanup_media_files(files: list[Path]) -> None:
             continue
         while parent != root:
             if parent.name.startswith(
-                ("public-", "race-direct-", "race-local-", "telegram-restage-")
+                (
+                    "public-",
+                    "auth-first-",
+                    "race-direct-",
+                    "race-local-",
+                    "telegram-restage-",
+                )
             ):
                 try:
                     parent.rmdir()

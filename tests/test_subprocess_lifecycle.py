@@ -83,14 +83,16 @@ async def test_cleanup_waits_beyond_previous_grace_period_for_actual_reap(monkey
 
 
 @pytest.mark.asyncio
-async def test_cleanup_waits_for_live_descendants_after_leader_reaped(monkeypatch, tmp_path, caplog):
+async def test_cleanup_waits_for_live_descendants_after_leader_reaped(
+    monkeypatch, tmp_path, caplog
+):
     """A reaped leader must not release capacity while its group is still active."""
-    proc = tmp_path / 'proc'
-    member = proc / '456'
+    proc = tmp_path / "proc"
+    member = proc / "456"
     member.mkdir(parents=True)
-    stat = member / 'stat'
+    stat = member / "stat"
     # comm can contain spaces and parentheses; pgrp follows state and ppid.
-    stat.write_text('456 (worker (child)) D 1 12345 12345 0')
+    stat.write_text("456 (worker (child)) D 1 12345 12345 0")
 
     class ReapedLeader:
         pid = 12345
@@ -98,16 +100,20 @@ async def test_cleanup_waits_for_live_descendants_after_leader_reaped(monkeypatc
         def poll(self):
             return -signal.SIGKILL
 
-    monkeypatch.setattr(subprocess_lifecycle.os, 'killpg', lambda pid, sig: None)
-    monkeypatch.setattr(subprocess_lifecycle, '_PROC_ROOT', proc, raising=False)
-    monkeypatch.setattr(subprocess_lifecycle, "_REAP_WARNING_SECONDS", 0.01, raising=False)
-    task = asyncio.create_task(subprocess_lifecycle.terminate_process_group(ReapedLeader()))
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", lambda pid, sig: None)
+    monkeypatch.setattr(subprocess_lifecycle, "_PROC_ROOT", proc, raising=False)
+    monkeypatch.setattr(
+        subprocess_lifecycle, "_REAP_WARNING_SECONDS", 0.01, raising=False
+    )
+    task = asyncio.create_task(
+        subprocess_lifecycle.terminate_process_group(ReapedLeader())
+    )
     try:
         await asyncio.sleep(0.08)
         assert not task.done()
         assert "retaining worker capacity" in caplog.text
         # A zombie no longer executes; its reaping belongs to its new parent.
-        stat.write_text('456 (worker (child)) Z 1 12345 12345 0')
+        stat.write_text("456 (worker (child)) Z 1 12345 12345 0")
         await asyncio.wait_for(task, 1)
     finally:
         stat.unlink(missing_ok=True)
@@ -115,21 +121,33 @@ async def test_cleanup_waits_for_live_descendants_after_leader_reaped(monkeypatc
 
 
 def test_group_member_disappearing_during_scan_is_stopped(monkeypatch, tmp_path):
-    (tmp_path / '456').mkdir()
-    monkeypatch.setattr(subprocess_lifecycle, '_PROC_ROOT', tmp_path)
-    monkeypatch.setattr(subprocess_lifecycle.os, 'killpg', lambda pid, sig: None)
+    (tmp_path / "456").mkdir()
+    monkeypatch.setattr(subprocess_lifecycle, "_PROC_ROOT", tmp_path)
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", lambda pid, sig: None)
     assert not subprocess_lifecycle._group_has_live_members(12345)
 
 
 def test_unreadable_group_status_retains_capacity(monkeypatch, tmp_path):
     from pathlib import Path
 
-    (tmp_path / '456').mkdir()
-    monkeypatch.setattr(subprocess_lifecycle, '_PROC_ROOT', tmp_path)
-    monkeypatch.setattr(subprocess_lifecycle.os, 'killpg', lambda pid, sig: None)
+    (tmp_path / "456").mkdir()
+    monkeypatch.setattr(subprocess_lifecycle, "_PROC_ROOT", tmp_path)
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", lambda pid, sig: None)
 
-    def unreadable(path):
-        raise PermissionError('procfs unavailable')
+    def unreadable(path, **kwargs):
+        raise PermissionError("procfs unavailable")
 
-    monkeypatch.setattr(Path, 'read_text', unreadable)
+    monkeypatch.setattr(Path, "read_text", unreadable)
     assert subprocess_lifecycle._group_has_live_members(12345)
+
+
+def test_non_utf8_process_name_does_not_abort_group_scan(monkeypatch, tmp_path):
+    member = tmp_path / "456"
+    member.mkdir()
+    stat = member / "stat"
+    stat.write_bytes(b"456 (worker-\xff) D 1 12345 12345 0")
+    monkeypatch.setattr(subprocess_lifecycle, "_PROC_ROOT", tmp_path)
+    monkeypatch.setattr(subprocess_lifecycle.os, "killpg", lambda pid, sig: None)
+    assert subprocess_lifecycle._group_has_live_members(12345)
+    stat.write_bytes(b"456 (worker-\xff) Z 1 12345 12345 0")
+    assert not subprocess_lifecycle._group_has_live_members(12345)

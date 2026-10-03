@@ -35,10 +35,12 @@ def isolated_account_state(manager, accounts, state_file):
     trial = copy.copy(manager)
     trial.accounts = copy.deepcopy(accounts)
     trial.sessions_dir = state_file.parent / (state_file.stem + "-sessions")
-    trial.sessions_dir.mkdir(parents=True, exist_ok=True)
+    trial.sessions_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    trial.sessions_dir.chmod(0o700)
     for index, account in enumerate(trial.accounts):
         copied_session = trial.sessions_dir / f"{index}.json"
-        shutil.copyfile(account.session_file, copied_session)
+        shutil.copy2(account.session_file, copied_session)
+        copied_session.chmod(0o600)
         account.session_file = copied_session
     trial.current_account = None
     trial._leased_accounts = set()

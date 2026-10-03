@@ -684,11 +684,11 @@
     ]
   },
   "verification": {
-    "full_suite_passed": 841,
+    "full_suite_passed": 868,
     "skipped": 5,
-    "independent_review": "No remaining major findings, including follow-up failure-metrics change.",
+    "independent_review": "Local independent review completed; current-head external review status is tracked on GitHub PR #47.",
     "final_sender_calls": "Exactly one per delivered trial; no tracked background race cleanup tasks after drain.",
-    "live_total_trials": 18,
+    "live_total_trials": 22,
     "deployed": false
   },
   "review_fix_canary": {

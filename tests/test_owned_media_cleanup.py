@@ -1,15 +1,18 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.instagram_video_bot.config.settings import settings
 from src.instagram_video_bot.services.telegram_media_sender import TelegramMediaSender
 from src.instagram_video_bot.services.telegram_cache import purge_expired_cache_files
 
 
-def test_delivery_removes_empty_owned_public_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prefix", ["public-", "auth-first-"])
+def test_delivery_removes_empty_owned_directory(tmp_path, monkeypatch, prefix):
     monkeypatch.setattr(settings, "TEMP_DIR", tmp_path)
     job = tmp_path / "job"
-    owned = job / "public-abc"
+    owned = job / f"{prefix}abc"
     owned.mkdir(parents=True)
     files = [owned / "1.jpg", owned / "2.jpg"]
     for file in files:
