@@ -18,6 +18,7 @@ class MediaItem:
     width: Optional[int] = None
     height: Optional[int] = None
     telegram_file_id: Optional[str] = None
+    remote_url: Optional[str] = None
 
 
 @dataclass
@@ -32,6 +33,9 @@ class VideoInfo:
     primary_media_type: Literal["video", "photo"] = "video"
     from_cache: bool = False
     instagram_fallback_path: Optional[str] = None
+    provider_extraction_ms: Optional[int] = None
+    provider_download_ms: Optional[int] = None
+    media_normalization_ms: Optional[int] = None
     instagram_metadata_reused: bool = False
     instagram_fast_budget_exhausted: bool = False
     instagram_fast_endpoint_timings_json: Optional[str] = None
@@ -55,6 +59,9 @@ class ProviderExecutionMetrics:
     instagram_auth_failures: int = 0
     instagram_success_path: Optional[str] = None
     instagram_fallback_path: Optional[str] = None
+    provider_extraction_ms: Optional[int] = None
+    provider_download_ms: Optional[int] = None
+    media_normalization_ms: Optional[int] = None
     instagram_metadata_reused: bool = False
 
 

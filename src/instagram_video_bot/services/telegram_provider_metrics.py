@@ -24,6 +24,15 @@ def record_provider_metrics(
     """Persist provider execution metrics without leaking provider internals."""
     metrics = provider_metrics or ProviderExecutionMetrics(provider="unknown")
     effective_failure_class = metrics.failure_class or failure_class
+    phases = {
+        field: getattr(metrics, field, None)
+        for field in (
+            "provider_extraction_ms",
+            "provider_download_ms",
+            "media_normalization_ms",
+        )
+        if getattr(metrics, field, None) is not None
+    }
     state_store.record_download_metrics(
         job_id,
         download_duration_ms=download_duration_ms,
@@ -40,4 +49,5 @@ def record_provider_metrics(
         instagram_fallback_path=metrics.instagram_fallback_path,
         instagram_metadata_reused=bool(metrics.instagram_metadata_reused),
         failure_class=effective_failure_class,
+        **phases,
     )

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
+import statistics
 import threading
 import uuid
 from dataclasses import dataclass
@@ -41,7 +43,13 @@ class StateStore:
     def __init__(self, db_path: Path | None = None):
         self.db_path = db_path or settings.STATE_DB_PATH
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
+        # Admission still uses synchronous state methods; never stall every chat
+        # for the former ten-second SQLite busy wait.
+        self._conn = sqlite3.connect(
+            self.db_path,
+            timeout=max(0.0, getattr(settings, "SQLITE_BUSY_TIMEOUT_SECONDS", 0.1)),
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._initialize()
@@ -181,6 +189,12 @@ class StateStore:
                 (reason, now, *active_statuses),
             )
             interrupted_count = cursor.rowcount
+            # Acquisition may already be complete while a storage upload was
+            # interrupted. Do not leave those request measurements pending.
+            self._conn.execute(
+                "UPDATE request_latency SET status='unknown', finished_at=? WHERE status='pending'",
+                (now,),
+            )
             self._conn.execute(
                 """
                 UPDATE request_events
@@ -541,6 +555,9 @@ class StateStore:
         job_id: str,
         *,
         download_duration_ms: int,
+        provider_extraction_ms: int | None = None,
+        provider_download_ms: int | None = None,
+        media_normalization_ms: int | None = None,
         retry_count: int = 0,
         instagram_fast_status: str | None = None,
         instagram_fast_duration_ms: int | None = None,
@@ -559,6 +576,9 @@ class StateStore:
             """
             UPDATE performance_metrics
             SET download_duration_ms = ?,
+                provider_extraction_ms = ?,
+                provider_download_ms = ?,
+                media_normalization_ms = ?,
                 retry_count = ?,
                 instagram_fast_status = ?,
                 instagram_fast_duration_ms = ?,
@@ -576,6 +596,9 @@ class StateStore:
             """,
             (
                 download_duration_ms,
+                provider_extraction_ms,
+                provider_download_ms,
+                media_normalization_ms,
                 retry_count,
                 instagram_fast_status,
                 instagram_fast_duration_ms,
@@ -630,15 +653,17 @@ class StateStore:
         status: str,
         duration_ms: int,
         error_class: str | None = None,
+        media_bytes: int | None = None,
+        media_count: int | None = None,
     ) -> None:
         """Persist one direct-delivery boundary outcome for reliability analysis."""
         self._safe_metrics_write(
             """
             INSERT INTO delivery_attempts (
                 attempt_id, job_id, request_id, stage, status,
-                duration_ms, error_class, created_at
+                duration_ms, error_class, created_at, media_bytes, media_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex,
@@ -649,6 +674,8 @@ class StateStore:
                 max(0, duration_ms),
                 error_class,
                 _utc_now().isoformat(),
+                media_bytes,
+                media_count,
             ),
         )
 
@@ -677,6 +704,44 @@ class StateStore:
             (status, now, job_id),
         )
 
+    def record_request_received(
+        self, *, request_id: str, job_id: str, received_at: datetime
+    ) -> None:
+        """Start receipt-to-delivery measurement independently of acquisition."""
+        self._safe_metrics_write(
+            "INSERT OR IGNORE INTO request_latency (request_id, job_id, received_at) VALUES (?, ?, ?)",
+            (request_id, job_id, received_at.isoformat()),
+        )
+
+    def record_request_outcome(
+        self,
+        request_id: str,
+        *,
+        status: str,
+        total_duration_ms: int,
+        first_media_ms: int | None = None,
+    ) -> None:
+        self._safe_metrics_write(
+            """UPDATE request_latency SET status = ?, first_media_ms = ?,
+               total_duration_ms = ?, finished_at = ? WHERE request_id = ?""",
+            (
+                status,
+                first_media_ms,
+                max(0, total_duration_ms),
+                _utc_now().isoformat(),
+                request_id,
+            ),
+        )
+
+    @staticmethod
+    def _latency_percentile(values: list[int], percentile: float) -> int | None:
+        if not values:
+            return None
+        if percentile == 0.5:
+            return round(statistics.median(values))
+        ordered = sorted(values)
+        return ordered[max(0, math.ceil(len(ordered) * percentile) - 1)]
+
     def get_performance_summary(
         self, chat_id: int | None, limit: int = 50
     ) -> dict[str, Any]:
@@ -703,6 +768,48 @@ class StateStore:
                     (chat_id, limit),
                 ).fetchall()
 
+        job_ids = [row["job_id"] for row in rows]
+        latency_rows = []
+        upload_rows = []
+        if job_ids:
+            placeholders = ",".join("?" for _ in job_ids)
+            with self._lock:
+                latency_rows = self._conn.execute(
+                    f"SELECT * FROM request_latency WHERE job_id IN ({placeholders})",
+                    job_ids,
+                ).fetchall()
+                upload_rows = self._conn.execute(
+                    f"SELECT duration_ms, media_bytes FROM delivery_attempts WHERE stage='storage_upload' AND status='delivered' AND job_id IN ({placeholders})",
+                    job_ids,
+                ).fetchall()
+        delivered = [row for row in latency_rows if row["status"] == "delivered"]
+        measured_uploads = [
+            row
+            for row in upload_rows
+            if row["media_bytes"] is not None and row["duration_ms"] > 0
+        ]
+        upload_ms = sum(row["duration_ms"] for row in measured_uploads)
+        totals = [
+            row["total_duration_ms"]
+            for row in delivered
+            if row["total_duration_ms"] is not None
+        ]
+        firsts = [
+            row["first_media_ms"]
+            for row in delivered
+            if row["first_media_ms"] is not None
+        ]
+        latency = {
+            "delivered": len(delivered),
+            "failed": sum(row["status"] == "failed" for row in latency_rows),
+            "unknown": sum(row["status"] == "unknown" for row in latency_rows),
+            "cancelled": sum(row["status"] == "cancelled" for row in latency_rows),
+            "pending": sum(row["status"] == "pending" for row in latency_rows),
+            "p50_ms": self._latency_percentile(totals, 0.5),
+            "p95_ms": self._latency_percentile(totals, 0.95),
+            "first_media_p50_ms": self._latency_percentile(firsts, 0.5),
+            "first_media_p95_ms": self._latency_percentile(firsts, 0.95),
+        }
         total_jobs = len(rows)
         cache_hits = sum(1 for row in rows if row["cache_hit"])
         providers: dict[str, dict[str, Any]] = {}
@@ -771,6 +878,29 @@ class StateStore:
         )
         return {
             "total_jobs": total_jobs,
+            "latency": latency,
+            "avg_storage_upload_ms": self._safe_average(
+                [row["duration_ms"] for row in upload_rows]
+            ),
+            "storage_upload_bytes_per_second": (
+                round(
+                    sum(row["media_bytes"] for row in measured_uploads)
+                    * 1000
+                    / upload_ms
+                )
+                if upload_ms
+                else None
+            ),
+            "provider_phases": {
+                field: self._safe_average(
+                    [row[field] for row in rows if row[field] is not None]
+                )
+                for field in (
+                    "provider_extraction_ms",
+                    "provider_download_ms",
+                    "media_normalization_ms",
+                )
+            },
             "cache_hits": cache_hits,
             "cache_hit_rate": cache_hits / total_jobs if total_jobs else 0.0,
             "providers": providers,
@@ -1842,6 +1972,14 @@ class StateStore:
                     created_at.isoformat(),
                     expires_at.isoformat(),
                 ),
+            )
+
+    def invalidate_cached_result(self, chat_id: int, normalized_url: str) -> None:
+        """Forget one rejected result without deleting files used by other owners."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "DELETE FROM recent_results WHERE cache_key = ?",
+                (self._cache_key(chat_id, normalized_url),),
             )
 
     def update_cached_telegram_file_ids(

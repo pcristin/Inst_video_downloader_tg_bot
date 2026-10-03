@@ -8,6 +8,7 @@ from typing import Any
 
 from .download_models import MediaItem, VideoInfo
 from .state_store import CachedMediaEntry
+from .telegram_media_files import cleanup_media_files
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,5 @@ def purge_expired_cache_files(
     if not result_cache_enabled:
         return []
     expired_paths = state_store.purge_expired_results()
-    for path in expired_paths:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            logger.warning("Failed to delete expired cache file %s", path)
+    cleanup_media_files(expired_paths)
     return expired_paths

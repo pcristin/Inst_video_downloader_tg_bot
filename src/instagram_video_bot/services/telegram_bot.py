@@ -27,6 +27,7 @@ from telegram.ext import Application, ContextTypes
 
 from ..config.settings import settings
 from . import video_downloader as video_downloader_module
+from .async_state import call_state
 from .audio_conversion import AudioConversionError, convert_video_to_mp3
 from .chaos_text import ChaosText, TextContext
 from .inline_access import (
@@ -562,8 +563,11 @@ class TelegramBot:
         if not await self._require_owner(update):
             return
         snapshot = self.job_manager.get_snapshot(update.effective_chat.id)
-        admin_status = self.state_store.get_admin_status(update.effective_chat.id)
-        performance = self._build_admin_performance_summary(
+        admin_status = await call_state(
+            self.state_store.get_admin_status, update.effective_chat.id
+        )
+        performance = await call_state(
+            self._build_admin_performance_summary,
             chat_id=update.effective_chat.id,
             duplicate_joins=self.state_store.get_group_stats(update.effective_chat.id)[
                 "duplicate_joins"
@@ -620,8 +624,9 @@ class TelegramBot:
         if not await self._require_owner(update):
             return
         snapshot = self.job_manager.get_global_snapshot()
-        admin_status = self.state_store.get_global_admin_status()
-        performance = self._build_admin_performance_summary(
+        admin_status = await call_state(self.state_store.get_global_admin_status)
+        performance = await call_state(
+            self._build_admin_performance_summary,
             chat_id=None,
             duplicate_joins=admin_status["duplicate_joins"],
             recent_failures=admin_status["recent_failures"],
@@ -1110,12 +1115,18 @@ class TelegramBot:
         try:
             await context.bot.edit_message_media(
                 inline_message_id=query.inline_message_id,
-                media=build_inline_input_media(InlineCachedMediaItem(**cached["media_items"][index])),
-                reply_markup=inline_gallery_keyboard(session_token, index, len(cached["media_items"])),
+                media=build_inline_input_media(
+                    InlineCachedMediaItem(**cached["media_items"][index])
+                ),
+                reply_markup=inline_gallery_keyboard(
+                    session_token, index, len(cached["media_items"])
+                ),
             )
         except BadRequest as exc:
             if "message is not modified" not in str(exc).lower():
-                logger.warning("Inline gallery edit rejected for session %s", session_token)
+                logger.warning(
+                    "Inline gallery edit rejected for session %s", session_token
+                )
         except TelegramError:
             logger.warning("Inline gallery edit failed for session %s", session_token)
 
@@ -1946,11 +1957,23 @@ class TelegramBot:
         job: SharedJob,
     ) -> None:
         """Wait for a shared job result and deliver it to one requester."""
+
+        def acknowledge_delivery() -> None:
+            job.all_media_sent_monotonic = (
+                request_context.all_media_sent_monotonic or time.perf_counter()
+            )
+            job.first_media_sent_monotonic = (
+                request_context.first_media_sent_monotonic
+                or job.all_media_sent_monotonic
+            )
+            self.job_manager.mark_delivery_completed(job)
+
+        request_context.on_all_media_sent = acknowledge_delivery
         request_failure: FailureDetails | None = None
         try:
             if not job.result_future:
                 raise DownloadError("Job result future was not initialized")
-            video_info = await job.result_future
+            video_info = await asyncio.shield(job.result_future)
             while True:
                 if self.job_manager.is_delivery_request(
                     job, request_context.request_id
@@ -1974,6 +1997,18 @@ class TelegramBot:
                     staging_required = self.media_stager is not None and any(
                         not item.telegram_file_id for item in video_info.media_items
                     )
+                    upload_bytes = (
+                        sum(
+                            item.file_path.stat().st_size
+                            for item in video_info.media_items
+                            if not item.telegram_file_id and item.file_path.exists()
+                        )
+                        if staging_required
+                        else 0
+                    )
+                    upload_count = sum(
+                        not item.telegram_file_id for item in video_info.media_items
+                    )
                     try:
                         delivery_info = await self._stage_media_for_delivery(
                             context, request_context, video_info
@@ -1986,13 +2021,15 @@ class TelegramBot:
                         )
                         setattr(error, "job_failure_details", request_failure)
                         staging_duration_ms = self._elapsed_ms(staging_started_at)
-                        self.state_store.record_delivery_metrics(
+                        await call_state(
+                            self.state_store.record_delivery_metrics,
                             job.job_id,
                             delivery_duration_ms=staging_duration_ms,
                             delivery_status="failed",
                             delivery_error_class=error.__class__.__name__,
                         )
-                        self.state_store.record_delivery_attempt(
+                        await call_state(
+                            self.state_store.record_delivery_attempt,
                             job_id=job.job_id,
                             request_id=request_context.request_id,
                             stage="storage_upload",
@@ -2002,12 +2039,15 @@ class TelegramBot:
                         )
                         raise
                     if staging_required:
-                        self.state_store.record_delivery_attempt(
+                        await call_state(
+                            self.state_store.record_delivery_attempt,
                             job_id=job.job_id,
                             request_id=request_context.request_id,
                             stage="storage_upload",
                             status="delivered",
                             duration_ms=self._elapsed_ms(staging_started_at),
+                            media_bytes=upload_bytes,
+                            media_count=upload_count,
                         )
 
                     delivery_started_at = time.perf_counter()
@@ -2027,20 +2067,26 @@ class TelegramBot:
                         restage_duration_ms = await self._send_staged_media(
                             context, request_context, delivery_info
                         )
+                        # Never yield to cancellation after an acknowledged send
+                        # while another requester can still be promoted to resend.
+                        acknowledge_delivery()
                         if restage_duration_ms is not None:
-                            self.state_store.record_delivery_attempt(
+                            await call_state(
+                                self.state_store.record_delivery_attempt,
                                 job_id=job.job_id,
                                 request_id=request_context.request_id,
                                 stage="storage_upload",
                                 status="delivered",
                                 duration_ms=restage_duration_ms,
                             )
-                        self.state_store.record_delivery_metrics(
+                        await call_state(
+                            self.state_store.record_delivery_metrics,
                             job.job_id,
                             delivery_duration_ms=self._elapsed_ms(delivery_started_at),
                             delivery_status="delivered",
                         )
-                        self.state_store.record_delivery_attempt(
+                        await call_state(
+                            self.state_store.record_delivery_attempt,
                             job_id=job.job_id,
                             request_id=request_context.request_id,
                             stage="user_send",
@@ -2074,20 +2120,23 @@ class TelegramBot:
                         )
                         setattr(error, "job_failure_details", request_failure)
                         if restage_duration_ms is not None:
-                            self.state_store.record_delivery_attempt(
+                            await call_state(
+                                self.state_store.record_delivery_attempt,
                                 job_id=job.job_id,
                                 request_id=request_context.request_id,
                                 stage="storage_upload",
                                 status="delivered",
                                 duration_ms=restage_duration_ms,
                             )
-                        self.state_store.record_delivery_metrics(
+                        await call_state(
+                            self.state_store.record_delivery_metrics,
                             job.job_id,
                             delivery_duration_ms=delivery_duration_ms,
                             delivery_status=delivery_status,
                             delivery_error_class=error.__class__.__name__,
                         )
-                        self.state_store.record_delivery_attempt(
+                        await call_state(
+                            self.state_store.record_delivery_attempt,
                             job_id=job.job_id,
                             request_id=request_context.request_id,
                             stage=(
@@ -2123,7 +2172,6 @@ class TelegramBot:
                             )
                             continue
                         raise
-                    self.job_manager.mark_delivery_completed(job)
                     break
                 delivered = await self.job_manager.wait_for_delivery(job)
                 if delivered:
@@ -2133,6 +2181,7 @@ class TelegramBot:
                 if job.last_delivery_error is not None:
                     raise job.last_delivery_error
                 raise RuntimeError("Shared delivery finished without a result")
+            await self._record_request_latency(request_context, "delivered", job)
             self.job_manager.mark_request_completed(
                 request_context.request_id,
                 cache_hit=video_info.from_cache,
@@ -2145,9 +2194,14 @@ class TelegramBot:
             ):
                 self._cleanup_files([item.file_path for item in video_info.media_items])
         except asyncio.CancelledError:
-            self.job_manager.mark_request_failed(
-                request_context.request_id, status="cancelled"
-            )
+            if job.all_media_sent_monotonic is not None:
+                await self._record_request_latency(request_context, "delivered", job)
+                self.job_manager.mark_request_completed(request_context.request_id)
+            else:
+                await self._record_request_latency(request_context, "cancelled", job)
+                self.job_manager.mark_request_failed(
+                    request_context.request_id, status="cancelled"
+                )
             raise
         except Exception as error:
             failure = (
@@ -2155,6 +2209,11 @@ class TelegramBot:
                 or job.failure
                 or request_failure
                 or classify_failure(error, stage=FailureStage.ACQUISITION)
+            )
+            await self._record_request_latency(
+                request_context,
+                "unknown" if failure.reason.value == "delivery_ambiguous" else "failed",
+                job,
             )
             error_message = ChaosText.failure(
                 failure,
@@ -2185,6 +2244,32 @@ class TelegramBot:
                 failure=failure,
             )
 
+    async def _record_request_latency(
+        self, request_context: RequestContext, status: str, job: SharedJob
+    ) -> None:
+        """Record actual receipt-to-send time before cosmetic cleanup."""
+        end = job.all_media_sent_monotonic if status == "delivered" else None
+        first = (
+            request_context.first_media_sent_monotonic or job.first_media_sent_monotonic
+        )
+        await call_state(
+            self.state_store.record_request_outcome,
+            request_context.request_id,
+            status=status,
+            total_duration_ms=max(
+                0,
+                round(
+                    ((end or time.perf_counter()) - request_context.received_monotonic)
+                    * 1000
+                ),
+            ),
+            first_media_ms=(
+                max(0, round((first - request_context.received_monotonic) * 1000))
+                if first is not None
+                else None
+            ),
+        )
+
     def _build_job_executor(
         self,
         chat_id: int,
@@ -2196,11 +2281,13 @@ class TelegramBot:
         async def _execute(job: SharedJob) -> VideoInfo:
             cached = None
             if settings.RESULT_CACHE_ENABLED:
-                cached = self.state_store.get_cached_result(
-                    chat_id, parsed_link.normalized_url
+                cached = await call_state(
+                    self.state_store.get_cached_result,
+                    chat_id,
+                    parsed_link.normalized_url,
                 )
             if cached:
-                self.state_store.record_cache_hit(job.job_id)
+                await call_state(self.state_store.record_cache_hit, job.job_id)
                 return self._video_info_from_cache(cached)
 
             downloader = VideoDownloader()
@@ -2216,15 +2303,60 @@ class TelegramBot:
             )
             output_dir.mkdir(parents=True, exist_ok=True)
             download_started_at = time.perf_counter()
-            try:
-                video_info = await downloader.download_video(
-                    parsed_link.original_url, output_dir
+
+            staging_request_id = job.delivery_request_id or next(
+                iter(getattr(job, "requesters", {})), job.job_id
+            )
+
+            async def record_race_staging(attempt):
+                await call_state(
+                    self.state_store.record_delivery_attempt,
+                    job_id=job.job_id,
+                    request_id=job.delivery_request_id or staging_request_id,
+                    **{
+                        key: value
+                        for key, value in attempt.items()
+                        if key != "candidate"
+                    },
                 )
+
+            def provider_duration_ms():
+                preparation_ms = getattr(
+                    downloader, "last_race_download_duration_ms", None
+                )
+                if preparation_ms is not None:
+                    return preparation_ms
+                return max(
+                    0,
+                    self._elapsed_ms(download_started_at)
+                    - getattr(downloader, "last_race_staging_duration_ms", 0),
+                )
+
+            try:
+                if parsed_link.provider == "instagram":
+                    from .instagram_delivery_race import prepare_instagram_delivery
+
+                    video_info = await prepare_instagram_delivery(
+                        downloader,
+                        parsed_link.original_url,
+                        output_dir,
+                        context.bot,
+                        getattr(self, "media_stager", None),
+                        on_staging_attempt=record_race_staging,
+                        on_account_health=lambda event: self._notify_owner_about_low_account_pool(
+                            context, event
+                        ),
+                    )
+                else:
+                    video_info = await downloader.download_video(
+                        parsed_link.original_url, output_dir
+                    )
             except Exception as error:
-                self._record_provider_metrics(
+                await call_state(
+                    self._record_provider_metrics,
                     job.job_id,
                     getattr(downloader, "last_provider_metrics", None),
-                    download_duration_ms=self._elapsed_ms(download_started_at),
+                    download_duration_ms=provider_duration_ms(),
                     failure_class=error.__class__.__name__,
                 )
                 await self._notify_owner_about_low_account_pool(
@@ -2232,13 +2364,15 @@ class TelegramBot:
                     getattr(downloader, "last_account_health_event", None),
                 )
                 raise
-            self._record_provider_metrics(
+            await call_state(
+                self._record_provider_metrics,
                 job.job_id,
                 getattr(downloader, "last_provider_metrics", None),
-                download_duration_ms=self._elapsed_ms(download_started_at),
+                download_duration_ms=provider_duration_ms(),
             )
             if settings.RESULT_CACHE_ENABLED:
-                self.state_store.save_cached_result(
+                await call_state(
+                    self.state_store.save_cached_result,
                     chat_id=chat_id,
                     normalized_url=parsed_link.normalized_url,
                     provider=parsed_link.provider,
@@ -2251,6 +2385,7 @@ class TelegramBot:
                             "duration": item.duration,
                             "width": item.width,
                             "height": item.height,
+                            "telegram_file_id": item.telegram_file_id,
                         }
                         for item in video_info.media_items
                     ],
@@ -2415,14 +2550,18 @@ class TelegramBot:
         if self.media_stager and any(
             not item.telegram_file_id for item in video_info.media_items
         ):
-            staged_items = await self.media_stager.stage_media(
-                context.bot, video_info.media_items
-            )
-            self.state_store.update_cached_telegram_file_ids(
-                request_context.chat_id,
-                request_context.normalized_url,
-                [item.telegram_file_id for item in staged_items],
-            )
+            try:
+                staged_items = await self.media_stager.stage_media(
+                    context.bot, video_info.media_items
+                )
+            finally:
+                # Preserve successful uploads even when another album item fails.
+                await call_state(
+                    self.state_store.update_cached_telegram_file_ids,
+                    request_context.chat_id,
+                    request_context.normalized_url,
+                    [item.telegram_file_id for item in video_info.media_items],
+                )
             self.media_sender.cleanup_large_staged_files(staged_items)
             delivery_info = replace(video_info, media_items=staged_items)
         return delivery_info
@@ -2448,32 +2587,104 @@ class TelegramBot:
             if getattr(error, "telegram_user_send_ambiguous", False):
                 raise
             restage_started_at = time.perf_counter()
+            recovery_dir = None
+            recovery_complete = False
             try:
-                staged_items = await self.media_stager.stage_media(
-                    context.bot, video_info.media_items, force=True
-                )
-            except Exception as error:
-                setattr(error, "telegram_storage_upload_attempted", True)
-                raise
-            self.state_store.update_cached_telegram_file_ids(
-                request_context.chat_id,
-                request_context.normalized_url,
-                [item.telegram_file_id for item in staged_items],
-            )
-            restage_duration_ms = self._elapsed_ms(restage_started_at)
-            try:
-                await self.media_sender.send_media(
-                    context,
-                    request_context,
-                    replace(video_info, media_items=staged_items),
-                    fallback_to_local_on_rejected_file_id=False,
-                )
-            except Exception as error:
-                setattr(
-                    error, "telegram_storage_upload_duration_ms", restage_duration_ms
-                )
-                raise
-            return restage_duration_ms
+                recovered_info = None
+                if any(not item.file_path.is_file() for item in video_info.media_items):
+                    # Direct URL winners retain durable IDs but no local files. Once
+                    # an ID is definitively rejected, do not serve this cache again.
+                    await call_state(
+                        self.state_store.invalidate_cached_result,
+                        request_context.chat_id,
+                        request_context.normalized_url,
+                    )
+                    recovery_dir = Path(
+                        tempfile.mkdtemp(
+                            prefix="telegram-restage-", dir=settings.TEMP_DIR
+                        )
+                    )
+                    recovered_info = await VideoDownloader().download_video(
+                        request_context.original_url, recovery_dir
+                    )
+                try:
+                    staged_items = await self.media_stager.stage_media(
+                        context.bot,
+                        (recovered_info or video_info).media_items,
+                        force=True,
+                    )
+                except Exception as error:
+                    setattr(error, "telegram_storage_upload_attempted", True)
+                    raise
+                if recovered_info is not None:
+                    recovered_info.media_items = staged_items
+                    # Keep the shared job result current for subsequent delivery
+                    # owners, including a changed album length or media type.
+                    vars(video_info).update(vars(recovered_info))
+                    if settings.RESULT_CACHE_ENABLED:
+                        parsed = RequestParser._parse_supported_url(
+                            request_context.original_url
+                        )
+                        await call_state(
+                            self.state_store.save_cached_result,
+                            chat_id=request_context.chat_id,
+                            normalized_url=request_context.normalized_url,
+                            provider=parsed.provider if parsed else "unknown",
+                            title=video_info.title,
+                            media_items=[
+                                {
+                                    "file_path": str(item.file_path),
+                                    "media_type": item.media_type,
+                                    "caption": item.caption,
+                                    "duration": item.duration,
+                                    "width": item.width,
+                                    "height": item.height,
+                                    "telegram_file_id": item.telegram_file_id,
+                                }
+                                for item in staged_items
+                            ],
+                            ttl_seconds=settings.RECENT_RESULT_TTL_SECONDS,
+                        )
+                else:
+                    video_info.media_items = staged_items
+                    await call_state(
+                        self.state_store.update_cached_telegram_file_ids,
+                        request_context.chat_id,
+                        request_context.normalized_url,
+                        [item.telegram_file_id for item in staged_items],
+                    )
+                restage_duration_ms = self._elapsed_ms(restage_started_at)
+                try:
+                    await self.media_sender.send_media(
+                        context,
+                        request_context,
+                        replace(video_info, media_items=staged_items),
+                        fallback_to_local_on_rejected_file_id=False,
+                    )
+                except Exception as error:
+                    setattr(
+                        error,
+                        "telegram_storage_upload_duration_ms",
+                        restage_duration_ms,
+                    )
+                    raise
+                recovery_complete = True
+                return restage_duration_ms
+            finally:
+                if recovery_dir is not None and (
+                    not recovery_complete or not settings.RESULT_CACHE_ENABLED
+                ):
+                    try:
+                        if not recovery_complete:
+                            await call_state(
+                                self.state_store.invalidate_cached_result,
+                                request_context.chat_id,
+                                request_context.normalized_url,
+                            )
+                    finally:
+                        await call_state(
+                            shutil.rmtree, recovery_dir, ignore_errors=True
+                        )
 
     @staticmethod
     def _cleanup_files(files: list[Path]) -> None:

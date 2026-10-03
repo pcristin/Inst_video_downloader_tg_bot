@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from telegram import Message, Update
 from telegram.ext import ContextTypes
 
 from ...config.settings import settings
+from ..async_state import call_state
 from ..chaos_text import ChaosText
 from ..job_states import JobState
 from ..request_parser import ParsedRequestLink, RequestParser
@@ -26,6 +29,8 @@ class TelegramRequestIntake:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle incoming messages by queueing supported provider links."""
+        received_monotonic = perf_counter()
+        received_at = datetime.now(timezone.utc)
         bot = self._bot
         if (
             getattr(update, "edited_message", None)
@@ -75,6 +80,8 @@ class TelegramRequestIntake:
                 parsed_link,
                 group_settings=group_settings,
                 language_code=language_code,
+                received_monotonic=received_monotonic,
+                received_at=received_at,
             )
 
     async def submit_parsed_link(
@@ -87,10 +94,16 @@ class TelegramRequestIntake:
         language_code: str | None = None,
         status_message: Message | None = None,
         retry_of_request_id: str | None = None,
+        received_monotonic: float | None = None,
+        received_at: datetime | None = None,
     ) -> str | None:
         """Submit one parsed link, optionally reusing a failed status message."""
 
         bot = self._bot
+        received_monotonic = (
+            received_monotonic if received_monotonic is not None else perf_counter()
+        )
+        received_at = received_at or datetime.now(timezone.utc)
         message = update.effective_message
         chat = update.effective_chat
         request_user_id = bot._request_user_id(update)
@@ -112,29 +125,33 @@ class TelegramRequestIntake:
             duplicate_suppression=group_settings["duplicate_suppression"],
             retry_of_request_id=retry_of_request_id,
         )
-        text = bot._build_submission_message(
-            parsed_link.provider_label,
-            queue_position=submission.queue_position,
-            joined_existing=not submission.is_new_job,
-            chaos_enabled=group_settings["chaos_mode_enabled"],
-            language_code=language_code,
-        )
-        markup = cancel_keyboard(
-            submission.request_id,
-            language_code=language_code,
-        )
-        if status_message is None:
-            try:
-                status_message = await message.reply_text(text, reply_markup=markup)
-            except (Exception, asyncio.CancelledError):
-                bot.job_manager.cancel_request(submission.request_id)
-                raise
-        else:
-            await bot._safe_edit_text(
-                status_message,
-                text,
-                reply_markup=markup,
+        try:
+            await call_state(
+                bot.state_store.record_request_received,
+                request_id=submission.request_id,
+                job_id=submission.job.job_id,
+                received_at=received_at,
             )
+            text = bot._build_submission_message(
+                parsed_link.provider_label,
+                queue_position=submission.queue_position,
+                joined_existing=not submission.is_new_job,
+                chaos_enabled=group_settings["chaos_mode_enabled"],
+                language_code=language_code,
+            )
+            markup = cancel_keyboard(
+                submission.request_id,
+                language_code=language_code,
+            )
+            if status_message is None:
+                status_message = await message.reply_text(text, reply_markup=markup)
+            else:
+                await bot._safe_edit_text(status_message, text, reply_markup=markup)
+        except (Exception, asyncio.CancelledError):
+            # Submission owns a request before the first metrics await. Do not
+            # leave it active if cancellation arrives during that disk write.
+            await self._cancel_submission(submission.request_id, received_monotonic)
+            raise
         request_context = RequestContext(
             request_id=submission.request_id,
             chat_id=chat.id,
@@ -148,10 +165,16 @@ class TelegramRequestIntake:
             joined_existing=not submission.is_new_job,
             chaos_enabled=group_settings["chaos_mode_enabled"],
             language_code=language_code,
+            received_monotonic=received_monotonic,
+            received_at=received_at,
         )
         bot.request_contexts[submission.request_id] = request_context
-        if submission.job.state is JobState.RUNNING:
-            await bot._on_job_state_change(submission.job)
+        try:
+            if submission.job.state is JobState.RUNNING:
+                await bot._on_job_state_change(submission.job)
+        except (Exception, asyncio.CancelledError):
+            await self._cancel_submission(submission.request_id, received_monotonic)
+            raise
         task = asyncio.create_task(
             bot._await_request(context, request_context, submission.job)
         )
@@ -160,3 +183,17 @@ class TelegramRequestIntake:
             lambda _task, rid=submission.request_id: bot._cleanup_request_task(rid)
         )
         return submission.request_id
+
+    async def _cancel_submission(
+        self, request_id: str, received_monotonic: float
+    ) -> None:
+        """Release an intake-owned request before its delivery waiter exists."""
+        bot = self._bot
+        bot.job_manager.cancel_request(request_id)
+        bot.request_contexts.pop(request_id, None)
+        await call_state(
+            bot.state_store.record_request_outcome,
+            request_id,
+            status="cancelled",
+            total_duration_ms=round((perf_counter() - received_monotonic) * 1000),
+        )

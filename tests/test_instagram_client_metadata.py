@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from src.instagram_video_bot.config.settings import settings
+
 from src.instagram_video_bot.services.instagram_client import (
     InstagramAuthError,
     InstagramClient,
@@ -565,6 +567,9 @@ def test_public_ytdlp_media_downloads_video_and_thumbnail_entries(monkeypatch, t
         ("https://cdn.example.com/thumb-large.jpg", 15.0, True),
     ]
     assert captured["options"] == {
+        "socket_timeout": settings.IG_PUBLIC_METADATA_TIMEOUT_SECONDS,
+        "retries": 0,
+        "extractor_retries": 0,
         "quiet": True,
         "skip_download": True,
         "ignoreerrors": True,
@@ -636,7 +641,8 @@ def test_public_ytdlp_media_merges_separate_audio_before_returning(monkeypatch, 
     )
 
     assert result is not None
-    assert result.file_paths == [tmp_path / "public_1.mp4"]
+    assert [path.name for path in result.file_paths] == ["public_1.mp4"]
+    assert result.file_paths[0].is_relative_to(tmp_path)
     assert result.file_paths[0].read_bytes() == b"muxed-av"
     assert requested_urls == [
         ("https://cdn.example/video.webm", 15.0, True),

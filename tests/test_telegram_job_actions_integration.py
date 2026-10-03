@@ -344,8 +344,10 @@ async def test_successful_request_updates_one_status_through_delivery_stages(
     bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
     video_info = VideoInfo(file_path=tmp_path / "video.mp4", title="Video")
 
+    acquired = asyncio.Event()
+
     async def execute(_job):
-        await asyncio.sleep(0)
+        await acquired.wait()
         return video_info
 
     async def stage(_context, _request_context, result):
@@ -360,6 +362,7 @@ async def test_successful_request_updates_one_status_through_delivery_stages(
     update = _Update("https://x.com/example/status/123")
 
     await bot.handle_message(update, _Context())
+    acquired.set()
     request_tasks = list(bot.active_request_tasks.values())
     await asyncio.wait_for(asyncio.gather(*request_tasks), timeout=1)
 

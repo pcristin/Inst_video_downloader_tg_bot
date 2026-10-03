@@ -95,7 +95,9 @@ def test_prewarm_reuses_seeded_session_and_records_failure(tmp_path, monkeypatch
         )(),
     )
 
-    summary = rotate_accounts.prewarm(candidate_file, tmp_path / "stage", seeded)
+    summary = rotate_accounts.prewarm(
+        candidate_file, tmp_path / "stage", seeded, project=tmp_path
+    )
     stage = rotate_accounts._stage_for(
         tmp_path / "stage", rotate_accounts.read_candidates(candidate_file)
     )

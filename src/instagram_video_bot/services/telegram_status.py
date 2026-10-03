@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import Any
 
 from telegram import InlineKeyboardMarkup, Message
 
 from .chaos_text import ChaosText, TextContext
+from ..config.settings import settings
 
 logger = logging.getLogger(__name__)
 _REPLY_MARKUP_UNSET = object()
@@ -56,7 +58,8 @@ async def edit_status_message(
     """Try to edit a transient status message without creating extra chat noise."""
 
     try:
-        await message.edit_text(text, **_markup_kwargs(reply_markup))
+        async with asyncio.timeout(max(0.01, settings.TELEGRAM_STATUS_TIMEOUT_SECONDS)):
+            await message.edit_text(text, **_markup_kwargs(reply_markup))
     except Exception:
         logger.debug("Failed to edit transient status message", exc_info=True)
 

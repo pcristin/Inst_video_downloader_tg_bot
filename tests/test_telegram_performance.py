@@ -43,6 +43,7 @@ def test_format_performance_summary_includes_provider_and_failure_metrics():
                 }
             },
             "instagram": {"fast_failed": 1, "fallback_count": 2},
+            "instagram_auth": {"configured": 3, "available": 1, "cooling_down": 2},
             "failure_classes": ["unknown", "provider_timeout"],
         }
     )
@@ -51,6 +52,7 @@ def test_format_performance_summary_includes_provider_and_failure_metrics():
     assert "Instagram: 1 задач, queue avg 1000мс" in text
     assert "ошибок 1, fallback 2" in text
     assert "Классы ошибок: provider_timeout" in text
+    assert "fast-extractor auth contexts: configured 3, available 1, cooling 2" in text
 
 
 def test_build_admin_performance_summary_adds_duplicate_joins_and_recent_failures():

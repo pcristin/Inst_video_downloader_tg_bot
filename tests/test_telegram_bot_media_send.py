@@ -1244,6 +1244,9 @@ async def test_handle_message_processes_request_in_background(monkeypatch, tmp_p
         "Instagram: отправляю в Telegram.",
     ]
     assert update.message.status_messages[0].deleted is True
+    latency = telegram_bot.state_store.get_performance_summary(77)["latency"]
+    assert latency["delivered"] == 1
+    assert latency["p50_ms"] >= latency["first_media_p50_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -1490,6 +1493,61 @@ async def test_handle_message_ignores_edited_message_links(monkeypatch, tmp_path
         ).fetchone()[0]
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_post_send_metrics_does_not_replay_media(
+    monkeypatch, tmp_path
+):
+    bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    telegram = _FakeBot()
+    ready = asyncio.Event()
+    recording = asyncio.Event()
+    release = asyncio.Event()
+    media = tmp_path / "shared.mp4"
+    media.write_bytes(b"video")
+
+    async def download(self, url, output_dir):
+        await ready.wait()
+        return VideoInfo(
+            file_path=media,
+            title="shared",
+            media_items=[MediaItem(file_path=media, media_type="video")],
+        )
+
+    async def delayed_state(operation, *args, **kwargs):
+        if operation.__name__ == "record_delivery_metrics":
+            recording.set()
+            await release.wait()
+        return operation(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.VideoDownloader.download_video",
+        download,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.telegram_bot.call_state", delayed_state
+    )
+    monkeypatch.setattr(settings, "RESULT_CACHE_ENABLED", False)
+    await bot.handle_message(
+        _FakeUpdate("https://www.instagram.com/reel/race/", user_id=1001),
+        _FakeContext(telegram),
+    )
+    owner = next(iter(bot.active_request_tasks))
+    owner_task = bot.active_request_tasks[owner]
+    await bot.handle_message(
+        _FakeUpdate("https://www.instagram.com/reel/race/", user_id=1002),
+        _FakeContext(telegram),
+    )
+    tasks = list(bot.active_request_tasks.values())
+    ready.set()
+    await asyncio.wait_for(recording.wait(), 1)
+    owner_task.cancel()
+    bot.job_manager.cancel_request(owner)
+    release.set()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    assert len(telegram.video_calls) == 1
+    assert bot.state_store.get_performance_summary(77)["latency"]["delivered"] == 2
 
 
 @pytest.mark.asyncio
@@ -2891,3 +2949,49 @@ async def test_download_failure_records_provider_failure_class(monkeypatch, tmp_
 
     summary = telegram_bot.state_store.get_performance_summary(77, limit=50)
     assert "no_instagram_accounts" in summary["failure_classes"]
+
+
+@pytest.mark.asyncio
+async def test_job_executor_wires_race_account_health_to_owner(monkeypatch, tmp_path):
+    from src.instagram_video_bot.services import instagram_delivery_race as race
+
+    telegram_bot = TelegramBot(state_store=StateStore(tmp_path / "state.db"))
+    fake_bot = _FakeBot()
+    context = _FakeContext(fake_bot)
+    media_file = tmp_path / "race.mp4"
+    media_file.write_bytes(b"video")
+    event = SimpleNamespace(
+        should_alert_owner=True,
+        username="losing-account",
+        reason="auth_challenge",
+        consecutive_failures=2,
+        available_accounts=1,
+        total_accounts=3,
+        low_watermark=2,
+    )
+
+    async def prepare(downloader, *args, on_account_health, **kwargs):
+        await on_account_health(event)
+        downloader.last_account_health_event = None
+        return VideoInfo(
+            file_path=media_file,
+            title="race",
+            media_items=[MediaItem(file_path=media_file, media_type="video")],
+        )
+
+    monkeypatch.setattr(settings, "BOT_OWNER_USER_ID", 1001)
+    monkeypatch.setattr(settings, "RESULT_CACHE_ENABLED", False)
+    monkeypatch.setattr(race, "prepare_instagram_delivery", prepare)
+    await telegram_bot.handle_message(
+        _FakeUpdate("https://www.instagram.com/reel/health-race/"), context
+    )
+    await asyncio.gather(*telegram_bot.active_request_tasks.values())
+    alerts = [
+        call
+        for call in fake_bot.message_calls
+        if "Instagram account pool warning:" in call["text"]
+    ]
+    assert len(alerts) == 1
+    assert alerts[0]["chat_id"] == 1001
+    assert "losing-account" in alerts[0]["text"]
+    assert len(fake_bot.video_calls) == 1

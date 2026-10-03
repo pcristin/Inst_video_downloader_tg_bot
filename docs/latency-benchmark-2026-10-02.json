@@ -1,0 +1,187 @@
+{
+  "date_utc": "2026-10-02",
+  "deployment_status": "Working-tree implementation tested separately; running bot unchanged.",
+  "method": "Recent uncached Instagram reel links from local request history; separate container with current deployment image dependencies and updated source, two-CPU cap; independent state/cache; real Telegram local API uploads and final file-ID sends to configured storage chat only.",
+  "limitations": [
+    "Replay starts at downloader invocation; excludes Telegram polling, queue/admission, status messages, and client rendering.",
+    "Historical totals sum acquisition, storage upload, final user-send attempt and approximately 10ms queue; they are not controlled before/after samples.",
+    "Network conditions, CPU contention and Telegram-side content caching can affect timings.",
+    "No live photo/carousel measurements were made; album concurrency is covered by regression tests.",
+    "Identical resolution and CRF settings across encoder presets do not guarantee identical visual quality or file size.",
+    "Correction from account follow-up: benchmark copied saved sessions under BASE_DIR/sessions, but AccountManager resolves sessions relative to /app. The failed account-fallback replay therefore did not reproduce production saved-session access and must not be used to judge account health. Successful public-path timings are unaffected."
+  ],
+  "historical_total_s": {
+    "Dd6Y0dDtsbx": 73.442,
+    "Dd9hqP3swTb": 51.666,
+    "Dd0w3ylj8md": 71.665
+  },
+  "initial_patch_medium_preset": [
+    {
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "historical_acquisition_s": 29.491,
+      "acquisition_s": 27.4,
+      "media_count": 1,
+      "media_bytes": 3850445,
+      "metrics": {
+        "provider": "instagram",
+        "retry_count": 0,
+        "failure_class": "fast_path_failed",
+        "instagram_fast_status": "failed",
+        "instagram_fast_duration_ms": 4133,
+        "instagram_fast_budget_exhausted": false,
+        "instagram_fallback_attempted": true,
+        "instagram_account_attempts": 0,
+        "instagram_account_retries": 0,
+        "instagram_auth_failures": 0,
+        "instagram_success_path": "yt_dlp_public",
+        "instagram_fallback_path": "yt_dlp_public",
+        "provider_extraction_ms": 2745,
+        "provider_download_ms": 1647,
+        "media_normalization_ms": 17052,
+        "instagram_metadata_reused": true
+      },
+      "storage_upload_s": 1.819,
+      "final_send_s": 0.131,
+      "first_media_s": 29.349,
+      "all_media_s": 29.349,
+      "status": "delivered_to_storage_chat"
+    },
+    {
+      "url": "https://www.instagram.com/reel/Dd9hqP3swTb/",
+      "historical_acquisition_s": 27.469,
+      "status": "failed",
+      "error_class": "InstagramProviderTimeoutError",
+      "elapsed_s": 300.002
+    },
+    {
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "historical_acquisition_s": 60.61,
+      "acquisition_s": 91.342,
+      "media_count": 1,
+      "media_bytes": 9409162,
+      "metrics": {
+        "provider": "instagram",
+        "retry_count": 0,
+        "failure_class": "fast_path_failed",
+        "instagram_fast_status": "failed",
+        "instagram_fast_duration_ms": 5753,
+        "instagram_fast_budget_exhausted": false,
+        "instagram_fallback_attempted": true,
+        "instagram_account_attempts": 0,
+        "instagram_account_retries": 0,
+        "instagram_auth_failures": 0,
+        "instagram_success_path": "yt_dlp_public",
+        "instagram_fallback_path": "yt_dlp_public",
+        "provider_extraction_ms": 3335,
+        "provider_download_ms": 2240,
+        "media_normalization_ms": 76421,
+        "instagram_metadata_reused": true
+      },
+      "storage_upload_s": 1.986,
+      "final_send_s": 0.149,
+      "first_media_s": 93.477,
+      "all_media_s": 93.477,
+      "status": "delivered_to_storage_chat"
+    }
+  ],
+  "final_patch_veryfast_preset": [
+    {
+      "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+      "historical_acquisition_s": 29.491,
+      "acquisition_s": 17.834,
+      "media_count": 1,
+      "media_bytes": 3479159,
+      "metrics": {
+        "provider": "instagram",
+        "retry_count": 0,
+        "failure_class": "fast_path_failed",
+        "instagram_fast_status": "failed",
+        "instagram_fast_duration_ms": 4104,
+        "instagram_fast_budget_exhausted": false,
+        "instagram_fallback_attempted": true,
+        "instagram_account_attempts": 0,
+        "instagram_account_retries": 0,
+        "instagram_auth_failures": 0,
+        "instagram_success_path": "yt_dlp_public",
+        "instagram_fallback_path": "yt_dlp_public",
+        "provider_extraction_ms": 2715,
+        "provider_download_ms": 1503,
+        "media_normalization_ms": 7869,
+        "instagram_metadata_reused": true
+      },
+      "storage_upload_s": 1.42,
+      "final_send_s": 0.135,
+      "first_media_s": 19.389,
+      "all_media_s": 19.389,
+      "status": "delivered_to_storage_chat"
+    },
+    {
+      "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+      "historical_acquisition_s": 60.61,
+      "acquisition_s": 51.26,
+      "media_count": 1,
+      "media_bytes": 8452579,
+      "metrics": {
+        "provider": "instagram",
+        "retry_count": 0,
+        "failure_class": "fast_path_failed",
+        "instagram_fast_status": "failed",
+        "instagram_fast_duration_ms": 3874,
+        "instagram_fast_budget_exhausted": false,
+        "instagram_fallback_attempted": true,
+        "instagram_account_attempts": 0,
+        "instagram_account_retries": 0,
+        "instagram_auth_failures": 0,
+        "instagram_success_path": "yt_dlp_public",
+        "instagram_fallback_path": "yt_dlp_public",
+        "provider_extraction_ms": 2792,
+        "provider_download_ms": 1875,
+        "media_normalization_ms": 40911,
+        "instagram_metadata_reused": true
+      },
+      "storage_upload_s": 1.91,
+      "final_send_s": 0.132,
+      "first_media_s": 53.302,
+      "all_media_s": 53.302,
+      "status": "delivered_to_storage_chat"
+    }
+  ],
+  "failed_link_followup": {
+    "shortcode": "Dd9hqP3swTb",
+    "public_only_probe_s": 3.393,
+    "returned_media": false,
+    "initial_full_acquisition_timeout_s": 300.002
+  },
+  "auth_health": {
+    "configured_contexts": 0,
+    "available_contexts": 0,
+    "disabled_reason": "empty"
+  },
+  "follow_up": "Use existing saved-session account pool:34 eligible by stored state,6prewarm_failed. Fast cookie/bearer pool is separate and empty after rotation. Validate a small eligible subset before populating fast auth, preserving account/proxy/ramp policy. Correct benchmark session mount before testing account fallback. Review instagrapi3.0.14\u21923.0.16 CAA verification and highlight-owner fixes; do not claim latency benefit from the version alone.",
+  "direct_url_experiment": {
+    "url": "https://www.instagram.com/reel/Dd6Y0dDtsbx/",
+    "status": "delivered_to_storage_chat",
+    "width": 720,
+    "height": 1280,
+    "direct_url_fetch_and_upload_s": 1.587,
+    "metadata_probe_and_delivery_s": 7.305,
+    "telegram_file_bytes": 1231005,
+    "final_file_id_send_s": 0.144,
+    "limitations": [
+      "Selected native H264/AAC720x1280 rather than highest-resolution VP91080x1920; not an equal-quality comparison.",
+      "Probe directly queried public metadata, bypassing the failing fast-extractor attempt.",
+      "No bot-side full media file was downloaded; ffprobe fetched remote headers/stream metadata and the local Telegram API fetched the media.",
+      "Successful sample does not establish support for all Instagram CDN links; URL expiry, MIME type, credentials/headers and URL-fetch size limits require fallback.",
+      "Experimental only: direct-URL path is not enabled in product code."
+    ]
+  },
+  "account_pool_followup": {
+    "roster_count": 40,
+    "not_marked_banned": 34,
+    "saved_sessions": 34,
+    "disabled_prewarm_failed": 6,
+    "fast_auth_contexts": 0,
+    "recent_production_authenticated_fallback_successes": 1,
+    "scope": "Read-only aggregate check; session existence and eligibility are not fresh login verification."
+  }
+}

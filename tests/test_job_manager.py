@@ -612,3 +612,143 @@ async def test_chat_waiting_job_does_not_hold_provider_capacity(monkeypatch, tmp
 
     release.set()
     await asyncio.gather(first.job.task, second.job.task, third.job.task)
+
+
+def _submit_queue_test_job(manager, execute, *, user_id=1, url="test", duplicate=False):
+    return manager.submit(
+        chat_id=77,
+        user_id=user_id,
+        user_label=str(user_id),
+        provider="twitter",
+        provider_label="Twitter/X",
+        original_url=url,
+        normalized_url=url,
+        execute=execute,
+        duplicate_suppression=duplicate,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_delivery_waiter_does_not_cancel_other_waiters(tmp_path):
+    manager = JobManager(StateStore(tmp_path / "state.db"))
+    submission = _submit_queue_test_job(manager, lambda: asyncio.sleep(0))
+    job = submission.job
+    first = asyncio.create_task(manager.wait_for_delivery(job))
+    second = asyncio.create_task(manager.wait_for_delivery(job))
+    await asyncio.sleep(0)
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    try:
+        manager.mark_delivery_completed(job)
+        assert await second is True
+    finally:
+        await job.task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inline", [False, True])
+async def test_user_waiter_does_not_reserve_chat_capacity(
+    tmp_path, monkeypatch, inline
+):
+    store = StateStore(tmp_path / "state.db")
+    store.update_group_settings(77, chat_max_concurrent_jobs=2, user_max_active_jobs=1)
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        3,
+    )
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.TWITTER_MAX_CONCURRENT_JOBS",
+        3,
+    )
+    manager = JobManager(store)
+    started = []
+    release = asyncio.Event()
+
+    async def execute(user_id):
+        started.append(user_id)
+        await release.wait()
+
+    async def run_inline(user_id):
+        async with manager.bounded_execution(
+            chat_id=77, user_id=user_id, provider="twitter", provider_label="Twitter/X"
+        ):
+            await execute(user_id)
+
+    tasks = []
+    for index, user_id in enumerate([1, 1, 2]):
+        if inline:
+            tasks.append(asyncio.create_task(run_inline(user_id)))
+        else:
+
+            async def run(job):
+                await execute(job.submitter_user_id)
+
+            tasks.append(
+                _submit_queue_test_job(
+                    manager, run, user_id=user_id, url=str(index)
+                ).job.task
+            )
+        await asyncio.sleep(0)
+    try:
+        await _wait_for_started(started, 2)
+        assert started == [1, 2]
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_older", [False, True])
+async def test_older_duplicate_cleanup_preserves_newer_active_job(
+    tmp_path, cancel_older
+):
+    manager = JobManager(StateStore(tmp_path / "state.db"))
+    releases = [asyncio.Event(), asyncio.Event()]
+
+    async def older_execute():
+        await releases[0].wait()
+
+    async def newer_execute():
+        await releases[1].wait()
+
+    older = _submit_queue_test_job(manager, older_execute)
+    newer = _submit_queue_test_job(manager, newer_execute, user_id=2)
+    await asyncio.sleep(0)
+    if cancel_older:
+        manager.cancel_request(older.request_id)
+    else:
+        releases[0].set()
+    await asyncio.gather(older.job.task, return_exceptions=True)
+    joined = _submit_queue_test_job(manager, newer_execute, user_id=3, duplicate=True)
+    try:
+        assert joined.is_new_job is False
+        assert joined.job is newer.job
+    finally:
+        releases[1].set()
+        await asyncio.gather(newer.job.task, joined.job.task)
+
+
+@pytest.mark.asyncio
+async def test_global_capacity_is_shared_between_managers(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "src.instagram_video_bot.services.job_manager.settings.GLOBAL_MAX_CONCURRENT_JOBS",
+        1,
+    )
+    managers = [JobManager(StateStore(tmp_path / f"state-{i}.db")) for i in range(2)]
+    release = asyncio.Event()
+    started = []
+
+    async def execute(job):
+        started.append(job.job_id)
+        await release.wait()
+
+    first = _submit_queue_test_job(managers[0], execute)
+    await _wait_for_start_count(started, 1)
+    second = _submit_queue_test_job(managers[1], execute)
+    await asyncio.sleep(0)
+    try:
+        assert started == [first.job.job_id]
+    finally:
+        release.set()
+        await asyncio.gather(first.job.task, second.job.task)
+    assert started == [first.job.job_id, second.job.job_id]

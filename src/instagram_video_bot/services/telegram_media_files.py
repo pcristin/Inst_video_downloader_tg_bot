@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
+from ..config.settings import settings
 from .download_models import MediaItem, VideoDownloadError
 
 logger = logging.getLogger(__name__)
@@ -94,5 +95,37 @@ def cleanup_large_staged_files(
             item.file_path.unlink()
             removed.append(item.file_path)
         except OSError as exc:
-            logger.warning("Failed to clean up staged media %s: %s", item.file_path, exc)
+            logger.warning(
+                "Failed to clean up staged media %s: %s", item.file_path, exc
+            )
     return removed
+
+
+def cleanup_media_files(files: list[Path]) -> None:
+    """Unlink consumed media and prune only empty generated staging directories."""
+    root = settings.TEMP_DIR.resolve()
+    for file_path in files:
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning("Failed to clean up media file %s: %s", file_path, error)
+            continue
+        parent = file_path.parent.resolve()
+        if not parent.is_relative_to(root):
+            continue
+        while parent != root:
+            if parent.name.startswith(
+                (
+                    "public-",
+                    "auth-first-",
+                    "race-direct-",
+                    "race-local-",
+                    "telegram-restage-",
+                )
+            ):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    # Another album member or another owner's content remains.
+                    pass
+            parent = parent.parent

@@ -1,6 +1,9 @@
 """Instagram client using instagrapi."""
 import json
 import logging
+import os
+import shutil
+import tempfile
 import subprocess
 import sys
 import time
@@ -45,6 +48,8 @@ class InstagramDownloadResult:
     ]
     metadata: dict = field(default_factory=dict)
     metadata_reused: bool = False
+    provider_extraction_ms: int | None = None
+    provider_download_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -200,12 +205,18 @@ class InstagramClient:
     def download_public_ytdlp_media(
         url: str, output_dir: Path
     ) -> Optional[InstagramDownloadResult]:
-        """Recover public media without account cookies or proxy settings."""
+        """Recover all public media atomically without account credentials."""
+        staging_dir: Path | None = None
+        succeeded = False
         try:
             from yt_dlp import YoutubeDL
 
+            extraction_started = time.monotonic()
             with YoutubeDL(
                 {
+                    "socket_timeout": settings.IG_PUBLIC_METADATA_TIMEOUT_SECONDS,
+                    "retries": 0,
+                    "extractor_retries": 0,
                     "quiet": True,
                     "skip_download": True,
                     "ignoreerrors": True,
@@ -215,6 +226,11 @@ class InstagramClient:
             ) as ydl:
                 info = ydl.extract_info(url, download=False)
 
+            extraction_ms = int((time.monotonic() - extraction_started) * 1000)
+            phase_path = os.environ.get("IG_WORKER_PHASE_PATH")
+            if phase_path:
+                Path(phase_path).write_text("transfer", encoding="utf-8")
+            download_started = time.monotonic()
             if not isinstance(info, dict):
                 return None
 
@@ -222,39 +238,40 @@ class InstagramClient:
             if entries is None:
                 entries = [info]
 
-            output_dir.mkdir(parents=True, exist_ok=True)
-            file_paths: list[Path] = []
-            for index, entry in enumerate(entries, start=1):
+            # Validate every expected item before transfer; a missing source must
+            # trigger the authenticated fallback, never a successful partial album.
+            sources: list[PublicYtdlpSource] = []
+            for entry in entries:
                 if not isinstance(entry, dict):
-                    continue
-
+                    return None
                 source = InstagramClient._public_ytdlp_source(entry)
-                if not source:
-                    continue
+                if source is None:
+                    return None
+                sources.append(source)
+            if not sources:
+                return None
 
+            output_dir.mkdir(parents=True, exist_ok=True)
+            staging_dir = Path(tempfile.mkdtemp(prefix="public-", dir=output_dir))
+            file_paths: list[Path] = []
+            for index, source in enumerate(sources, start=1):
                 output_extension = "mp4" if source.audio_url else source.extension
-                file_path = output_dir / f"public_{index}.{output_extension}"
-                try:
-                    if InstagramClient._download_public_source(source, file_path):
-                        file_paths.append(file_path)
-                except Exception as error:
-                    file_path.unlink(missing_ok=True)
-                    logger.info(
-                        "Public yt-dlp media fetch or merge failed",
-                        extra={
-                            "entry_index": index,
-                            "error_class": error.__class__.__name__,
-                        },
-                    )
+                file_path = staging_dir / f"public_{index}.{output_extension}"
+                if not InstagramClient._download_public_source(source, file_path):
+                    return None
+                file_paths.append(file_path)
 
             if not file_paths:
                 return None
 
+            succeeded = True
             return InstagramDownloadResult(
                 file_paths=file_paths,
                 fallback_path="yt_dlp_public",
                 metadata={"title": info.get("title") or ""},
                 metadata_reused=True,
+                provider_extraction_ms=extraction_ms,
+                provider_download_ms=int((time.monotonic() - download_started) * 1000),
             )
         except Exception as error:
             logger.info(
@@ -262,6 +279,9 @@ class InstagramClient:
                 extra={"error_class": error.__class__.__name__},
             )
             return None
+        finally:
+            if staging_dir is not None and not succeeded:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _download_url_to_path(url: str, path: Path) -> None:
@@ -271,6 +291,8 @@ class InstagramClient:
             stream=True,
         )
         max_bytes = settings.TELEGRAM_MAX_UPLOAD_BYTES
+        if settings.IG_PUBLIC_MAX_SOURCE_BYTES > 0:
+            max_bytes = min(max_bytes, settings.IG_PUBLIC_MAX_SOURCE_BYTES)
         try:
             response.raise_for_status()
             content_length = response.headers.get("Content-Length")
@@ -420,6 +442,27 @@ class InstagramClient:
         return InstagramClient.download_public_ytdlp_media(url, output_dir)
 
     @staticmethod
+    def _is_public_aac_format(media_format: dict) -> bool:
+        codec = str(media_format.get("acodec") or "").lower()
+        return codec == "aac" or codec.startswith("mp4a.")
+
+    @staticmethod
+    def _public_compatibility_rank(media_format: dict, has_aac_track: bool) -> int:
+        """Prefer remuxable H.264/AAC only after resolution and FPS match."""
+        if not settings.IG_PUBLIC_PREFER_COMPATIBLE_FORMATS:
+            return 0
+        codec = str(media_format.get("vcodec") or "").lower()
+        if not (codec == "h264" or codec.startswith(("avc1", "avc3"))):
+            return 0
+        if media_format.get("ext") != "mp4":
+            return 0
+        if InstagramClient._is_public_aac_format(media_format):
+            return 2
+        if media_format.get("acodec") == "none" and has_aac_track:
+            return 1
+        return 0
+
+    @staticmethod
     def _public_ytdlp_source(entry: dict) -> Optional[PublicYtdlpSource]:
         """Select the best visual source and pair separate audio when required."""
         formats = [
@@ -433,28 +476,61 @@ class InstagramClient:
             if media_format.get("vcodec") != "none"
         ]
         if video_formats:
+            audio_formats = [
+                media_format
+                for media_format in formats
+                if media_format.get("vcodec") == "none"
+                and media_format.get("acodec") not in (None, "none")
+            ]
+            has_aac_track = any(
+                InstagramClient._is_public_aac_format(f) for f in audio_formats
+            )
+            max_height = max(0, settings.IG_PUBLIC_MAX_HEIGHT)
+            max_bytes = max(0, settings.IG_PUBLIC_MAX_SOURCE_BYTES)
+            video_formats = [
+                f
+                for f in video_formats
+                if (not max_height or (f.get("height") or 0) <= max_height)
+                and (
+                    not max_bytes
+                    or not (f.get("filesize") or f.get("filesize_approx"))
+                    or (f.get("filesize") or f.get("filesize_approx")) <= max_bytes
+                )
+            ]
+            if not video_formats:
+                return None
+            prefer_smaller = settings.IG_PUBLIC_PREFER_SMALLER_FORMATS
+            size_direction = -1 if prefer_smaller else 1
+            unknown_size = float("inf") if prefer_smaller else 0
             selected = max(
                 video_formats,
                 key=lambda media_format: (
                     media_format.get("height") or 0,
                     media_format.get("width") or 0,
-                    media_format.get("filesize") or 0,
-                    media_format.get("tbr") or 0,
+                    media_format.get("fps") or 0,
+                    InstagramClient._public_compatibility_rank(
+                        media_format, has_aac_track
+                    ),
+                    media_format.get("acodec") not in (None, "none")
+                    and media_format.get("ext") == "mp4",
+                    size_direction
+                    * (
+                        media_format.get("filesize")
+                        or media_format.get("filesize_approx")
+                        or unknown_size
+                    ),
+                    size_direction * (media_format.get("tbr") or unknown_size),
                 ),
             )
             audio_url = None
             audio_extension = None
             if selected.get("acodec") == "none":
-                audio_formats = [
-                    media_format
-                    for media_format in formats
-                    if media_format.get("vcodec") == "none"
-                    and media_format.get("acodec") not in (None, "none")
-                ]
                 if audio_formats:
                     selected_audio = max(
                         audio_formats,
                         key=lambda media_format: (
+                            settings.IG_PUBLIC_PREFER_COMPATIBLE_FORMATS
+                            and InstagramClient._is_public_aac_format(media_format),
                             media_format.get("abr") or media_format.get("tbr") or 0,
                             media_format.get("filesize") or 0,
                         ),
@@ -833,14 +909,14 @@ class InstagramClient:
         try:
             endpoint = f"media/{media_pk}/info/"
             data = self.client.private_request(endpoint)
-            
+
             if isinstance(data, dict) and data.get('message') == 'login_required':
                 logger.warning("Session expired during raw media fetch, attempting re-login...")
                 if self._relogin():
                     data = self.client.private_request(endpoint)
                 else:
                     raise InstagramAuthError("login_required")
-            
+
             if isinstance(data, dict) and 'items' in data:
                 items = data.get('items', [])
                 if items:
@@ -958,89 +1034,6 @@ class InstagramClient:
         if thumbnail_url:
             return str(thumbnail_url)
         return None
-    
-    def _get_video_url_raw(self, media_pk: int) -> Optional[str]:
-        """Get video URL from raw API data, bypassing Pydantic validation."""
-        try:
-            # Make direct API call to get raw media info using proper endpoint
-            endpoint = f"media/{media_pk}/info/"
-            data = self.client.private_request(endpoint)
-            
-            # Check if we got a login_required error
-            if isinstance(data, dict) and data.get('message') == 'login_required':
-                logger.warning("Session expired during raw video URL extraction, attempting re-login...")
-                if self._relogin():
-                    # Retry after successful re-login
-                    data = self.client.private_request(endpoint)
-                else:
-                    logger.warning("Re-login failed, cannot get raw video URL")
-                    return None
-            
-            # Debug: log the keys we get back
-            logger.debug(f"Raw API response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
-            
-            if isinstance(data, dict) and 'items' in data:
-                # Navigate through the response to find video URL
-                items = data.get('items', [])
-                if items:
-                    item = items[0]
-                    logger.debug(f"Item keys: {list(item.keys())}")
-                    
-                    # Try different video URL fields
-                    video_versions = item.get('video_versions', [])
-                    if video_versions:
-                        # Get the highest quality version (usually first)
-                        video_url = video_versions[0].get('url')
-                        logger.info(f"Found video URL in video_versions: {video_url[:100]}...")
-                        return video_url
-                    
-                    # For clips/reels, try clips metadata
-                    clips_metadata = item.get('clips_metadata', {})
-                    if clips_metadata:
-                        logger.debug(f"clips_metadata keys: {list(clips_metadata.keys())}")
-                        clips_video_versions = clips_metadata.get('video_versions', [])
-                        if clips_video_versions:
-                            video_url = clips_video_versions[0].get('url')
-                            logger.info(f"Found video URL in clips_metadata: {video_url[:100]}...")
-                            return video_url
-                    
-                    # Fallback: try other video URL fields
-                    if item.get('video_url'):
-                        video_url = item.get('video_url')
-                        logger.info(f"Found video URL in video_url field: {video_url[:100]}...")
-                        return video_url
-                        
-                    # Debug: log all available keys in the item
-                    logger.warning(f"Could not find video URL. Available item keys: {list(item.keys())}")
-                    
-                    # Additional debug: check if there are video-related fields
-                    video_keys = [k for k in item.keys() if 'video' in k.lower()]
-                    logger.debug(f"Video-related keys found: {video_keys}")
-                    
-                else:
-                    logger.warning("No items found in API response")
-            else:
-                logger.warning(f"Unexpected API response format: {type(data)}")
-                if isinstance(data, dict):
-                    logger.debug(f"Response keys: {list(data.keys())}")
-                
-            return None
-                
-        except Exception as e:
-            error_str = str(e).lower()
-            if 'login_required' in error_str or '403' in error_str:
-                logger.warning("Session expired in raw URL extraction, attempting re-login...")
-                if self._relogin():
-                    # Retry the whole method after re-login
-                    try:
-                        return self._get_video_url_raw(media_pk)
-                    except Exception as retry_error:
-                        logger.warning(f"Raw URL extraction still failed after re-login: {retry_error}")
-                        return None
-            
-            logger.warning(f"Failed to get raw video URL: {e}")
-            logger.debug(f"Exception details: {e}", exc_info=True)
-            return None
 
     def get_media_info(self, url: str) -> Optional[dict]:
         """Get media information for video/reel content."""
@@ -1052,7 +1045,7 @@ class InstagramClient:
                 'user': 'unknown',
                 'pk': media_pk
             }
-            
+
             # Try different methods in order of preference
             # 1. Try the standard media_info first
             try:
@@ -1080,9 +1073,9 @@ class InstagramClient:
                             pass  # Continue to fallbacks
                     else:
                         raise InstagramAuthError(str(validation_error)) from validation_error
-                    
+
                 logger.warning(f"Standard media_info failed (likely Pydantic validation): {validation_error}")
-            
+
             # 2. Try mobile API directly
             try:
                 media_info = self.client.media_info_v1(media_pk)
@@ -1096,7 +1089,7 @@ class InstagramClient:
                 if self._is_auth_error(v1_error):
                     raise InstagramAuthError(str(v1_error)) from v1_error
                 logger.warning(f"Mobile API media_info failed: {v1_error}")
-            
+
             # 3. Last resort: Use oEmbed for basic info (with validation fix)
             try:
                 oembed_data = self._get_oembed_safe(url)
@@ -1118,7 +1111,7 @@ class InstagramClient:
         except Exception as e:
             logger.error(f"Failed to get media info: {e}")
             return None
-    
+
     def _relogin(self) -> bool:
         """Attempt to re-login when session expires."""
         try:
@@ -1138,25 +1131,25 @@ class InstagramClient:
         except Exception as e:
             logger.error(f"Re-login failed: {e}")
             return False
-    
+
     def _get_oembed_safe(self, url: str) -> Optional[dict]:
         """Get oEmbed data with safe handling of missing fields."""
         try:
             # Make direct API call to avoid Pydantic validation
             endpoint = f"oembed/?url={url}"
             data = self.client.private_request(endpoint)
-            
+
             if isinstance(data, dict):
                 # Return raw dictionary, letting caller handle missing fields
                 return data
             else:
                 logger.warning(f"Unexpected oEmbed response format: {type(data)}")
                 return None
-                
+
         except Exception as e:
             logger.warning(f"Safe oEmbed request failed: {e}")
             return None
-    
+
     def _download_without_metadata(self, media_pk: int, output_dir: Path) -> Optional[Path]:
         """Try to download by constructing direct video URLs or using external tools."""
         try:
@@ -1167,7 +1160,7 @@ class InstagramClient:
                 f"https://scontent-ams4-1.cdninstagram.com/v/t50.{media_pk}.mp4",
                 f"https://instagram.fams4-1.fna.fbcdn.net/v/t50.{media_pk}.mp4",
             ]
-            
+
             for i, test_url in enumerate(possible_urls):
                 try:
                     logger.info(f"Trying constructed URL {i+1}/{len(possible_urls)}: {test_url[:80]}...")
@@ -1176,30 +1169,30 @@ class InstagramClient:
                         return video_path
                 except Exception:
                     continue
-            
+
             # If constructed URLs don't work, try yt-dlp as external fallback
             logger.info("Trying external download with yt-dlp...")
             video_path = self._download_with_ytdlp(media_pk, output_dir)
             if video_path:
                 return video_path
-                    
+
             logger.warning("No download methods worked")
             return None
-            
+
         except Exception as e:
             logger.warning(f"Download without metadata failed: {e}")
             return None
-    
+
     def _download_with_ytdlp_first(self, url: str, media_pk: int, output_dir: Path) -> Optional[Path]:
         """Try downloading with yt-dlp using the original URL."""
         try:
             import subprocess
-            
+
             logger.info(f"Trying yt-dlp download from original URL: {url}")
-            
+
             # Use yt-dlp to download directly
             output_file = output_dir / f"video_{media_pk}.mp4"
-            
+
             cmd = [
                 sys.executable,
                 "-m",
@@ -1212,16 +1205,16 @@ class InstagramClient:
                 "--user-agent", self.client.user_agent,
                 url
             ]
-            
+
             # Add proxy if available
             if self.proxy:
                 cmd.extend(["--proxy", self.proxy])
-            
+
             # Add cookies if available
             if hasattr(self.client, 'cookie_jar') and self.client.cookie_jar:
                 cookie_string = "; ".join([f"{k}={v}" for k, v in self.client.cookie_jar.items()])
                 cmd.extend(["--add-header", f"Cookie: {cookie_string}"])
-            
+
             # Run yt-dlp
             result = subprocess.run(
                 cmd,
@@ -1229,7 +1222,7 @@ class InstagramClient:
                 text=True,
                 timeout=settings.IG_FALLBACK_YTDLP_TIMEOUT_SECONDS,
             )
-            
+
             if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 1000:
                 logger.info(f"yt-dlp successfully downloaded video: {output_file}")
                 return output_file
@@ -1243,7 +1236,7 @@ class InstagramClient:
                 if output_file.exists():
                     output_file.unlink()
                 return None
-                
+
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp timed out")
             return None
@@ -1253,23 +1246,23 @@ class InstagramClient:
         except Exception as e:
             logger.warning(f"yt-dlp download failed: {e}")
             return None
-    
+
     def _download_with_ytdlp(self, media_pk: int, output_dir: Path) -> Optional[Path]:
         """Try downloading with yt-dlp as a final fallback."""
         try:
             import subprocess
             import json
-            
+
             # Construct Instagram URL from media PK
             # We need to reverse-engineer the shortcode from PK
             # This is a simplified approach - in reality, the conversion is more complex
             instagram_url = f"https://www.instagram.com/p/{self._pk_to_shortcode(media_pk)}/"
-            
+
             logger.info(f"Trying yt-dlp download from: {instagram_url}")
-            
+
             # Use yt-dlp to download
             output_template = str(output_dir / f"video_{media_pk}.%(ext)s")
-            
+
             cmd = [
                 sys.executable,
                 "-m",
@@ -1279,10 +1272,10 @@ class InstagramClient:
                 "--print", "url",
                 instagram_url
             ]
-            
+
             # First, try to get the direct URL
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            
+
             if result.returncode == 0 and result.stdout.strip():
                 video_url = result.stdout.strip()
                 # Ensure video_url is a string and safely slice it
@@ -1299,7 +1292,7 @@ class InstagramClient:
                     extra={"return_code": result.returncode},
                 )
                 return None
-                
+
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp timed out")
             return None
@@ -1312,43 +1305,43 @@ class InstagramClient:
         except Exception as e:
             logger.warning(f"yt-dlp download failed: {e}")
             return None
-    
+
     def _pk_to_shortcode(self, media_pk: int) -> str:
         """Convert media PK to Instagram shortcode (simplified version)."""
         # This is a simplified base64-like conversion
         # The actual Instagram algorithm is more complex
         import string
-        
+
         # Ensure media_pk is an integer
         try:
             media_pk = int(media_pk)
         except (ValueError, TypeError):
             logger.warning(f"Invalid media_pk type: {type(media_pk)}, value: {media_pk}")
             return 'A'
-        
+
         if media_pk <= 0:
             return 'A'
-        
+
         alphabet = string.ascii_letters + string.digits + '-_'
         shortcode = ''
-        
+
         while media_pk > 0:
             remainder = media_pk % 64
             shortcode = alphabet[remainder] + shortcode
             media_pk = media_pk // 64
-            
+
         return shortcode or 'A'
-    
+
     def _download_video_manually(self, video_url: str, media_pk: int, output_dir: Path) -> Optional[Path]:
         """Download video manually using requests, bypassing instagrapi."""
         try:
             import requests
-            
+
             output_dir.mkdir(parents=True, exist_ok=True)
             output_file = output_dir / f"video_{media_pk}.mp4"
-            
+
             logger.info(f"Manually downloading video from: {video_url[:100]}...")
-            
+
             # Use the same headers and session as the Instagram client
             headers = {
                 'User-Agent': self.client.user_agent,
@@ -1362,28 +1355,28 @@ class InstagramClient:
                 'Sec-Fetch-Mode': 'no-cors',
                 'Sec-Fetch-Site': 'same-origin',
             }
-            
+
             # Add cookies from Instagram session
             if hasattr(self.client, 'cookie_jar'):
                 headers['Cookie'] = '; '.join([f'{k}={v}' for k, v in self.client.cookie_jar.items()])
-            
+
             # Use requests with proper proxy and headers
             response = requests.get(video_url, headers=headers, stream=True, timeout=30, 
                                   proxies={'http': self.proxy, 'https': self.proxy} if self.proxy else None)
-            
+
             response.raise_for_status()
-            
+
             # Check if we got video content
             content_type = response.headers.get('content-type', '')
             if not content_type.startswith('video/'):
                 logger.warning(f"Unexpected content type: {content_type}")
-            
+
             # Download the video
             with open(output_file, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            
+
             # Verify the download
             if output_file.exists() and output_file.stat().st_size > 1000:  # At least 1KB
                 logger.info(f"Successfully downloaded video: {output_file}")
@@ -1393,7 +1386,7 @@ class InstagramClient:
                 if output_file.exists():
                     output_file.unlink()
                 return None
-                
+
         except Exception as e:
             logger.warning(f"Manual video download failed: {e}")
             if 'output_file' in locals() and output_file.exists():

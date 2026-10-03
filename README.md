@@ -415,6 +415,130 @@ make test-health
 3. Search [existing issues](https://github.com/yourusername/repo/issues)
 4. Create a [new issue](https://github.com/yourusername/repo/issues/new) with logs
 
+## Delivery latency
+
+Owner performance output reports receipt-to-first-media and receipt-to-all-media
+p50/p95, delivery outcomes, storage-upload time/throughput, and provider phase
+timings. Receipt starts when the message handler runs; it does not include
+Telegram polling delay or client rendering. Acquisition `completed` is still a
+separate job state, not confirmation of delivery. Failed/unknown/cancelled
+requests are counted separately from successful latency percentiles. Historical
+rows without receipt measurements are not backfilled with guessed durations.
+
+Public Instagram posts and reels first try one immediately eligible account
+with an existing saved session. This attempt has a 20-second acquisition budget,
+including provider-slot waits, throttling and session validation, and never
+starts a fresh login. Account leases, assigned proxies and ramp/cooldown rules
+still apply. If the attempt fails or no eligible saved session is available,
+the fast extractor and public yt-dlp remain available; the request does not then
+cycle through the account roster again. Stories and single-account deployments
+without an account roster retain their existing flows. A roster containing one
+account still uses auth-first ordering.
+This policy requires isolated workers; legacy thread mode retains the previous
+provider order. Set `INSTAGRAM_AUTH_FIRST_ENABLED=false` to restore the previous
+order, or tune `INSTAGRAM_AUTH_FIRST_TIMEOUT_SECONDS` to change the attempt budget.
+
+Authenticated sources may be lower resolution than the highest-resolution
+public source. In the live canaries, ready-to-send 720×1280 H.264/AAC avoided
+transcoding the public 1080×1920 VP9 source. This default favors delivery latency;
+it does not promise the maximum available source resolution. The authenticated
+account roster and the fast extractor's cookie/bearer pool are separate.
+
+Public Instagram metadata has a 15-second deadline in isolated-worker mode.
+After metadata resolves, the transfer receives its own 180-second budget; the
+overall acquisition deadline is 300 seconds, including fallback and account
+waits. Normalization has a separate 300-second budget per video, shared by its
+probe, conversion and validation commands. Transcoding defaults to the `veryfast`
+x264 preset while retaining resolution and CRF 20; encoded size and compression
+quality can vary. Set `INSTAGRAM_NORMALIZATION_PRESET=medium` for the prior preset.
+Legacy thread mode cannot forcibly stop a running network call; leave isolated
+workers enabled for hard deadlines.
+
+The encoder preset changes encoding effort, not the selected codec/profile:
+transcodes still use MP4, H.264 High, 8-bit `yuv420p`, AAC audio and `+faststart`.
+[Telegram documents MPEG4 video support](https://core.telegram.org/bots/api#sendvideo);
+[FFmpeg documents presets and profile restrictions separately](https://ffmpeg.org/ffmpeg-codecs.html#libx264_002c-libx264rgb).
+Real benchmark outputs passed full audio/video decoding and Telegram video sends.
+These checks do not replace playback testing on physical iOS/Android clients.
+
+The fast extractor opens a circuit after three consecutive failures and allows
+one recovery probe after five minutes. Replacing the configured auth file
+refreshes the pool and resets the circuit; owner status shows only configured,
+available and cooling-down context counts. This cannot repair expired credentials
+or prove that a replacement account is healthy. Use the existing account canary
+workflow before changing production credentials.
+
+Album storage uploads run with a shared concurrency limit of two, retain input
+order and successful file IDs, and coordinate Telegram flood backoff. Final user
+sends retain the no-duplicate policy. Public format selection preserves maximum
+resolution and prefers H.264/AAC sources, then smaller muxed sources at equal
+resolution/frame rate. `IG_PUBLIC_PREFER_COMPATIBLE_FORMATS=false` disables the
+codec preference. Compression quality can differ. Set
+`IG_PUBLIC_PREFER_SMALLER_FORMATS=false` to
+restore larger/higher-bitrate preference at equal resolution/frame rate.
+Optional `IG_PUBLIC_MAX_HEIGHT` and `IG_PUBLIC_MAX_SOURCE_BYTES` caps trade
+quality/availability for fewer bytes.
+An incomplete public carousel triggers fallback instead of partial success.
+
+Hot delivery metrics and cache operations run off the event loop. Cancellation
+drains an in-flight state write before applying terminal updates. Some admission
+operations remain synchronous; their SQLite busy wait is bounded to 100ms by
+default rather than ten seconds. Prolonged external write contention can fail
+admission, so monitor database lock errors before increasing this budget.
+
+Tune the settings in `.env.example` after comparing uncached single videos,
+carousels and cache hits separately. To roll back the performance policies, set
+staging concurrency to one and restore the prior timeout values; code rollback
+can leave the additive SQLite metrics table/columns in place. No credential
+rotation or live deployment is implied by these source changes.
+
+Uncached Instagram posts and reels received in chats use a bounded preparation
+race when two saved-session accounts are immediately available. One candidate
+asks Telegram to fetch compatible CDN media; the other downloads and normalizes
+locally. The first complete set of Telegram file IDs wins. A single coordinator
+then sends the result, while cancelled workers finish cleanup. Account leases
+and race capacity remain held until those workers stop. With one available
+account or exhausted race capacity, the usual sequential path runs.
+
+Direct candidates undergo whole-album checks before staging: known JPEG/MP4
+sizes within Telegram URL-fetch limits, valid dimensions, and H.264/yuv420p video
+with AAC audio. Silent videos, oversized files and uncertain sources use the
+local candidate. Direct metadata, authentication/session, and transport failures
+can trigger public extraction, with shared ownership preventing duplicate public
+fallbacks.
+
+Private staging is durable storage: winning media IDs remain available for reuse.
+Speculative or ambiguously cancelled uploads can leave additional messages in the
+private storage chat, as upload retries can. Cancellation cannot reliably delete
+sends whose message IDs were never received. Final user delivery has one owner;
+the race bounds and disable flag control speculative overhead. Automatic private
+storage message cleanup is not provided.
+
+Telegram upload limits and flood backoff apply to both candidates. Rejected
+cached file IDs trigger local reacquisition and one safe retry.
+
+Acquisition deadlines exclude normalization and staging, which retain their own
+budgets. Race download timing includes normalization and excludes the winning
+upload; if both candidates fail, it records the longer preparation duration.
+After workers drain,
+the winning upload is recorded as `storage_upload`; other attempted uploads use
+`race_storage_upload_direct` or `race_storage_upload_local`, preserving their
+success, failure or cancellation status without mixing speculative work into
+successful-delivery throughput. Remote URL fetch byte counts remain unknown.
+Account-health alerts from either candidate are forwarded after workers drain.
+
+`INSTAGRAM_DELIVERY_RACE_ENABLED=false` disables racing.
+`INSTAGRAM_DELIVERY_RACE_MAX_ACTIVE=2` bounds concurrent races, and
+`INSTAGRAM_NORMALIZATION_CONCURRENCY=1` limits isolated video processing across
+requests. Inline deliveries retain their existing acquisition flow. Direct URL
+winners have no local source for the audio button. These source defaults have
+not been deployed. Earlier prototype measurements are recorded in
+[the race benchmark](docs/racing-delivery-benchmark-2026-10-03.json); integrated
+measurements are [recorded separately](docs/integrated-delivery-race-2026-10-03.json)
+to avoid mixing different implementations. These historical measurements have
+[known harness limitations](docs/experiments/2026-10-03-media-race/README.md#review-correction-and-historical-evidence)
+and do not validate the corrected harness.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

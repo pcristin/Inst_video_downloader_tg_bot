@@ -1,0 +1,50 @@
+{
+  "date_london": "2026-10-03",
+  "deployment_status": "Local implementation only; production unchanged.",
+  "policy": "One immediately eligible managed saved-session account before fast/public extraction, 20 s acquisition budget, no fresh login, no second roster loop. Stories, single-account deployments without an account roster, and legacy-thread routing preserved.",
+  "live_canary": {
+    "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+    "instagrapi": "3.0.16",
+    "auth_first_enabled": true,
+    "auth_budget_s": 20.0,
+    "acquisition_and_normalization_s": 14.271,
+    "media_bytes": 4320206,
+    "metrics": {
+      "provider": "instagram",
+      "retry_count": 0,
+      "failure_class": null,
+      "instagram_fast_status": null,
+      "instagram_fast_duration_ms": null,
+      "instagram_fast_budget_exhausted": false,
+      "instagram_fallback_attempted": false,
+      "instagram_account_attempts": 1,
+      "instagram_account_retries": 0,
+      "instagram_auth_failures": 0,
+      "instagram_success_path": "authenticated_first",
+      "instagram_fallback_path": "raw_direct",
+      "provider_extraction_ms": null,
+      "provider_download_ms": null,
+      "media_normalization_ms": 3060,
+      "instagram_metadata_reused": true
+    },
+    "upload_s": 6.617,
+    "final_send_s": 0.156,
+    "total_to_send_s": 21.044,
+    "status": "delivered_to_storage_chat"
+  },
+  "limitations": [
+    "Uncached bot-side request replay against existing-image dependencies plus updated source and instagrapi 3.0.16.",
+    "Separate writable session/account/cache copies with proper relative session mount; original production state unchanged.",
+    "Both storage upload and final file-ID send used the configured storage chat, not an end-user chat.",
+    "Starts at downloader invocation; excludes polling, admission queue, status messages and client rendering.",
+    "Authenticated source 720x1280, versus 1080x1920 public source in prior tests; quality differs.",
+    "A single successful live sample is not a latency guarantee; network and Telegram-side caching vary."
+  ],
+  "validation": {
+    "regression_passed": 782,
+    "regression_skipped": 5,
+    "review": "No remaining important/critical findings after fixing transient validation quarantine.",
+    "account_failure_policy": "Transient transport and corrupt local session failures do not quarantine accounts; explicit auth rejection and rate limits retain distinct account policies.",
+    "unit_test_isolation": "Provider unit tests now default to no deployment account manager; tests must explicitly supply fake accounts."
+  }
+}

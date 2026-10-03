@@ -7,11 +7,12 @@ from telegram.error import NetworkError
 
 from src.instagram_video_bot.services import telegram_media_retry
 from src.instagram_video_bot.services.download_models import (
-    MediaItem, VideoDownloadError, VideoInfo)
+    MediaItem,
+    VideoDownloadError,
+    VideoInfo,
+)
 from src.instagram_video_bot.services.state_store import StateStore
-from src.instagram_video_bot.services.telegram_media_sender import \
-    TelegramMediaSender
-
+from src.instagram_video_bot.services.telegram_media_sender import TelegramMediaSender
 
 class _FakeBot:
     def __init__(self):
@@ -537,3 +538,38 @@ async def test_media_sender_allows_cached_album_file_ids_without_local_files(tmp
     assert len(sent_media) == 2
     assert sent_media[0].media.filename == "present.mp4"
     assert sent_media[1].media == "cached-album-file-id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 2, 11])
+async def test_first_media_hook_runs_before_persistence(tmp_path, monkeypatch, count):
+    marks = []
+    request = SimpleNamespace(
+        chat_id=1,
+        normalized_url="url",
+        original_message_id=1,
+        request_id="id",
+        mark_first_media_sent=lambda: marks.append("sent"),
+        mark_all_media_sent=lambda: marks.append("all"),
+    )
+    sender = TelegramMediaSender(SimpleNamespace())
+
+    async def persist(*args):
+        assert "sent" in marks
+        assert marks[-1] == "all"
+
+    monkeypatch.setattr(sender, "_persist_telegram_file_ids", persist)
+    items = [
+        MediaItem(
+            file_path=tmp_path / f"{i}.mp4",
+            media_type="video",
+            telegram_file_id=f"id-{i}",
+        )
+        for i in range(count)
+    ]
+    await sender.send_media(
+        _FakeContext(_FakeBot()),
+        request,
+        VideoInfo(file_path=items[0].file_path, title="title", media_items=items),
+    )
+    assert marks

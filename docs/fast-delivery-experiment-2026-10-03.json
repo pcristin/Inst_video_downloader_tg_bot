@@ -1,0 +1,40 @@
+{
+  "date_london": "2026-10-03",
+  "implementation_status": "Experiment only; application behavior unchanged.",
+  "live_result": {
+    "url": "https://www.instagram.com/reel/Dd0w3ylj8md/",
+    "experiment": "authenticated_metadata_direct_url",
+    "standalone_timeline_validation": false,
+    "metadata_s": 2.26,
+    "probe_s": 0.869,
+    "resolution": [
+      720,
+      1280
+    ],
+    "source_codecs": [
+      "h264",
+      "aac"
+    ],
+    "telegram_url_fetch_s": 0.81,
+    "final_send_s": 0.13,
+    "total_s": 4.068,
+    "bytes": 4319979,
+    "status": "delivered_to_storage_chat"
+  },
+  "method": "One eligible managed account lease with copied existing session and assigned proxy. Load saved session, authenticate by requesting target-media metadata instead of timeline preflight, probe remote H264/AAC/yuv420p metadata, send CDN URL to configured storage chat then resend returned Telegram fileID. No fresh login and no full media download by the bot. Local Telegram API still fetches bytes.",
+  "comparison": {
+    "previous_auth_first_s": 21.044,
+    "resolution_same_as_previous_auth_first": [
+      720,
+      1280
+    ]
+  },
+  "limitations": [
+    "One live sample, not a latency guarantee.",
+    "Timer excludes account admission, bot initialization, normal provider throttle and isolated-worker startup.",
+    "Telegram-side content caching and network variability can affect fetch time.",
+    "Compatibility probe checks stream metadata; no full source audio/video decode or physical-client playback verification.",
+    "Production implementation must preserve auth/rate/transport error classification, leases, limits and safe storage-first fallback on expired, protected, oversized, incompatible or rejected URLs.",
+    "No production routing or validation policy changed by this experiment."
+  ]
+}

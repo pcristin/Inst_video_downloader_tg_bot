@@ -2,19 +2,78 @@
 
 from __future__ import annotations
 
-import datetime as dtm
-from dataclasses import replace
+import asyncio
+import weakref
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..config.settings import settings
-from .download_models import MediaItem
+from .download_models import MediaItem, VideoDownloadError
+from .telegram_media_sender import TelegramMediaSender
 from .telegram_media_files import (
     effective_upload_limit_bytes,
     media_input,
     validate_media_path,
 )
-from .telegram_media_retry import (build_telegram_timeout_kwargs,
-                                   call_telegram_with_retries)
+from .telegram_media_retry import (
+    build_telegram_timeout_kwargs,
+    call_telegram_with_retries,
+)
+
+
+@dataclass
+class _UploadState:
+    semaphore: asyncio.Semaphore
+    chat_locks: dict[int, asyncio.Lock] = field(default_factory=dict)
+    chat_ready_at: dict[int, float] = field(default_factory=dict)
+    chat_waiters: dict[int, int] = field(default_factory=dict)
+
+    def defer(self, chat_id: int, seconds: float) -> None:
+        now = asyncio.get_running_loop().time()
+        self.chat_ready_at[chat_id] = max(
+            self.chat_ready_at.get(chat_id, 0), now + seconds
+        )
+
+    async def wait(self, chat_id: int) -> None:
+        self.chat_waiters[chat_id] = self.chat_waiters.get(chat_id, 0) + 1
+        try:
+            async with self.chat_locks.setdefault(chat_id, asyncio.Lock()):
+                loop = asyncio.get_running_loop()
+                while (delay := self.chat_ready_at.get(chat_id, 0) - loop.time()) > 0:
+                    await asyncio.sleep(delay)
+                if chat_id in self.chat_ready_at:
+                    if self.chat_waiters[chat_id] > 1:
+                        # Stagger queued uploads only for this flood-recovery batch.
+                        self.chat_ready_at[chat_id] = loop.time() + 1.0
+                    else:
+                        self.chat_ready_at.pop(chat_id, None)
+        finally:
+            self.chat_waiters[chat_id] -= 1
+            if not self.chat_waiters[chat_id]:
+                self.chat_waiters.pop(chat_id)
+                self.chat_locks.pop(chat_id, None)
+
+
+def _upload_state(bot: Any) -> _UploadState:
+    # The loop owns its state: bound primitives may point back to it, but no
+    # global value keeps that cycle alive after a short-lived runtime closes.
+    loop = asyncio.get_running_loop()
+    states = getattr(loop, "_telegram_media_upload_states", None)
+    if states is None:
+        states = {}
+        setattr(loop, "_telegram_media_upload_states", states)
+    key = id(bot)
+    if key not in states:
+        try:
+            owner = weakref.ref(bot, lambda _ref: states.pop(key, None))
+        except TypeError:
+            # Some lightweight clients cannot be weak-referenced.
+            owner = lambda: bot
+        states[key] = (
+            owner,
+            _UploadState(asyncio.Semaphore(settings.TELEGRAM_MEDIA_STAGE_CONCURRENCY)),
+        )
+    return states[key][1]
 
 
 class TelegramMediaStager:
@@ -27,14 +86,52 @@ class TelegramMediaStager:
         self, bot: Any, media_items: list[MediaItem], *, force: bool = False
     ) -> list[MediaItem]:
         """Return media items with durable Telegram IDs, retaining existing IDs."""
-        return [await self._stage_item(bot, item, force=force) for item in media_items]
+        state = _upload_state(bot)
 
-    async def _stage_item(self, bot: Any, media_item: MediaItem, *, force: bool) -> MediaItem:
+        async def stage(index: int, item: MediaItem) -> None:
+            if item.telegram_file_id and not force:
+                return
+            async with state.semaphore:
+                media_items[index] = await self._stage_item(bot, item, force=force)
+
+        tasks = [
+            asyncio.create_task(stage(index, item))
+            for index, item in enumerate(media_items)
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return media_items
+
+    async def _stage_item(
+        self, bot: Any, media_item: MediaItem, *, force: bool
+    ) -> MediaItem:
         if media_item.telegram_file_id and not force:
             return media_item
-        self._validate_local_media(media_item)
+        if not media_item.remote_url:
+            self._validate_local_media(media_item)
+
+        state = _upload_state(bot)
 
         async def upload_with_fresh_file(**timeout_kwargs: float):
+            await state.wait(self.storage_chat_id)
+            if media_item.remote_url:
+                if media_item.media_type == "video":
+                    return await bot.send_video(
+                        chat_id=self.storage_chat_id,
+                        video=media_item.remote_url,
+                        **self._video_kwargs(media_item),
+                        **timeout_kwargs,
+                    )
+                return await bot.send_photo(
+                    chat_id=self.storage_chat_id,
+                    photo=media_item.remote_url,
+                    **timeout_kwargs,
+                )
             with media_input(
                 media_item.file_path,
                 local_mode=settings.TELEGRAM_LOCAL_MODE,
@@ -62,11 +159,16 @@ class TelegramMediaStager:
             attempts=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_ATTEMPTS,
             backoff_seconds=settings.TELEGRAM_MEDIA_UPLOAD_RETRY_BACKOFF_SECONDS,
             timeout_kwargs=self._timeout_kwargs(),
-            context={"storage_chat_id": self.storage_chat_id, "media_type": media_item.media_type},
+            context={
+                "storage_chat_id": self.storage_chat_id,
+                "media_type": media_item.media_type,
+            },
+            on_retry_after=lambda seconds: state.defer(self.storage_chat_id, seconds),
         )
         return replace(
             media_item,
             telegram_file_id=self._extract_file_id(message, media_item.media_type),
+            remote_url=None,
         )
 
     @staticmethod
@@ -87,7 +189,9 @@ class TelegramMediaStager:
             photos = getattr(message, "photo", None)
             file_id = getattr(photos[-1], "file_id", None) if photos else None
         if not file_id:
-            raise VideoDownloadError("Telegram storage response did not contain a file ID")
+            raise VideoDownloadError(
+                "Telegram storage response did not contain a file ID"
+            )
         return str(file_id)
 
     @staticmethod
@@ -99,17 +203,4 @@ class TelegramMediaStager:
             pool_timeout=settings.TELEGRAM_MEDIA_POOL_TIMEOUT_SECONDS,
         )
 
-    @staticmethod
-    def _video_kwargs(media_item: MediaItem) -> dict[str, object]:
-        kwargs: dict[str, object] = {}
-        if media_item.width:
-            kwargs["width"] = media_item.width
-        if media_item.height:
-            kwargs["height"] = media_item.height
-        if media_item.duration is not None:
-            kwargs["duration"] = dtm.timedelta(
-                seconds=max(0, round(float(media_item.duration)))
-            )
-        if media_item.file_path.suffix.lower() in {".mp4", ".mov"}:
-            kwargs["supports_streaming"] = True
-        return kwargs
+    _video_kwargs = staticmethod(TelegramMediaSender.telegram_video_kwargs)

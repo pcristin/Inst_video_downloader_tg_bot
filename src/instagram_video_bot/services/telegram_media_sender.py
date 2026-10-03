@@ -20,10 +20,12 @@ from telegram.ext import ContextTypes
 
 from ..config.settings import settings
 from .download_models import MediaItem, VideoInfo
+from .async_state import call_state
 from .rich_text import RichText, media_caption_rich_text
 from .state_store import StateStore
 from .telegram_media_files import (
     cleanup_large_staged_files,
+    cleanup_media_files,
     effective_upload_limit_bytes,
     media_input,
     validate_media_path,
@@ -84,7 +86,9 @@ class TelegramMediaSender:
                     offer_audio=True,
                 )
             )
-            self._persist_telegram_file_ids(
+            self._mark_first_media_sent(request_context)
+            self._mark_all_media_sent(request_context)
+            await self._persist_telegram_file_ids(
                 request_context, media_items, telegram_file_ids
             )
             return
@@ -121,11 +125,27 @@ class TelegramMediaSender:
                             fallback_to_local_on_rejected_file_id,
                         )
                     )
+                self._mark_first_media_sent(request_context)
             except RejectedTelegramFileIdError as error:
                 if offset:
                     setattr(error, "telegram_user_send_ambiguous", True)
                 raise
-        self._persist_telegram_file_ids(request_context, media_items, telegram_file_ids)
+        self._mark_all_media_sent(request_context)
+        await self._persist_telegram_file_ids(
+            request_context, media_items, telegram_file_ids
+        )
+
+    @staticmethod
+    def _mark_all_media_sent(request_context: MediaRequestContext) -> None:
+        mark = getattr(request_context, "mark_all_media_sent", None)
+        if mark is not None:
+            mark()
+
+    @staticmethod
+    def _mark_first_media_sent(request_context: MediaRequestContext) -> None:
+        mark = getattr(request_context, "mark_first_media_sent", None)
+        if mark is not None:
+            mark()
 
     @staticmethod
     def validate_media_files(files: list[Path]) -> None:
@@ -430,7 +450,7 @@ class TelegramMediaSender:
             )
         )
 
-    def _persist_telegram_file_ids(
+    async def _persist_telegram_file_ids(
         self,
         request_context: MediaRequestContext,
         media_items: list[MediaItem],
@@ -438,11 +458,17 @@ class TelegramMediaSender:
     ) -> None:
         if not telegram_file_ids or not any(telegram_file_ids):
             return
-        self.state_store.update_cached_telegram_file_ids(
-            request_context.chat_id,
-            request_context.normalized_url,
-            telegram_file_ids,
-        )
+        try:
+            await call_state(
+                self.state_store.update_cached_telegram_file_ids,
+                request_context.chat_id,
+                request_context.normalized_url,
+                telegram_file_ids,
+            )
+        except Exception:
+            # The user send is acknowledged. Cache failure must not trigger replay.
+            logger.exception("Could not cache acknowledged Telegram file IDs")
+            return
         staged_items = [
             MediaItem(
                 file_path=item.file_path,
@@ -477,12 +503,8 @@ class TelegramMediaSender:
 
     @staticmethod
     def cleanup_files(files: list[Path]) -> None:
-        """Delete downloaded files safely."""
-        for file_path in files:
-            try:
-                file_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning("Failed to clean up file %s: %s", file_path, exc)
+        """Delete downloaded files and their empty owned staging directories."""
+        cleanup_media_files(files)
 
     @classmethod
     def build_caption_text(cls, title: str) -> str:

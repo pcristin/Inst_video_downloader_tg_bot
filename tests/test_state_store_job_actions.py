@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from src.instagram_video_bot.services.state_store import StateStore
-
+from src.instagram_video_bot.config.settings import settings
 
 def test_state_store_allows_health_reader_during_writer_transaction(tmp_path):
     db_path = tmp_path / "state.db"
@@ -29,11 +29,14 @@ def test_state_store_allows_health_reader_during_writer_transaction(tmp_path):
         writer.close()
 
 
-def test_state_store_writer_waits_for_lock_then_commits(tmp_path):
+def test_state_store_writer_waits_for_configured_lock_budget_then_commits(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "SQLITE_BUSY_TIMEOUT_SECONDS", 1.0)
     db_path = tmp_path / "state.db"
     store = StateStore(db_path)
     store.create_job("job-1", 77, "https://example.com/video", "instagram", "queued")
-    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1_000
     writer = sqlite3.connect(db_path)
     started = threading.Event()
 

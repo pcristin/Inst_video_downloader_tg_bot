@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import os
 import subprocess
 import sys
@@ -15,8 +17,8 @@ from typing import Any
 from ..config.settings import settings
 from .download_models import AuthenticationError, DownloadError, MediaItem, VideoInfo
 from .instagram_fast_extractor import InstagramFastExtractorError
-from .subprocess_lifecycle import terminate_process_group, wait_for_process
-
+from .subprocess_lifecycle import terminate_process_group
+from .instagram_auth_pool import load_configured_instagram_auth_pool
 
 def encode_result(result: VideoInfo | None) -> dict[str, Any] | None:
     if result is None:
@@ -71,6 +73,10 @@ async def run_isolated_instagram_operation(
         prefix="instagram-worker-", suffix=".json", dir=settings.TEMP_DIR, delete=False
     ) as result_file:
         result_path = Path(result_file.name)
+    phase_path = result_path.with_suffix(".phase")
+    pool = load_configured_instagram_auth_pool()
+    if payload.get("action") == "fast" and pool.health()["configured"]:
+        payload = {**payload, "auth_cooldowns": pool.export_cooldowns()}
     process: subprocess.Popen[bytes] | None = None
     try:
         process = subprocess.Popen(
@@ -79,20 +85,37 @@ async def run_isolated_instagram_operation(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            env={**os.environ, "IG_WORKER_RESULT_PATH": str(result_path)},
+            env={
+                **os.environ,
+                "IG_WORKER_RESULT_PATH": str(result_path),
+                "IG_WORKER_PHASE_PATH": str(phase_path),
+            },
         )
         assert process.stdin is not None
         process.stdin.write(
             json.dumps({**payload, "_result_file": str(result_path)}).encode()
         )
         process.stdin.close()
-        await wait_for_process(
-            process,
-            timeout_seconds=timeout_seconds,
-            timeout_error=InstagramProviderTimeoutError(
-                f"Instagram provider timed out after {timeout_seconds:g} seconds"
-            ),
+        started = time.monotonic()
+        metadata_deadline = started + max(
+            0.01, settings.IG_PUBLIC_METADATA_TIMEOUT_SECONDS
         )
+        operation_deadline = started + timeout_seconds
+        metadata_pending = payload.get("action") == "public"
+        while process.poll() is None:
+            now = time.monotonic()
+            if metadata_pending and phase_path.exists():
+                metadata_pending = False
+                operation_deadline = now + timeout_seconds
+            if metadata_pending and now >= metadata_deadline:
+                raise InstagramProviderTimeoutError(
+                    "Instagram public metadata timed out"
+                )
+            if now >= operation_deadline:
+                raise InstagramProviderTimeoutError(
+                    f"Instagram provider timed out after {timeout_seconds:g} seconds"
+                )
+            await asyncio.sleep(0.02)
         if process.returncode != 0:
             raise DownloadError("Instagram worker exited unexpectedly")
         try:
@@ -102,9 +125,13 @@ async def run_isolated_instagram_operation(
                 "Instagram worker returned an invalid result"
             ) from error
     finally:
-        if process is not None:
-            await terminate_process_group(process)
-        result_path.unlink(missing_ok=True)
+        try:
+            if process is not None:
+                await terminate_process_group(process)
+        finally:
+            result_path.unlink(missing_ok=True)
+            phase_path.unlink(missing_ok=True)
+    pool.import_cooldowns(response.get("auth_cooldowns", {}))
     if response.get("ok"):
         return decode_result(response.get("result"))
     raise decode_error(response)
@@ -113,6 +140,9 @@ async def run_isolated_instagram_operation(
 def execute_payload(payload: dict[str, Any]) -> VideoInfo | None:
     from .video_downloader import VideoDownloader
 
+    load_configured_instagram_auth_pool().import_cooldowns(
+        payload.get("auth_cooldowns", {})
+    )
     downloader = VideoDownloader()
     action = payload["action"]
     url = str(payload["url"])
@@ -123,12 +153,18 @@ def execute_payload(payload: dict[str, Any]) -> VideoInfo | None:
         return downloader.instagram_adapter.download_with_public_ytdlp(url, output_dir)
     if action == "single":
         return downloader._download_with_single_account_sync(url, output_dir)
-    if action == "leased":
+    if action == "direct_sources":
+        from .instagram_direct_sources import extract_direct_sources
+        account_data = dict(payload["account"])
+        account_data["session_file"] = Path(account_data["session_file"])
+        return extract_direct_sources(SimpleNamespace(**account_data), url, output_dir)
+    if action in {"leased", "saved_session"}:
         account_data = dict(payload["account"])
         if account_data.get("session_file"):
             account_data["session_file"] = Path(account_data["session_file"])
         return downloader._download_with_leased_account_sync(
-            SimpleNamespace(**account_data), url, output_dir
+            SimpleNamespace(**account_data), url, output_dir,
+            **({"saved_session_only": True} if action == "saved_session" else {}),
         )
     raise ValueError("Unsupported Instagram worker action")
 
@@ -154,6 +190,9 @@ def main() -> None:
                 endpoint_timings=error.endpoint_timings,
                 budget_exhausted=error.budget_exhausted,
             )
+    response["auth_cooldowns"] = (
+        load_configured_instagram_auth_pool().export_cooldowns()
+    )
     result_file = os.environ.get("IG_WORKER_RESULT_PATH") or payload.get("_result_file")
     if not result_file:
         raise RuntimeError("Missing Instagram worker result path")
