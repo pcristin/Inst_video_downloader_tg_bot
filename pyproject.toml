@@ -19,7 +19,7 @@ dependencies = [
   "requests==2.34.2",
   "aiofiles==25.1.0",
   "tabulate==0.10.0",
-  "pillow==12.3.0",
+  "pillow==13.0.0",
   "certifi==2026.10.19",
 ]
 
@@ -36,6 +36,9 @@ dev = [
 [tool.uv]
 environments = ["sys_platform != 'android'"]
 exclude-newer-package = { instagrapi = false, pydantic = false, pydantic-core = false }
+
+[tool.uv.sources]
+instagrapi = { path = "vendor/instagrapi-3.0.16-1pillow13-py3-none-any.whl" }
 
 [tool.setuptools.package-dir]
 "" = "src"

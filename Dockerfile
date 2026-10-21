@@ -9,6 +9,7 @@ ENV UV_LINK_MODE=copy \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock .python-version ./
+COPY vendor/instagrapi-3.0.16-1pillow13-py3-none-any.whl ./vendor/
 RUN uv sync --frozen --no-dev --no-install-project
 
 
