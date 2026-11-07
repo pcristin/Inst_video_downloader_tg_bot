@@ -1,5 +1,9 @@
 services:
   telegram-bot-api:
+    # Keep MPTCP disabled in this network namespace as part of the
+    # CVE-2026-98432 mitigation; this does not replace a patched host kernel.
+    sysctls:
+      net.mptcp.enabled: "0"
     build:
       context: .
       dockerfile: Dockerfile.telegram-bot-api
@@ -36,6 +40,9 @@ services:
       - api-egress
 
   instagram-video-bot:
+    # Apply the same MPTCP mitigation in the bot's separate network namespace.
+    sysctls:
+      net.mptcp.enabled: "0"
     depends_on:
       telegram-bot-api:
         condition: service_healthy
